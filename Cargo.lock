@@ -3144,6 +3144,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-core-location"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca347214e24bc973fc025fd0d36ebb179ff30536ed1f80252706db19ee452009"
+dependencies = [
+ "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "objc2-core-text"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3205,6 +3215,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96c1358452b371bf9f104e21ec536d37a650eb10f7ee379fff67d2e08d537f1f"
 dependencies = [
  "bitflags 2.10.0",
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-foundation",
+]
+
+[[package]]
+name = "objc2-ui-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d87d638e33c06f577498cbcc50491496a3ed4246998a7fbba7ccb98b1e7eab22"
+dependencies = [
+ "bitflags 2.10.0",
+ "block2",
+ "objc2",
+ "objc2-cloud-kit",
+ "objc2-core-data",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-image",
+ "objc2-core-location",
+ "objc2-core-text",
+ "objc2-foundation",
+ "objc2-quartz-core",
+ "objc2-user-notifications",
+]
+
+[[package]]
+name = "objc2-user-notifications"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
+dependencies = [
  "objc2",
  "objc2-foundation",
 ]
@@ -3398,7 +3440,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perry"
-version = "0.2.136"
+version = "0.2.138"
 dependencies = [
  "anyhow",
  "atty",
@@ -3422,7 +3464,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen"
-version = "0.2.136"
+version = "0.2.138"
 dependencies = [
  "anyhow",
  "cranelift",
@@ -3440,7 +3482,7 @@ dependencies = [
 
 [[package]]
 name = "perry-diagnostics"
-version = "0.2.136"
+version = "0.2.138"
 dependencies = [
  "serde",
  "serde_json",
@@ -3448,7 +3490,7 @@ dependencies = [
 
 [[package]]
 name = "perry-hir"
-version = "0.2.136"
+version = "0.2.138"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -3460,7 +3502,7 @@ dependencies = [
 
 [[package]]
 name = "perry-jsruntime"
-version = "0.2.136"
+version = "0.2.138"
 dependencies = [
  "anyhow",
  "deno_core",
@@ -3478,7 +3520,7 @@ dependencies = [
 
 [[package]]
 name = "perry-parser"
-version = "0.2.136"
+version = "0.2.138"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -3490,7 +3532,7 @@ dependencies = [
 
 [[package]]
 name = "perry-runtime"
-version = "0.2.136"
+version = "0.2.138"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3509,7 +3551,7 @@ dependencies = [
 
 [[package]]
 name = "perry-stdlib"
-version = "0.2.136"
+version = "0.2.138"
 dependencies = [
  "aes",
  "anyhow",
@@ -3564,7 +3606,7 @@ dependencies = [
 
 [[package]]
 name = "perry-transform"
-version = "0.2.136"
+version = "0.2.138"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -3574,7 +3616,7 @@ dependencies = [
 
 [[package]]
 name = "perry-types"
-version = "0.2.136"
+version = "0.2.138"
 dependencies = [
  "anyhow",
  "thiserror 1.0.69",
@@ -3582,14 +3624,27 @@ dependencies = [
 
 [[package]]
 name = "perry-ui"
-version = "0.2.136"
+version = "0.2.138"
 dependencies = [
  "perry-runtime",
 ]
 
 [[package]]
+name = "perry-ui-ios"
+version = "0.2.138"
+dependencies = [
+ "libc",
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "objc2-ui-kit",
+ "perry-runtime",
+ "perry-ui",
+]
+
+[[package]]
 name = "perry-ui-macos"
-version = "0.2.136"
+version = "0.2.138"
 dependencies = [
  "libc",
  "objc2",

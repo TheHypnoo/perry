@@ -13,6 +13,7 @@ members = [
     "crates/perry-diagnostics",
     "crates/perry-ui",
     "crates/perry-ui-macos",
+    "crates/perry-ui-ios",
 ]
 
 # Aggressive release optimizations for small, fast binaries
@@ -34,7 +35,7 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.2.137"
+version = "0.2.138"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/skelpo/perry"

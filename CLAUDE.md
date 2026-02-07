@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.137
+**Current Version:** 0.2.138
 
 ## Workflow Requirements
 
@@ -378,6 +378,23 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.138
+- Eliminate js_is_truthy FFI calls from Stmt::If, for-loop, and while-loop condition paths
+  - New `compile_condition_to_bool` helper: compiles condition expressions directly to I8 bool
+    - `Compare` → `fcmp` (no FFI)
+    - `Logical And/Or` → recursive `band`/`bor` of sub-conditions
+    - `Unary Not` → recursive compile + `bxor` inversion
+    - General expressions → `inline_truthiness_check` (pure Cranelift IR, no FFI)
+  - `inline_truthiness_check`: 7-instruction inline sequence checking NaN-box tags + ±0.0
+    - `(val - TAG_UNDEFINED) <=u 2` covers undefined/null/false
+    - `(val << 1) == 0` covers ±0.0
+  - Replaced all `js_is_truthy` FFI calls in:
+    - `Stmt::If` handler (both regular and async paths)
+    - For-loop condition fallbacks (both BCE and non-BCE paths)
+    - While-loop non-optimized path and counter-optimized fallbacks
+  - Significant code deduplication: removed ~150 lines of repeated Compare→fcmp match arms
+  - All 16 benchmarks pass with correct results
 
 ### v0.2.137
 - Fix arena allocator crash on large allocations (>8MB)
