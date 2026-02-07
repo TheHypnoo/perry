@@ -1,14 +1,18 @@
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass};
-use objc2_app_kit::{NSSwitch, NSTextField, NSStackView, NSView, NSUserInterfaceLayoutOrientation, NSLayoutAttribute};
-use objc2_foundation::{NSObject, NSString, MainThreadMarker};
+use objc2_app_kit::{
+    NSLayoutAttribute, NSStackView, NSSwitch, NSTextField, NSUserInterfaceLayoutOrientation, NSView,
+};
+use objc2_foundation::{MainThreadMarker, NSObject, NSString};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 thread_local! {
     /// Map from target object address to closure pointer (f64 NaN-boxed)
     static TOGGLE_CALLBACKS: RefCell<HashMap<usize, f64>> = RefCell::new(HashMap::new());
+    /// Map from toggle widget handle -> NSSwitch view for two-way binding
+    static TOGGLE_SWITCHES: RefCell<HashMap<i64, Retained<NSView>>> = RefCell::new(HashMap::new());
 }
 
 // TAG_TRUE and TAG_FALSE from perry-runtime NaN-boxing
@@ -76,6 +80,20 @@ fn str_from_header(ptr: *const u8) -> &'static str {
     }
 }
 
+/// Set the on/off state of an existing toggle widget.
+/// `on` is 0 for off, non-zero for on.
+pub fn set_state(handle: i64, on: i64) {
+    TOGGLE_SWITCHES.with(|switches| {
+        if let Some(switch_view) = switches.borrow().get(&handle) {
+            unsafe {
+                let switch: &NSSwitch = &*(Retained::as_ptr(switch_view) as *const NSSwitch);
+                let state: i64 = if on != 0 { 1 } else { 0 };
+                let _: () = msg_send![switch, setState: state];
+            }
+        }
+    });
+}
+
 /// Create an NSSwitch with a label and onChange callback.
 /// Returns a widget handle for an HStack containing the label and switch.
 pub fn create(label_ptr: *const u8, on_change: f64) -> i64 {
@@ -119,6 +137,13 @@ pub fn create(label_ptr: *const u8, on_change: f64) -> i64 {
         stack.addArrangedSubview(&switch_view);
 
         let view: Retained<NSView> = Retained::cast_unchecked(stack);
-        super::register_widget(view)
+        let handle = super::register_widget(view);
+
+        // Store the NSSwitch reference for two-way binding (set_state)
+        TOGGLE_SWITCHES.with(|switches| {
+            switches.borrow_mut().insert(handle, switch_view.clone());
+        });
+
+        handle
     }
 }

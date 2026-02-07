@@ -54,6 +54,16 @@ impl PerrySliderTarget {
     }
 }
 
+/// Set the value of an existing slider widget.
+pub fn set_value(handle: i64, value: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let slider: &NSSlider = &*(Retained::as_ptr(&view) as *const NSSlider);
+            slider.setDoubleValue(value);
+        }
+    }
+}
+
 /// Create a horizontal NSSlider with min, max, initial values and onChange callback.
 /// `on_change` is a NaN-boxed closure pointer, called with the slider's f64 value.
 pub fn create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {

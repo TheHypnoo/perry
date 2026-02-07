@@ -2999,6 +2999,20 @@ impl Compiler {
             self.extern_funcs.insert("js_array_alloc".to_string(), func_id);
         }
 
+        // js_array_alloc_with_length(capacity: u32) -> *mut ArrayHeader
+        // Like js_array_alloc but sets length = capacity (for `new Array(n)`)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I32)); // capacity
+            sig.returns.push(AbiParam::new(types::I64)); // array pointer
+            let func_id = self.module.declare_function(
+                "js_array_alloc_with_length",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_array_alloc_with_length".to_string(), func_id);
+        }
+
         // js_array_push_f64(arr: *mut ArrayHeader, value: f64) -> *mut ArrayHeader
         {
             let mut sig = self.module.make_signature();
@@ -24586,19 +24600,21 @@ fn compile_expr(
 
             // new Array() or new Array(length) or new Array(...elements)
             if class_name == "Array" {
-                let alloc_func = extern_funcs.get("js_array_alloc")
-                    .ok_or_else(|| anyhow!("js_array_alloc not declared"))?;
-                let func_ref = module.declare_func_in_func(*alloc_func, builder.func);
-
                 if args.is_empty() {
                     // new Array() - empty array with default capacity
+                    let alloc_func = extern_funcs.get("js_array_alloc")
+                        .ok_or_else(|| anyhow!("js_array_alloc not declared"))?;
+                    let func_ref = module.declare_func_in_func(*alloc_func, builder.func);
                     let zero_cap = builder.ins().iconst(types::I32, 0);
                     let call = builder.ins().call(func_ref, &[zero_cap]);
                     let arr_ptr = builder.inst_results(call)[0];
                     return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), arr_ptr));
                 } else if args.len() == 1 {
-                    // new Array(length) - create array with specified length
-                    // Check if the argument is a number literal
+                    // new Array(length) - create array with length pre-set
+                    // Uses js_array_alloc_with_length so arr[i] = val hits in-bounds fast path
+                    let alloc_func = extern_funcs.get("js_array_alloc_with_length")
+                        .ok_or_else(|| anyhow!("js_array_alloc_with_length not declared"))?;
+                    let func_ref = module.declare_func_in_func(*alloc_func, builder.func);
                     match &args[0] {
                         Expr::Number(n) => {
                             let cap = builder.ins().iconst(types::I32, *n as i64);
@@ -24607,7 +24623,6 @@ fn compile_expr(
                             return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), arr_ptr));
                         }
                         _ => {
-                            // Compile the argument as an expression
                             let len_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
                             let len_f64 = ensure_f64(builder, len_val);
                             let len_i32 = builder.ins().fcvt_to_sint(types::I32, len_f64);
@@ -27376,24 +27391,70 @@ fn compile_expr(
                                 let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
 
                                 for elem in elements {
+                                    // Check for conditional rendering: state.value ? WidgetA : WidgetB
+                                    if let Expr::Conditional { condition, then_expr, else_expr } = elem {
+                                        if let Some(state_obj_expr) = detect_state_condition(condition) {
+                                            // Compile both branches as widgets
+                                            let then_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, then_expr, this_ctx)?;
+                                            let then_f64 = ensure_f64(builder, then_val);
+                                            let then_ptr_call = builder.ins().call(get_ptr_ref, &[then_f64]);
+                                            let then_handle = builder.inst_results(then_ptr_call)[0];
+                                            builder.ins().call(add_child_ref, &[container_handle, then_handle]);
+
+                                            let else_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, else_expr, this_ctx)?;
+                                            let else_f64 = ensure_f64(builder, else_val);
+                                            let else_ptr_call = builder.ins().call(get_ptr_ref, &[else_f64]);
+                                            let else_handle = builder.inst_results(else_ptr_call)[0];
+                                            builder.ins().call(add_child_ref, &[container_handle, else_handle]);
+
+                                            // Get state handle and bind visibility
+                                            let state_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, state_obj_expr, this_ctx)?;
+                                            let state_f64 = ensure_f64(builder, state_val);
+                                            let state_ptr_call = builder.ins().call(get_ptr_ref, &[state_f64]);
+                                            let state_handle = builder.inst_results(state_ptr_call)[0];
+
+                                            let bind_vis_func = extern_funcs.get("perry_ui_state_bind_visibility")
+                                                .ok_or_else(|| anyhow!("perry_ui_state_bind_visibility not declared"))?;
+                                            let bind_vis_ref = module.declare_func_in_func(*bind_vis_func, builder.func);
+                                            builder.ins().call(bind_vis_ref, &[state_handle, then_handle, else_handle]);
+                                            continue;
+                                        }
+                                    }
+
+                                    // Check for logical AND: state.value && Widget
+                                    if let Expr::Logical { op: LogicalOp::And, left, right } = elem {
+                                        if let Some(state_obj_expr) = detect_state_condition(left) {
+                                            let child_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
+                                            let child_f64 = ensure_f64(builder, child_val);
+                                            let child_ptr_call = builder.ins().call(get_ptr_ref, &[child_f64]);
+                                            let child_handle = builder.inst_results(child_ptr_call)[0];
+                                            builder.ins().call(add_child_ref, &[container_handle, child_handle]);
+
+                                            let state_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, state_obj_expr, this_ctx)?;
+                                            let state_f64 = ensure_f64(builder, state_val);
+                                            let state_ptr_call = builder.ins().call(get_ptr_ref, &[state_f64]);
+                                            let state_handle = builder.inst_results(state_ptr_call)[0];
+
+                                            let zero_handle = builder.ins().iconst(types::I64, 0);
+                                            let bind_vis_func = extern_funcs.get("perry_ui_state_bind_visibility")
+                                                .ok_or_else(|| anyhow!("perry_ui_state_bind_visibility not declared"))?;
+                                            let bind_vis_ref = module.declare_func_in_func(*bind_vis_func, builder.func);
+                                            builder.ins().call(bind_vis_ref, &[state_handle, child_handle, zero_handle]);
+                                            continue;
+                                        }
+                                    }
+
                                     // Detect Text(prefix + State.value) pattern BEFORE compiling
-                                    // so we can emit a binding call after the widget is created
                                     let binding_info = detect_text_state_binding(elem);
 
                                     let child_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, elem, this_ctx)?;
-                                    // Child widgets return NaN-boxed POINTER_TAG handles (from generic result path)
-                                    // or raw bitcast handles (from Button/VStack special paths).
-                                    // js_nanbox_get_pointer handles both: extracts pointer from POINTER_TAG,
-                                    // or returns raw bits for non-tagged values.
                                     let child_f64 = ensure_f64(builder, child_val);
                                     let ptr_call = builder.ins().call(get_ptr_ref, &[child_f64]);
                                     let child_handle = builder.inst_results(ptr_call)[0];
                                     builder.ins().call(add_child_ref, &[container_handle, child_handle]);
 
                                     // If Text is bound to State.value, register the binding
-                                    // so the text auto-updates when state changes
                                     if let Some((prefix, suffix, state_obj_expr)) = binding_info {
-                                        // Compile the state object expression to get state handle
                                         let state_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, state_obj_expr, this_ctx)?;
                                         let state_f64 = ensure_f64(builder, state_val);
                                         let state_ptr_call = builder.ins().call(get_ptr_ref, &[state_f64]);
@@ -27403,13 +27464,10 @@ fn compile_expr(
                                             .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
                                         let str_from_bytes_ref = module.declare_func_in_func(*str_from_bytes_func, builder.func);
 
-                                        // Create prefix as StringHeader via js_string_from_bytes
                                         let prefix_bytes = prefix.as_bytes();
                                         let prefix_data_id = module.declare_data(
                                             &format!("__ui_bind_prefix_{}", next_js_data_id()),
-                                            Linkage::Local,
-                                            false,
-                                            false,
+                                            Linkage::Local, false, false,
                                         )?;
                                         let mut data_desc = cranelift_module::DataDescription::new();
                                         data_desc.define(prefix_bytes.to_vec().into_boxed_slice());
@@ -27420,13 +27478,10 @@ fn compile_expr(
                                         let str_call = builder.ins().call(str_from_bytes_ref, &[prefix_raw_ptr, prefix_len]);
                                         let prefix_ptr = builder.inst_results(str_call)[0];
 
-                                        // Create suffix as StringHeader via js_string_from_bytes
                                         let suffix_bytes = suffix.as_bytes();
                                         let suffix_data_id = module.declare_data(
                                             &format!("__ui_bind_suffix_{}", next_js_data_id()),
-                                            Linkage::Local,
-                                            false,
-                                            false,
+                                            Linkage::Local, false, false,
                                         )?;
                                         let mut suffix_data_desc = cranelift_module::DataDescription::new();
                                         suffix_data_desc.define(suffix_bytes.to_vec().into_boxed_slice());
@@ -27437,7 +27492,6 @@ fn compile_expr(
                                         let suffix_str_call = builder.ins().call(str_from_bytes_ref, &[suffix_raw_ptr, suffix_len]);
                                         let suffix_ptr = builder.inst_results(suffix_str_call)[0];
 
-                                        // Call perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr, suffix_ptr)
                                         let bind_func = extern_funcs.get("perry_ui_state_bind_text_numeric")
                                             .ok_or_else(|| anyhow!("perry_ui_state_bind_text_numeric not declared"))?;
                                         let bind_ref = module.declare_func_in_func(*bind_func, builder.func);
@@ -27669,11 +27723,31 @@ fn compile_expr(
                         let slider_ref = module.declare_func_in_func(*slider_func, builder.func);
                         let slider_call = builder.ins().call(slider_ref, &[min_f64, max_f64, initial_f64, on_change_f64]);
                         let slider_handle = builder.inst_results(slider_call)[0];
+
+                        // Two-way binding: if initial value arg is state.value, bind slider to state
+                        if args.len() > 2 {
+                            if let Expr::NativeMethodCall { module: m, method: meth, object: Some(state_obj), .. } = &args[2] {
+                                if m == "perry/ui" && meth == "value" {
+                                    let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                        .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                    let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                    let state_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, state_obj.as_ref(), this_ctx)?;
+                                    let state_f64 = ensure_f64(builder, state_val);
+                                    let state_ptr_call = builder.ins().call(get_ptr_ref, &[state_f64]);
+                                    let state_handle = builder.inst_results(state_ptr_call)[0];
+
+                                    let bind_func = extern_funcs.get("perry_ui_state_bind_slider")
+                                        .ok_or_else(|| anyhow!("perry_ui_state_bind_slider not declared"))?;
+                                    let bind_ref = module.declare_func_in_func(*bind_func, builder.func);
+                                    builder.ins().call(bind_ref, &[state_handle, slider_handle]);
+                                }
+                            }
+                        }
+
                         return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), slider_handle));
                     }
                     "Text" => {
                         // Text(string_expr) — may contain State.value binding
-                        // Compile arg, create text widget, check for binding
                         let text_i64 = if !arg_vals.is_empty() {
                             let text_f64 = ensure_f64(builder, arg_vals[0]);
                             let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
@@ -27693,59 +27767,161 @@ fn compile_expr(
 
                         // Check for State.value binding in the original args
                         if !args.is_empty() {
-                            if let Some((prefix, suffix, state_obj_expr)) = detect_state_in_text_arg(&args[0]) {
-                                // Get state handle
-                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
-                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
-                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
-                                let state_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, state_obj_expr, this_ctx)?;
-                                let state_f64 = ensure_f64(builder, state_val);
-                                let state_ptr_call = builder.ins().call(get_ptr_ref, &[state_f64]);
-                                let state_handle = builder.inst_results(state_ptr_call)[0];
+                            let parts = detect_text_parts(&args[0]);
+                            if let Some(ref parts) = parts {
+                                if is_multi_state_binding(parts) {
+                                    // Multi-state template binding
+                                    let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                        .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                    let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                    let str_from_bytes_func = extern_funcs.get("js_string_from_bytes")
+                                        .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
+                                    let str_from_bytes_ref = module.declare_func_in_func(*str_from_bytes_func, builder.func);
 
-                                let str_from_bytes_func = extern_funcs.get("js_string_from_bytes")
-                                    .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
-                                let str_from_bytes_ref = module.declare_func_in_func(*str_from_bytes_func, builder.func);
+                                    let num_parts = parts.len();
+                                    // Allocate stack slots for types[] (i32 array) and values[] (i64 array)
+                                    let types_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                                        StackSlotKind::ExplicitSlot, (num_parts * 4) as u32, 0,
+                                    ));
+                                    let values_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                                        StackSlotKind::ExplicitSlot, (num_parts * 8) as u32, 0,
+                                    ));
 
-                                // Create prefix StringHeader
-                                let prefix_bytes = prefix.as_bytes();
-                                let prefix_data_id = module.declare_data(
-                                    &format!("__ui_bind_prefix_{}", next_js_data_id()),
-                                    Linkage::Local, false, false,
-                                )?;
-                                let mut prefix_desc = cranelift_module::DataDescription::new();
-                                prefix_desc.define(prefix_bytes.to_vec().into_boxed_slice());
-                                module.define_data(prefix_data_id, &prefix_desc)?;
-                                let prefix_gv = module.declare_data_in_func(prefix_data_id, builder.func);
-                                let prefix_raw_ptr = builder.ins().global_value(types::I64, prefix_gv);
-                                let prefix_len = builder.ins().iconst(types::I32, prefix_bytes.len() as i64);
-                                let prefix_call = builder.ins().call(str_from_bytes_ref, &[prefix_raw_ptr, prefix_len]);
-                                let prefix_ptr = builder.inst_results(prefix_call)[0];
+                                    for (idx, part) in parts.iter().enumerate() {
+                                        match part {
+                                            DetectedPart::Literal(s) => {
+                                                // type = 0 (literal)
+                                                let type_val = builder.ins().iconst(types::I32, 0);
+                                                builder.ins().stack_store(type_val, types_slot, (idx * 4) as i32);
+                                                // Create string via js_string_from_bytes
+                                                let bytes = s.as_bytes();
+                                                let data_id = module.declare_data(
+                                                    &format!("__ui_tmpl_lit_{}", next_js_data_id()),
+                                                    Linkage::Local, false, false,
+                                                )?;
+                                                let mut data_desc = cranelift_module::DataDescription::new();
+                                                data_desc.define(bytes.to_vec().into_boxed_slice());
+                                                module.define_data(data_id, &data_desc)?;
+                                                let gv = module.declare_data_in_func(data_id, builder.func);
+                                                let raw_ptr = builder.ins().global_value(types::I64, gv);
+                                                let len_val = builder.ins().iconst(types::I32, bytes.len() as i64);
+                                                let str_call = builder.ins().call(str_from_bytes_ref, &[raw_ptr, len_val]);
+                                                let str_ptr = builder.inst_results(str_call)[0];
+                                                builder.ins().stack_store(str_ptr, values_slot, (idx * 8) as i32);
+                                            }
+                                            DetectedPart::StateValue(state_obj_expr) => {
+                                                // type = 1 (state ref)
+                                                let type_val = builder.ins().iconst(types::I32, 1);
+                                                builder.ins().stack_store(type_val, types_slot, (idx * 4) as i32);
+                                                // Compile state obj, extract handle
+                                                let state_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, state_obj_expr, this_ctx)?;
+                                                let state_f64 = ensure_f64(builder, state_val);
+                                                let state_ptr_call = builder.ins().call(get_ptr_ref, &[state_f64]);
+                                                let state_handle = builder.inst_results(state_ptr_call)[0];
+                                                builder.ins().stack_store(state_handle, values_slot, (idx * 8) as i32);
+                                            }
+                                            DetectedPart::ComplexExpr => {}
+                                        }
+                                    }
 
-                                // Create suffix StringHeader
-                                let suffix_bytes = suffix.as_bytes();
-                                let suffix_data_id = module.declare_data(
-                                    &format!("__ui_bind_suffix_{}", next_js_data_id()),
-                                    Linkage::Local, false, false,
-                                )?;
-                                let mut suffix_desc = cranelift_module::DataDescription::new();
-                                suffix_desc.define(suffix_bytes.to_vec().into_boxed_slice());
-                                module.define_data(suffix_data_id, &suffix_desc)?;
-                                let suffix_gv = module.declare_data_in_func(suffix_data_id, builder.func);
-                                let suffix_raw_ptr = builder.ins().global_value(types::I64, suffix_gv);
-                                let suffix_len = builder.ins().iconst(types::I32, suffix_bytes.len() as i64);
-                                let suffix_call = builder.ins().call(str_from_bytes_ref, &[suffix_raw_ptr, suffix_len]);
-                                let suffix_ptr = builder.inst_results(suffix_call)[0];
+                                    let types_ptr = builder.ins().stack_addr(types::I64, types_slot, 0);
+                                    let values_ptr = builder.ins().stack_addr(types::I64, values_slot, 0);
+                                    let num_parts_val = builder.ins().iconst(types::I32, num_parts as i64);
 
-                                // Call perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr, suffix_ptr)
-                                let bind_func = extern_funcs.get("perry_ui_state_bind_text_numeric")
-                                    .ok_or_else(|| anyhow!("perry_ui_state_bind_text_numeric not declared"))?;
-                                let bind_ref = module.declare_func_in_func(*bind_func, builder.func);
-                                builder.ins().call(bind_ref, &[state_handle, text_handle, prefix_ptr, suffix_ptr]);
+                                    let tmpl_func = extern_funcs.get("perry_ui_state_bind_text_template")
+                                        .ok_or_else(|| anyhow!("perry_ui_state_bind_text_template not declared"))?;
+                                    let tmpl_ref = module.declare_func_in_func(*tmpl_func, builder.func);
+                                    builder.ins().call(tmpl_ref, &[text_handle, num_parts_val, types_ptr, values_ptr]);
+                                } else {
+                                    // Single-state binding (existing prefix/suffix approach)
+                                    if let Some((prefix, suffix, state_obj_expr)) = detect_state_in_text_arg(&args[0]) {
+                                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                        let state_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, state_obj_expr, this_ctx)?;
+                                        let state_f64 = ensure_f64(builder, state_val);
+                                        let state_ptr_call = builder.ins().call(get_ptr_ref, &[state_f64]);
+                                        let state_handle = builder.inst_results(state_ptr_call)[0];
+
+                                        let str_from_bytes_func = extern_funcs.get("js_string_from_bytes")
+                                            .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
+                                        let str_from_bytes_ref = module.declare_func_in_func(*str_from_bytes_func, builder.func);
+
+                                        let prefix_bytes = prefix.as_bytes();
+                                        let prefix_data_id = module.declare_data(
+                                            &format!("__ui_bind_prefix_{}", next_js_data_id()),
+                                            Linkage::Local, false, false,
+                                        )?;
+                                        let mut prefix_desc = cranelift_module::DataDescription::new();
+                                        prefix_desc.define(prefix_bytes.to_vec().into_boxed_slice());
+                                        module.define_data(prefix_data_id, &prefix_desc)?;
+                                        let prefix_gv = module.declare_data_in_func(prefix_data_id, builder.func);
+                                        let prefix_raw_ptr = builder.ins().global_value(types::I64, prefix_gv);
+                                        let prefix_len = builder.ins().iconst(types::I32, prefix_bytes.len() as i64);
+                                        let prefix_call = builder.ins().call(str_from_bytes_ref, &[prefix_raw_ptr, prefix_len]);
+                                        let prefix_ptr = builder.inst_results(prefix_call)[0];
+
+                                        let suffix_bytes = suffix.as_bytes();
+                                        let suffix_data_id = module.declare_data(
+                                            &format!("__ui_bind_suffix_{}", next_js_data_id()),
+                                            Linkage::Local, false, false,
+                                        )?;
+                                        let mut suffix_desc = cranelift_module::DataDescription::new();
+                                        suffix_desc.define(suffix_bytes.to_vec().into_boxed_slice());
+                                        module.define_data(suffix_data_id, &suffix_desc)?;
+                                        let suffix_gv = module.declare_data_in_func(suffix_data_id, builder.func);
+                                        let suffix_raw_ptr = builder.ins().global_value(types::I64, suffix_gv);
+                                        let suffix_len = builder.ins().iconst(types::I32, suffix_bytes.len() as i64);
+                                        let suffix_call = builder.ins().call(str_from_bytes_ref, &[suffix_raw_ptr, suffix_len]);
+                                        let suffix_ptr = builder.inst_results(suffix_call)[0];
+
+                                        let bind_func = extern_funcs.get("perry_ui_state_bind_text_numeric")
+                                            .ok_or_else(|| anyhow!("perry_ui_state_bind_text_numeric not declared"))?;
+                                        let bind_ref = module.declare_func_in_func(*bind_func, builder.func);
+                                        builder.ins().call(bind_ref, &[state_handle, text_handle, prefix_ptr, suffix_ptr]);
+                                    }
+                                }
                             }
                         }
 
                         return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), text_handle));
+                    }
+                    "ForEach" => {
+                        // ForEach(state, (index) => Widget)
+                        // Creates a VStack(0) container, calls perry_ui_for_each_init
+                        let create_func = extern_funcs.get("perry_ui_vstack_create")
+                            .ok_or_else(|| anyhow!("perry_ui_vstack_create not declared"))?;
+                        let create_ref = module.declare_func_in_func(*create_func, builder.func);
+                        let zero_spacing = builder.ins().f64const(0.0);
+                        let create_call = builder.ins().call(create_ref, &[zero_spacing]);
+                        let container_handle = builder.inst_results(create_call)[0];
+
+                        // Extract state handle from first arg
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+
+                        let state_handle = if !arg_vals.is_empty() {
+                            let state_f64 = ensure_f64(builder, arg_vals[0]);
+                            let ptr_call = builder.ins().call(get_ptr_ref, &[state_f64]);
+                            builder.inst_results(ptr_call)[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+
+                        // Second arg is the render closure (already compiled as NaN-boxed f64)
+                        let render_closure = if arg_vals.len() > 1 {
+                            ensure_f64(builder, arg_vals[1])
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+
+                        let for_each_func = extern_funcs.get("perry_ui_for_each_init")
+                            .ok_or_else(|| anyhow!("perry_ui_for_each_init not declared"))?;
+                        let for_each_ref = module.declare_func_in_func(*for_each_func, builder.func);
+                        builder.ins().call(for_each_ref, &[container_handle, state_handle, render_closure]);
+
+                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), container_handle));
                     }
                     _ => {} // Fall through to generic dispatch
                 }

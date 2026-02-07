@@ -37,6 +37,34 @@ pub fn get_widget(handle: i64) -> Option<Retained<NSView>> {
     })
 }
 
+/// Set the hidden state of a widget.
+pub fn set_hidden(handle: i64, hidden: bool) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            let _: () = objc2::msg_send![&*view, setHidden: hidden];
+        }
+    }
+}
+
+/// Remove all arranged subviews from a container (NSStackView).
+pub fn clear_children(handle: i64) {
+    if let Some(parent) = get_widget(handle) {
+        let is_stack = if let Some(cls) = AnyClass::get(c"NSStackView") {
+            parent.isKindOfClass(cls)
+        } else {
+            false
+        };
+        if is_stack {
+            let stack: &NSStackView = unsafe { &*(Retained::as_ptr(&parent) as *const NSStackView) };
+            let subviews = stack.arrangedSubviews();
+            for sv in subviews.iter() {
+                stack.removeArrangedSubview(&*sv);
+                sv.removeFromSuperview();
+            }
+        }
+    }
+}
+
 /// Add a child view to a parent view.
 /// If the parent is an NSStackView, uses addArrangedSubview for proper layout.
 pub fn add_child(parent_handle: i64, child_handle: i64) {

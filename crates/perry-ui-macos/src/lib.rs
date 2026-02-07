@@ -113,3 +113,54 @@ pub extern "C" fn perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64 
 pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
     widgets::slider::create(min, max, initial, on_change)
 }
+
+// =============================================================================
+// Phase 4: Advanced Reactive UI
+// =============================================================================
+
+/// Bind a slider to a state cell (two-way binding).
+#[no_mangle]
+pub extern "C" fn perry_ui_state_bind_slider(state_handle: i64, slider_handle: i64) {
+    state::bind_slider(state_handle, slider_handle);
+}
+
+/// Bind a toggle to a state cell (two-way binding).
+#[no_mangle]
+pub extern "C" fn perry_ui_state_bind_toggle(state_handle: i64, toggle_handle: i64) {
+    state::bind_toggle(state_handle, toggle_handle);
+}
+
+/// Bind a text widget to multiple states with a template.
+#[no_mangle]
+pub extern "C" fn perry_ui_state_bind_text_template(
+    text_handle: i64,
+    num_parts: i32,
+    types_ptr: i64,
+    values_ptr: i64,
+) {
+    state::bind_text_template(text_handle, num_parts, types_ptr as *const i32, values_ptr as *const i64);
+}
+
+/// Bind visibility of widgets to a state cell (conditional rendering).
+#[no_mangle]
+pub extern "C" fn perry_ui_state_bind_visibility(state_handle: i64, show_handle: i64, hide_handle: i64) {
+    state::bind_visibility(state_handle, show_handle, hide_handle);
+}
+
+/// Set the hidden state of a widget. hidden: 0=visible, 1=hidden.
+#[no_mangle]
+pub extern "C" fn perry_ui_set_widget_hidden(handle: i64, hidden: i64) {
+    widgets::set_hidden(handle, hidden != 0);
+}
+
+/// Initialize a ForEach dynamic list binding.
+#[no_mangle]
+pub extern "C" fn perry_ui_for_each_init(container_handle: i64, state_handle: i64, render_closure: f64) {
+    state::for_each_init(container_handle, state_handle, render_closure);
+}
+
+/// Remove all children from a container widget.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_clear_children(handle: i64) {
+    widgets::clear_children(handle);
+}

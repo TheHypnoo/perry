@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.131
+**Current Version:** 0.2.132
 
 ## Workflow Requirements
 
@@ -153,9 +153,10 @@ Perry supports native macOS GUI apps via `perry/ui`. Declarative TypeScript comp
 ### TypeScript API
 
 ```typescript
-import { App, VStack, HStack, Text, Button, State, Spacer, Divider, TextField, Toggle, Slider } from "perry/ui"
+import { App, VStack, HStack, Text, Button, State, Spacer, Divider, TextField, Toggle, Slider, ForEach } from "perry/ui"
 
 const count = State(0)
+const dark = State(0)
 
 App({
     title: "Counter",
@@ -164,10 +165,12 @@ App({
     body: VStack(16, [
         Text(`Count: ${count.value}`),
         Button("Increment", () => count.set(count.value + 1)),
+        Slider(0, 100, count.value, (val: number) => count.set(val)),  // two-way binding
+        dark.value ? Text("Dark ON") : Text("Dark OFF"),               // conditional rendering
+        Toggle("Dark mode", (on: boolean) => dark.set(on ? 1 : 0)),
+        ForEach(count, (i: number) => Text(`Item ${i}`)),              // dynamic list
         Divider(),
         TextField("Enter name", (text: string) => { console.log(text) }),
-        Toggle("Notifications", (on: boolean) => { console.log(on) }),
-        Slider(0, 100, 50, (val: number) => { count.set(val) }),
         Spacer(),
     ])
 })
@@ -189,9 +192,13 @@ All UI objects are stored in thread-local `Vec`s and referenced by **1-based i64
 
 ### Reactive State Binding
 
-1. **Compile time**: `detect_text_state_binding()` detects `Text("prefix" + State.value)` pattern
-2. **Compile time**: Emits `perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr, suffix_ptr)`
-3. **Runtime**: `state_set()` iterates bindings, formats `"{prefix}{value}"`, updates NSTextField
+Perry/ui supports 5 types of reactive bindings, all dispatched from `state_set()`:
+
+1. **Single-state text**: `Text("Count: " + state.value)` → `perry_ui_state_bind_text_numeric` (prefix/suffix)
+2. **Multi-state text**: `` Text(`${a.value} + ${b.value}`) `` → `perry_ui_state_bind_text_template` (template parts)
+3. **Two-way binding**: `Slider(0, 10, state.value, cb)` → `perry_ui_state_bind_slider` (slider position tracks state)
+4. **Conditional rendering**: `state.value ? WidgetA : WidgetB` → `perry_ui_state_bind_visibility` (show/hide)
+5. **Dynamic lists**: `ForEach(state, (i) => Widget)` → `perry_ui_for_each_init` (clear + rebuild on change)
 
 ### FFI Surface (all `#[no_mangle] pub extern "C"`)
 
@@ -212,6 +219,13 @@ All UI objects are stored in thread-local `Vec`s and referenced by **1-based i64
 | `perry_ui_textfield_create` | `(placeholder: i64, on_change: f64) -> i64` | Create editable text field |
 | `perry_ui_toggle_create` | `(label: i64, on_change: f64) -> i64` | Create switch + label |
 | `perry_ui_slider_create` | `(min: f64, max: f64, initial: f64, on_change: f64) -> i64` | Create horizontal slider |
+| `perry_ui_state_bind_slider` | `(state: i64, slider: i64)` | Two-way bind slider to state |
+| `perry_ui_state_bind_toggle` | `(state: i64, toggle: i64)` | Two-way bind toggle to state |
+| `perry_ui_state_bind_text_template` | `(text: i64, num_parts: i32, types: i64, values: i64)` | Multi-state text template binding |
+| `perry_ui_state_bind_visibility` | `(state: i64, show: i64, hide: i64)` | Conditional visibility binding |
+| `perry_ui_set_widget_hidden` | `(handle: i64, hidden: i64)` | Show/hide widget |
+| `perry_ui_for_each_init` | `(container: i64, state: i64, closure: f64)` | Init dynamic list with ForEach |
+| `perry_ui_widget_clear_children` | `(handle: i64)` | Remove all children from container |
 
 ### How to Add a New Widget
 
@@ -338,6 +352,38 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.132
+- Advanced Reactive UI Phase 4: Multi-state text, two-way binding, conditional rendering, dynamic lists
+  - **Two-way binding** (4A): `Slider(0, 10, count.value, cb)` — slider position auto-updates when state changes
+    - `perry_ui_state_bind_slider(state, slider)` / `perry_ui_state_bind_toggle(state, toggle)` FFI
+    - `slider::set_value()` and `toggle::set_state()` runtime functions
+    - `TOGGLE_SWITCHES` side map stores NSSwitch reference for programmatic state setting
+    - Codegen detects `state.value` in Slider arg[2], emits bind call after widget creation
+  - **Multi-state text binding** (4B): `` Text(`${a.value} + ${b.value} = ...`) `` — updates when any referenced state changes
+    - `detect_text_parts()` walks Binary(Add) chains, collects `Literal` and `StateValue` parts
+    - Single-state optimization: 1 state ref uses existing prefix/suffix TextBinding (faster)
+    - Multi-state: 2+ state refs use `MultiTextBinding` with `TextPart::Literal`/`TextPart::StateRef` template
+    - `perry_ui_state_bind_text_template(text, num_parts, types_ptr, values_ptr)` FFI
+    - `MULTI_TEXT_BINDINGS` + `MULTI_TEXT_INDEX` for O(1) state→binding lookup
+    - `rebuild_multi_text()` reads current state values to format template on each update
+  - **Conditional rendering** (4C): `state.value ? Text("ON") : Text("OFF")` — toggles widget visibility
+    - `Expr::Conditional` detection in VStack/HStack children loop
+    - `Expr::Logical { And }` detection for `state.value && Widget` pattern
+    - Both branches compiled and added to container; `perry_ui_state_bind_visibility` sets initial + reactive hidden state
+    - `widgets::set_hidden()` wraps `setHidden:` on NSView
+    - `VisibilityBinding` struct with show_handle/hide_handle; `is_truthy_f64()` for JS truthiness
+  - **Dynamic lists** (4D): `ForEach(count, (i) => Text(\`Item ${i}\`))` — rebuilds children on state change
+    - `ForEach` imported from perry/ui, creates VStack(0) container at compile time
+    - `perry_ui_for_each_init(container, state, closure)` does initial render + registers binding
+    - `ForEachBinding` stores container handle + render closure (NaN-boxed)
+    - `state_set()` calls `clear_children()` then `render_for_each()` to rebuild
+    - `widgets::clear_children()` removes all `arrangedSubviews` from NSStackView
+    - Closure called with `js_closure_call1(closure, index)` for each 0..count
+  - All binding types dispatched from `state_set()`: text, multi-text, slider, toggle, visibility, forEach
+  - 8 new FFI exports in perry-ui-macos/lib.rs
+  - 8 new extern declarations in codegen.rs `declare_runtime_functions`
+  - New demo: `test-files/test_ui_phase4.ts`
 
 ### v0.2.131
 - Eliminate js_is_truthy FFI calls from `if` statements, for-loop conditions, and while-loop conditions
