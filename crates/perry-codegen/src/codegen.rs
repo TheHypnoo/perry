@@ -9239,12 +9239,13 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_state_set".to_string(), func_id);
         }
 
-        // perry_ui_state_bind_text_numeric(state_handle: i64, text_handle: i64, prefix_ptr: i64)
+        // perry_ui_state_bind_text_numeric(state_handle: i64, text_handle: i64, prefix_ptr: i64, suffix_ptr: i64)
         {
             let mut sig = self.module.make_signature();
             sig.params.push(AbiParam::new(types::I64)); // state handle
             sig.params.push(AbiParam::new(types::I64)); // text widget handle
             sig.params.push(AbiParam::new(types::I64)); // prefix string ptr
+            sig.params.push(AbiParam::new(types::I64)); // suffix string ptr
             let func_id = self.module.declare_function("perry_ui_state_bind_text_numeric", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_state_bind_text_numeric".to_string(), func_id);
         }
@@ -15859,21 +15860,54 @@ fn compile_stmt(
     Ok(())
 }
 
-/// Detect if a child expression is `Text("prefix" + State.value)` pattern.
-/// Returns (prefix_string, state_object_expr) if found.
-fn detect_text_state_binding(expr: &Expr) -> Option<(String, &Expr)> {
-    if let Expr::NativeMethodCall { module, method, args, object: None, .. } = expr {
-        if module == "perry/ui" && method == "Text" && !args.is_empty() {
-            // Look in args[0] for Binary { Add, String(prefix), NativeMethodCall("value") }
-            if let Expr::Binary { op: BinaryOp::Add, left, right } = &args[0] {
-                if let Expr::String(prefix) = left.as_ref() {
-                    if let Expr::NativeMethodCall { module: m, method: meth, object: Some(state_obj), .. } = right.as_ref() {
-                        if m == "perry/ui" && meth == "value" {
-                            return Some((prefix.clone(), state_obj.as_ref()));
-                        }
-                    }
+/// Detect if an expression contains a `State.value` reference with surrounding string parts.
+/// Returns (prefix, suffix, state_object_expr) if found.
+/// Handles: bare `state.value`, `"pre" + state.value`, `state.value + "suf"`,
+/// and template literals like `\`pre${state.value}suf\`` (desugared to nested Add).
+fn detect_state_in_text_arg(expr: &Expr) -> Option<(String, String, &Expr)> {
+    // Case 1: Bare NativeMethodCall("value")
+    if let Expr::NativeMethodCall { module, method, object: Some(state_obj), .. } = expr {
+        if module == "perry/ui" && method == "value" {
+            return Some(("".to_string(), "".to_string(), state_obj.as_ref()));
+        }
+    }
+
+    if let Expr::Binary { op: BinaryOp::Add, left, right } = expr {
+        // Case 2: Add(something, String(suffix)) — recurse into left, append suffix
+        if let Expr::String(suffix) = right.as_ref() {
+            if let Some((prefix, inner_suffix, state_obj)) = detect_state_in_text_arg(left) {
+                return Some((prefix, format!("{}{}", inner_suffix, suffix), state_obj));
+            }
+        }
+
+        // Case 3: Add(String(prefix), NMC("value"))
+        if let Expr::String(prefix) = left.as_ref() {
+            if let Expr::NativeMethodCall { module, method, object: Some(state_obj), .. } = right.as_ref() {
+                if module == "perry/ui" && method == "value" {
+                    return Some((prefix.clone(), "".to_string(), state_obj.as_ref()));
                 }
             }
+        }
+
+        // Case 4: Add(NMC("value"), String(suffix))
+        if let Expr::NativeMethodCall { module, method, object: Some(state_obj), .. } = left.as_ref() {
+            if module == "perry/ui" && method == "value" {
+                if let Expr::String(suffix) = right.as_ref() {
+                    return Some(("".to_string(), suffix.clone(), state_obj.as_ref()));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Detect if a child expression is `Text(... State.value ...)` pattern.
+/// Returns (prefix, suffix, state_object_expr) if found.
+fn detect_text_state_binding(expr: &Expr) -> Option<(String, String, &Expr)> {
+    if let Expr::NativeMethodCall { module, method, args, object: None, .. } = expr {
+        if module == "perry/ui" && method == "Text" && !args.is_empty() {
+            return detect_state_in_text_arg(&args[0]);
         }
     }
     None
@@ -27241,12 +27275,16 @@ fn compile_expr(
 
                                     // If Text is bound to State.value, register the binding
                                     // so the text auto-updates when state changes
-                                    if let Some((prefix, state_obj_expr)) = binding_info {
+                                    if let Some((prefix, suffix, state_obj_expr)) = binding_info {
                                         // Compile the state object expression to get state handle
                                         let state_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, state_obj_expr, this_ctx)?;
                                         let state_f64 = ensure_f64(builder, state_val);
                                         let state_ptr_call = builder.ins().call(get_ptr_ref, &[state_f64]);
                                         let state_handle = builder.inst_results(state_ptr_call)[0];
+
+                                        let str_from_bytes_func = extern_funcs.get("js_string_from_bytes")
+                                            .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
+                                        let str_from_bytes_ref = module.declare_func_in_func(*str_from_bytes_func, builder.func);
 
                                         // Create prefix as StringHeader via js_string_from_bytes
                                         let prefix_bytes = prefix.as_bytes();
@@ -27262,17 +27300,31 @@ fn compile_expr(
                                         let prefix_gv = module.declare_data_in_func(prefix_data_id, builder.func);
                                         let prefix_raw_ptr = builder.ins().global_value(types::I64, prefix_gv);
                                         let prefix_len = builder.ins().iconst(types::I32, prefix_bytes.len() as i64);
-                                        let str_from_bytes_func = extern_funcs.get("js_string_from_bytes")
-                                            .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
-                                        let str_from_bytes_ref = module.declare_func_in_func(*str_from_bytes_func, builder.func);
                                         let str_call = builder.ins().call(str_from_bytes_ref, &[prefix_raw_ptr, prefix_len]);
                                         let prefix_ptr = builder.inst_results(str_call)[0];
 
-                                        // Call perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr)
+                                        // Create suffix as StringHeader via js_string_from_bytes
+                                        let suffix_bytes = suffix.as_bytes();
+                                        let suffix_data_id = module.declare_data(
+                                            &format!("__ui_bind_suffix_{}", next_js_data_id()),
+                                            Linkage::Local,
+                                            false,
+                                            false,
+                                        )?;
+                                        let mut suffix_data_desc = cranelift_module::DataDescription::new();
+                                        suffix_data_desc.define(suffix_bytes.to_vec().into_boxed_slice());
+                                        module.define_data(suffix_data_id, &suffix_data_desc)?;
+                                        let suffix_gv = module.declare_data_in_func(suffix_data_id, builder.func);
+                                        let suffix_raw_ptr = builder.ins().global_value(types::I64, suffix_gv);
+                                        let suffix_len = builder.ins().iconst(types::I32, suffix_bytes.len() as i64);
+                                        let suffix_str_call = builder.ins().call(str_from_bytes_ref, &[suffix_raw_ptr, suffix_len]);
+                                        let suffix_ptr = builder.inst_results(suffix_str_call)[0];
+
+                                        // Call perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr, suffix_ptr)
                                         let bind_func = extern_funcs.get("perry_ui_state_bind_text_numeric")
                                             .ok_or_else(|| anyhow!("perry_ui_state_bind_text_numeric not declared"))?;
                                         let bind_ref = module.declare_func_in_func(*bind_func, builder.func);
-                                        builder.ins().call(bind_ref, &[state_handle, child_handle, prefix_ptr]);
+                                        builder.ins().call(bind_ref, &[state_handle, child_handle, prefix_ptr, suffix_ptr]);
                                     }
                                 }
                             }
@@ -27501,6 +27553,82 @@ fn compile_expr(
                         let slider_call = builder.ins().call(slider_ref, &[min_f64, max_f64, initial_f64, on_change_f64]);
                         let slider_handle = builder.inst_results(slider_call)[0];
                         return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), slider_handle));
+                    }
+                    "Text" => {
+                        // Text(string_expr) — may contain State.value binding
+                        // Compile arg, create text widget, check for binding
+                        let text_i64 = if !arg_vals.is_empty() {
+                            let text_f64 = ensure_f64(builder, arg_vals[0]);
+                            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                            let str_call = builder.ins().call(get_str_ref, &[text_f64]);
+                            builder.inst_results(str_call)[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+
+                        let text_func = extern_funcs.get("perry_ui_text_create")
+                            .ok_or_else(|| anyhow!("perry_ui_text_create not declared"))?;
+                        let text_ref = module.declare_func_in_func(*text_func, builder.func);
+                        let text_call = builder.ins().call(text_ref, &[text_i64]);
+                        let text_handle = builder.inst_results(text_call)[0];
+
+                        // Check for State.value binding in the original args
+                        if !args.is_empty() {
+                            if let Some((prefix, suffix, state_obj_expr)) = detect_state_in_text_arg(&args[0]) {
+                                // Get state handle
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let state_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, state_obj_expr, this_ctx)?;
+                                let state_f64 = ensure_f64(builder, state_val);
+                                let state_ptr_call = builder.ins().call(get_ptr_ref, &[state_f64]);
+                                let state_handle = builder.inst_results(state_ptr_call)[0];
+
+                                let str_from_bytes_func = extern_funcs.get("js_string_from_bytes")
+                                    .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
+                                let str_from_bytes_ref = module.declare_func_in_func(*str_from_bytes_func, builder.func);
+
+                                // Create prefix StringHeader
+                                let prefix_bytes = prefix.as_bytes();
+                                let prefix_data_id = module.declare_data(
+                                    &format!("__ui_bind_prefix_{}", next_js_data_id()),
+                                    Linkage::Local, false, false,
+                                )?;
+                                let mut prefix_desc = cranelift_module::DataDescription::new();
+                                prefix_desc.define(prefix_bytes.to_vec().into_boxed_slice());
+                                module.define_data(prefix_data_id, &prefix_desc)?;
+                                let prefix_gv = module.declare_data_in_func(prefix_data_id, builder.func);
+                                let prefix_raw_ptr = builder.ins().global_value(types::I64, prefix_gv);
+                                let prefix_len = builder.ins().iconst(types::I32, prefix_bytes.len() as i64);
+                                let prefix_call = builder.ins().call(str_from_bytes_ref, &[prefix_raw_ptr, prefix_len]);
+                                let prefix_ptr = builder.inst_results(prefix_call)[0];
+
+                                // Create suffix StringHeader
+                                let suffix_bytes = suffix.as_bytes();
+                                let suffix_data_id = module.declare_data(
+                                    &format!("__ui_bind_suffix_{}", next_js_data_id()),
+                                    Linkage::Local, false, false,
+                                )?;
+                                let mut suffix_desc = cranelift_module::DataDescription::new();
+                                suffix_desc.define(suffix_bytes.to_vec().into_boxed_slice());
+                                module.define_data(suffix_data_id, &suffix_desc)?;
+                                let suffix_gv = module.declare_data_in_func(suffix_data_id, builder.func);
+                                let suffix_raw_ptr = builder.ins().global_value(types::I64, suffix_gv);
+                                let suffix_len = builder.ins().iconst(types::I32, suffix_bytes.len() as i64);
+                                let suffix_call = builder.ins().call(str_from_bytes_ref, &[suffix_raw_ptr, suffix_len]);
+                                let suffix_ptr = builder.inst_results(suffix_call)[0];
+
+                                // Call perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr, suffix_ptr)
+                                let bind_func = extern_funcs.get("perry_ui_state_bind_text_numeric")
+                                    .ok_or_else(|| anyhow!("perry_ui_state_bind_text_numeric not declared"))?;
+                                let bind_ref = module.declare_func_in_func(*bind_func, builder.func);
+                                builder.ins().call(bind_ref, &[state_handle, text_handle, prefix_ptr, suffix_ptr]);
+                            }
+                        }
+
+                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), text_handle));
                     }
                     _ => {} // Fall through to generic dispatch
                 }
@@ -28014,7 +28142,7 @@ fn compile_expr(
                 // Perry UI (native UI framework)
                 // ========================================================================
                 // Widget constructors (no object)
-                ("perry/ui", false, "Text") => "perry_ui_text_create",
+                // Text is handled in the special UI handler above (for State.value binding detection)
                 ("perry/ui", false, "State") => "perry_ui_state_create",
                 ("perry/ui", false, "Spacer") => "perry_ui_spacer_create",
                 ("perry/ui", false, "Divider") => "perry_ui_divider_create",

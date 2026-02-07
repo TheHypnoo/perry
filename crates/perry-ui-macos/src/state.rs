@@ -10,6 +10,7 @@ struct StateEntry {
 struct TextBinding {
     text_handle: i64,
     prefix: String,
+    suffix: String,
 }
 
 thread_local! {
@@ -69,9 +70,9 @@ pub fn state_set(handle: i64, value: f64) {
             for binding in bindings {
                 // Format value like JavaScript: integers without decimal point
                 let text = if value.fract() == 0.0 && value.abs() < 1e15 {
-                    format!("{}{}", binding.prefix, value as i64)
+                    format!("{}{}{}", binding.prefix, value as i64, binding.suffix)
                 } else {
-                    format!("{}{}", binding.prefix, value)
+                    format!("{}{}{}", binding.prefix, value, binding.suffix)
                 };
                 widgets::text::set_text_str(binding.text_handle, &text);
             }
@@ -79,14 +80,15 @@ pub fn state_set(handle: i64, value: f64) {
     });
 }
 
-/// Bind a text widget to a state cell with a prefix string.
-/// When the state changes, the text widget will be updated to "{prefix}{value}".
-pub fn bind_text_numeric(state_handle: i64, text_handle: i64, prefix_ptr: *const u8) {
+/// Bind a text widget to a state cell with prefix and suffix strings.
+/// When the state changes, the text widget will be updated to "{prefix}{value}{suffix}".
+pub fn bind_text_numeric(state_handle: i64, text_handle: i64, prefix_ptr: *const u8, suffix_ptr: *const u8) {
     let prefix = str_from_header(prefix_ptr).to_string();
+    let suffix = str_from_header(suffix_ptr).to_string();
     TEXT_BINDINGS.with(|b| {
         b.borrow_mut()
             .entry(state_handle)
             .or_default()
-            .push(TextBinding { text_handle, prefix });
+            .push(TextBinding { text_handle, prefix, suffix });
     });
 }

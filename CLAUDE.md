@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.129
+**Current Version:** 0.2.130
 
 ## Workflow Requirements
 
@@ -190,7 +190,7 @@ All UI objects are stored in thread-local `Vec`s and referenced by **1-based i64
 ### Reactive State Binding
 
 1. **Compile time**: `detect_text_state_binding()` detects `Text("prefix" + State.value)` pattern
-2. **Compile time**: Emits `perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr)`
+2. **Compile time**: Emits `perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr, suffix_ptr)`
 3. **Runtime**: `state_set()` iterates bindings, formats `"{prefix}{value}"`, updates NSTextField
 
 ### FFI Surface (all `#[no_mangle] pub extern "C"`)
@@ -206,7 +206,7 @@ All UI objects are stored in thread-local `Vec`s and referenced by **1-based i64
 | `perry_ui_widget_add_child` | `(parent: i64, child: i64)` | Add child to container |
 | `perry_ui_state_create` | `(initial: f64) -> i64` | Create reactive state cell |
 | `perry_ui_state_get` / `set` | `(state: i64) -> f64` / `(state: i64, val: f64)` | Read/write state |
-| `perry_ui_state_bind_text_numeric` | `(state: i64, text: i64, prefix: i64)` | Bind text to state |
+| `perry_ui_state_bind_text_numeric` | `(state: i64, text: i64, prefix: i64, suffix: i64)` | Bind text to state |
 | `perry_ui_spacer_create` | `() -> i64` | Create flexible spacer view |
 | `perry_ui_divider_create` | `() -> i64` | Create horizontal separator (NSBox) |
 | `perry_ui_textfield_create` | `(placeholder: i64, on_change: f64) -> i64` | Create editable text field |
@@ -338,6 +338,18 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.130
+- Generalized reactive state text bindings for perry/ui
+  - Supports prefix+suffix patterns: `` Text(`Value: ${count.value} items`) ``
+  - Supports bare state: `` Text(`${count.value}`) ``
+  - Supports suffix-only: `` Text(`${count.value}!`) ``
+  - Previous prefix-only pattern continues to work: `` Text(`Count: ${count.value}`) ``
+  - `detect_state_in_text_arg()` recursively walks nested `Binary(Add)` chains from template literal desugaring
+  - Runtime `TextBinding` now has `suffix` field; `state_set()` formats `"{prefix}{value}{suffix}"`
+  - FFI `perry_ui_state_bind_text_numeric` updated to accept 4th `suffix_ptr: i64` param
+  - Text widget moved from generic dispatch to special handler for standalone binding detection
+  - New demo: `test-files/test_ui_state_binding.ts`
 
 ### v0.2.129
 - Loop-Invariant Code Motion (LICM) for nested loops
