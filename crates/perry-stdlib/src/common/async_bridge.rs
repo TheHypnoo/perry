@@ -172,6 +172,9 @@ pub extern "C" fn js_stdlib_process_pending() -> i32 {
         count += unsafe { js_ws_process_pending() };
     }
 
+    // Process pending worker_threads messages (stdin reader)
+    count += crate::worker_threads::js_worker_threads_process_pending();
+
     count
 }
 

@@ -885,6 +885,11 @@ fn lower_module_decl(
                             // Register as native module function with the original method name
                             // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
                             ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
+                            // Auto-register parentPort from worker_threads as a native instance
+                            // (it's a singleton, not created via `new`)
+                            if source == "worker_threads" && imported == "parentPort" {
+                                ctx.register_native_instance(local.clone(), "worker_threads".to_string(), "MessagePort".to_string());
+                            }
                         } else {
                             // Register as imported function (we assume all imports are functions for now)
                             ctx.register_imported_func(local.clone(), imported.clone());
@@ -3010,7 +3015,32 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                 Ok(Expr::LocalGet(id))
             } else if let Some(id) = ctx.lookup_func(&name) {
                 Ok(Expr::FuncRef(id))
-            } else if let Some((module_name, _method_name)) = ctx.lookup_native_module(&name) {
+            } else if let Some((module_name, method_name)) = ctx.lookup_native_module(&name) {
+                // Special handling for worker_threads named imports
+                if module_name == "worker_threads" {
+                    if let Some(method) = method_name {
+                        if method == "workerData" {
+                            // workerData is a property-like import that calls a getter function
+                            return Ok(Expr::NativeMethodCall {
+                                module: "worker_threads".to_string(),
+                                class_name: None,
+                                object: None,
+                                method: "workerData".to_string(),
+                                args: Vec::new(),
+                            });
+                        }
+                        if method == "parentPort" {
+                            // parentPort is a singleton handle - call getter function
+                            return Ok(Expr::NativeMethodCall {
+                                module: "worker_threads".to_string(),
+                                class_name: None,
+                                object: None,
+                                method: "parentPort".to_string(),
+                                args: Vec::new(),
+                            });
+                        }
+                    }
+                }
                 // Native module reference (e.g., mysql from 'mysql2/promise')
                 Ok(Expr::NativeModuleRef(module_name.to_string()))
             } else if let Some(orig_name) = ctx.lookup_imported_func(&name) {

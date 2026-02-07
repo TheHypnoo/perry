@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.127
+**Current Version:** 0.2.128
 
 ## Workflow Requirements
 
@@ -335,6 +335,40 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.128
+- Add `clearTimeout` support
+  - Timer callbacks now have unique IDs (via `NEXT_CALLBACK_TIMER_ID` thread-local counter)
+  - `js_set_timeout_callback` returns real timer IDs instead of 0
+  - `clearTimeout(timer_id)` marks timers as cleared and removes them
+  - `js_callback_timer_tick` skips cleared timers
+  - Added `clearTimeout` extern declaration in codegen (I64 → void)
+- Add `fileURLToPath` from `url` module
+  - New `FileURLToPath(Box<Expr>)` HIR expression variant
+  - `js_url_file_url_to_path` runtime function strips `file://` prefix and percent-decodes
+  - Added to all expression traversal functions (collect_local_refs, collect_assigned_locals, substitute_locals, collect_closures, is_string_expr)
+  - `import { fileURLToPath } from 'url'` now works correctly
+- Add cross-module enum exports
+  - Enum definitions propagated from exporting module to importing module via `exported_enums` HashMap
+  - Re-export propagation supports `export * from "./module"` chains
+  - Post-lowering HIR fixup pass (`fix_imported_enums`) replaces `PropertyGet { ExternFuncRef, property }` with `EnumMember` or inlined `Expr::String`
+  - `register_imported_enum` method on Compiler registers enum values for codegen lookup
+  - Numeric enums emit `f64const` inline; string enums inline as `Expr::String` for proper type detection
+  - Fixed pre-existing bug: string `EnumMember` values now NaN-boxed with STRING_TAG (was using raw bitcast)
+- Add `worker_threads` module (parentPort, workerData)
+  - `import { parentPort, workerData } from 'worker_threads'` now compiles and links
+  - `workerData`: Reads `PERRY_WORKER_DATA` env var, JSON-parses it → NaN-boxed value
+  - `parentPort.postMessage(data)`: JSON-stringify data, write to stdout
+  - `parentPort.on('message', callback)`: Register message callback, start background stdin reader thread
+  - `parentPort.on('close', callback)`: Register close callback for stdin EOF
+  - `js_worker_threads_process_pending()`: Processes queued stdin messages on main thread via `js_closure_call1`
+  - Integrated into `js_stdlib_process_pending()` event loop
+  - `js_worker_threads_has_pending()`: Check if stdin reader is active (for keep-alive)
+  - JSON functions accessed via `extern "C"` declarations (linked at link time from perry-stdlib)
+  - HIR: `parentPort` auto-registered as native instance (MessagePort class) at import time
+  - HIR: `workerData` resolves to `NativeMethodCall` getter (not `NativeModuleRef`)
+  - Codegen: 5 extern declarations, NativeMethodCall dispatch for all methods
+  - Communication protocol: One JSON message per line on stdin/stdout
 
 ### v0.2.127
 - Add 5 new perry/ui widgets: Spacer, Divider, TextField, Toggle, Slider
