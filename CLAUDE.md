@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.118
+**Current Version:** 0.2.119
 
 ## Workflow Requirements
 
@@ -269,6 +269,16 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.117)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.119
+- Fix UI counter app SIGILL crash and module init variable ID conflicts
+  - Use fresh `FunctionBuilderContext` for module init function to avoid variable ID conflicts
+    with previously compiled functions (shared `func_ctx` accumulated stale variable declarations)
+  - Fix `create_field_name` in App() codegen: use `js_string_from_bytes` to create proper
+    `StringHeader*` pointers instead of raw C strings for `js_object_get_field_by_name_f64`
+  - Fix body widget handle extraction: use `js_nanbox_get_pointer` instead of `fcvt_to_sint`
+    for extracting NaN-boxed POINTER_TAG values (float-to-int conversion corrupts NaN-boxed bits)
+  - Counter app now opens a native macOS window with text and button widgets
 
 ### v0.2.118
 - Disable i32 arithmetic fast path in Binary expressions to fix type mismatch errors

@@ -11663,8 +11663,11 @@ impl Compiler {
             None
         };
 
+        // Use fresh FunctionBuilderContext to avoid variable ID conflicts
+        // The shared self.func_ctx accumulates variable declarations across functions
+        let mut init_func_ctx = FunctionBuilderContext::new();
         {
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut init_func_ctx);
 
             let entry_block = builder.create_block();
             builder.switch_to_block(entry_block);
