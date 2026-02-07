@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.130
+**Current Version:** 0.2.131
 
 ## Workflow Requirements
 
@@ -338,6 +338,22 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.131
+- Eliminate js_is_truthy FFI calls from `if` statements, for-loop conditions, and while-loop conditions
+  - `Stmt::If` with Compare conditions compiled directly to `fcmp` (no FFI)
+  - `Stmt::If` with `&&` (Logical And) compiles each side via `compile_condition_inline`
+  - `Stmt::If` with other conditions uses inline bitwise truthiness check
+  - Inline truthiness: `(val - TAG_UNDEFINED) <=u 2` checks undefined/null/false, `(val << 1) == 0` checks ±0.0
+  - For-loop non-BCE condition fallback: Compare → fcmp, other → inline truthiness
+  - While-loop non-counter path: uses `compile_condition_inline` for And conditions, `inline_truthiness_check` for catch-all
+  - New helper functions: `compile_condition_inline()` (Compare→fcmp or inline truthiness), `inline_truthiness_check()` (pure Cranelift IR, no FFI)
+- Add i32 shadow variables for integer function parameters
+  - At function entry, Number params (not reassigned in body) get an i32 shadow via `fcvt_to_sint`
+  - `try_compile_index_as_i32` already checks `i32_shadow` — now it's populated for params
+  - Avoids repeated `fcvt_to_sint` when params like `size` are used in array index arithmetic
+  - Scans function body for assignments to skip reassigned params (shadow would be stale)
+  - Uses `next_temp_var_id()` for shadow variable IDs (no conflicts)
 
 ### v0.2.130
 - Generalized reactive state text bindings for perry/ui

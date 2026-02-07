@@ -9298,6 +9298,72 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_slider_create".to_string(), func_id);
         }
 
+        // perry_ui_state_bind_slider(state_handle: i64, slider_handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // state handle
+            sig.params.push(AbiParam::new(types::I64)); // slider handle
+            let func_id = self.module.declare_function("perry_ui_state_bind_slider", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_state_bind_slider".to_string(), func_id);
+        }
+
+        // perry_ui_state_bind_toggle(state_handle: i64, toggle_handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // state handle
+            sig.params.push(AbiParam::new(types::I64)); // toggle handle
+            let func_id = self.module.declare_function("perry_ui_state_bind_toggle", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_state_bind_toggle".to_string(), func_id);
+        }
+
+        // perry_ui_state_bind_text_template(text_handle: i64, num_parts: i32, types_ptr: i64, values_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // text handle
+            sig.params.push(AbiParam::new(types::I32)); // num_parts
+            sig.params.push(AbiParam::new(types::I64)); // types array ptr
+            sig.params.push(AbiParam::new(types::I64)); // values array ptr
+            let func_id = self.module.declare_function("perry_ui_state_bind_text_template", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_state_bind_text_template".to_string(), func_id);
+        }
+
+        // perry_ui_state_bind_visibility(state_handle: i64, show_handle: i64, hide_handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // state handle
+            sig.params.push(AbiParam::new(types::I64)); // show widget handle
+            sig.params.push(AbiParam::new(types::I64)); // hide widget handle (0 = none)
+            let func_id = self.module.declare_function("perry_ui_state_bind_visibility", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_state_bind_visibility".to_string(), func_id);
+        }
+
+        // perry_ui_set_widget_hidden(handle: i64, hidden: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::I64)); // hidden (0 or 1)
+            let func_id = self.module.declare_function("perry_ui_set_widget_hidden", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_set_widget_hidden".to_string(), func_id);
+        }
+
+        // perry_ui_for_each_init(container_handle: i64, state_handle: i64, render_closure: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // container handle
+            sig.params.push(AbiParam::new(types::I64)); // state handle
+            sig.params.push(AbiParam::new(types::F64)); // render closure (NaN-boxed)
+            let func_id = self.module.declare_function("perry_ui_for_each_init", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_for_each_init".to_string(), func_id);
+        }
+
+        // perry_ui_widget_clear_children(handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_widget_clear_children", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_clear_children".to_string(), func_id);
+        }
+
         // ============================================
         // V8 JavaScript Runtime FFI functions
         // ============================================
@@ -9672,58 +9738,34 @@ impl Compiler {
             }
 
             // Load module-level variables from their global slots
-            // These are variables defined at module scope that the function may reference
-            // Use a large offset to avoid conflicts with function params and body locals
-            let mut next_var_id = 20000 + func.params.len();
             for (local_id, data_id) in &self.module_var_data_ids {
-                // Get the type info from module_level_locals (populated during compile_init)
+                // Skip if this LocalId is already a function parameter
+                if locals.contains_key(local_id) {
+                    continue;
+                }
                 let (var_type, local_info_template) = if let Some(info) = self.module_level_locals.get(local_id) {
-                    // Variable is stored as i64 only if is_pointer && !is_union
                     let vt = if info.is_pointer && !info.is_union { types::I64 } else { types::F64 };
                     (vt, info.clone())
                 } else {
-                    // Fallback to f64 if type info not available
                     (types::F64, LocalInfo {
-                        var: Variable::new(0), // Will be overwritten
-                        name: None,
-                        class_name: None,
-                        type_args: Vec::new(),
-                        is_pointer: false,
-                        is_array: false,
-                        is_string: false,
-                        is_bigint: false,
-                        is_closure: false,
-                        is_boxed: false,
+                        var: Variable::new(0),
+                        name: None, class_name: None, type_args: Vec::new(),
+                        is_pointer: false, is_array: false, is_string: false, is_bigint: false,
+                        is_closure: false, is_boxed: false,
                         is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
-                        is_mixed_array: false,
-                        is_integer: false,
-                        is_integer_array: false,
-                        is_i32: false,
-                        i32_shadow: None,
-                        bounded_by_array: None,
-                        bounded_by_constant: None,
-                        scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        is_mixed_array: false, is_integer: false, is_integer_array: false, is_i32: false,
+                        i32_shadow: None, bounded_by_array: None, bounded_by_constant: None,
+                        scalar_fields: None, squared_cache: None, product_cache: None,
+                        cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                     })
                 };
-
-                let var = Variable::new(next_var_id);
-                next_var_id += 1;
+                // Use next_temp_var_id() for guaranteed unique variable IDs
+                let var = Variable::new(next_temp_var_id());
                 builder.declare_var(var, var_type);
-
-                // Insert into locals so LocalGet can find it, but only if not already
-                // present (function parameters take precedence over module-level vars)
-                if locals.contains_key(local_id) {
-                    // This LocalId is already a function parameter - don't load module var
-                    continue;
-                }
-
-                // Load the value from the global data slot
                 let global_val = self.module.declare_data_in_func(*data_id, builder.func);
                 let ptr = builder.ins().global_value(types::I64, global_val);
                 let val = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
                 builder.def_var(var, val);
-
                 let mut info = local_info_template;
                 info.var = var;
                 locals.insert(*local_id, info);
@@ -15913,6 +15955,89 @@ fn detect_text_state_binding(expr: &Expr) -> Option<(String, String, &Expr)> {
     None
 }
 
+/// Detected part of a text template for multi-state binding.
+enum DetectedPart<'a> {
+    Literal(String),
+    StateValue(&'a Expr), // the state object expr (e.g., LocalGet of the state variable)
+    /// An expression involving state values (like a.value + b.value) - cannot use template
+    ComplexExpr,
+}
+
+/// Walk a Binary(Add) chain collecting literals and state.value references.
+/// Returns None if no state refs found. Returns parts list if state refs found.
+fn detect_text_parts(expr: &Expr) -> Option<Vec<DetectedPart>> {
+    match expr {
+        // Bare state.value
+        Expr::NativeMethodCall { module, method, object: Some(state_obj), .. }
+            if module == "perry/ui" && method == "value" =>
+        {
+            Some(vec![DetectedPart::StateValue(state_obj.as_ref())])
+        }
+        // String literal
+        Expr::String(s) => {
+            Some(vec![DetectedPart::Literal(s.clone())])
+        }
+        // Add chain
+        Expr::Binary { op: BinaryOp::Add, left, right } => {
+            let left_parts = detect_text_parts(left);
+            let right_parts = detect_text_parts(right);
+
+            match (left_parts, right_parts) {
+                (Some(mut lp), Some(mut rp)) => {
+                    // Check for ComplexExpr in either side
+                    if lp.iter().any(|p| matches!(p, DetectedPart::ComplexExpr))
+                        || rp.iter().any(|p| matches!(p, DetectedPart::ComplexExpr))
+                    {
+                        return Some(vec![DetectedPart::ComplexExpr]);
+                    }
+                    lp.append(&mut rp);
+                    Some(lp)
+                }
+                // If one side has state refs but the other doesn't resolve,
+                // the non-resolving side might be a complex expression (like a.value + b.value as number)
+                (Some(lp), None) => {
+                    // Right side is non-string, non-state-value expr (e.g., arithmetic on states)
+                    let mut parts = lp;
+                    parts.push(DetectedPart::ComplexExpr);
+                    Some(parts)
+                }
+                (None, Some(rp)) => {
+                    let mut parts = vec![DetectedPart::ComplexExpr];
+                    parts.extend(rp);
+                    Some(parts)
+                }
+                (None, None) => None,
+            }
+        }
+        // Number literal (e.g., part of template concatenation)
+        Expr::Number(_) | Expr::Integer(_) => None,
+        _ => None,
+    }
+}
+
+/// Check if detected parts represent a multi-state binding (2+ state refs, no complex exprs).
+fn is_multi_state_binding(parts: &[DetectedPart]) -> bool {
+    let state_count = parts.iter().filter(|p| matches!(p, DetectedPart::StateValue(_))).count();
+    let has_complex = parts.iter().any(|p| matches!(p, DetectedPart::ComplexExpr));
+    state_count >= 2 && !has_complex
+}
+
+/// Detect if a child expression involves a state condition (for conditional rendering).
+/// Returns the state object expression if found.
+fn detect_state_condition(expr: &Expr) -> Option<&Expr> {
+    // Direct state.value
+    if let Expr::NativeMethodCall { module, method, object: Some(state_obj), .. } = expr {
+        if module == "perry/ui" && method == "value" {
+            return Some(state_obj.as_ref());
+        }
+    }
+    // Compare involving state.value
+    if let Expr::Compare { left, .. } = expr {
+        return detect_state_condition(left);
+    }
+    None
+}
+
 fn compile_expr(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
@@ -16119,73 +16244,58 @@ fn compile_expr(
             }
         }
         Expr::StaticFieldGet { class_name, field_name } => {
-            // Get the data ID for the static field
-            let class_meta = classes.get(class_name)
-                .ok_or_else(|| anyhow!("Unknown class: {}", class_name))?;
-            let data_id = class_meta.static_field_ids.get(field_name)
-                .ok_or_else(|| anyhow!("Unknown static field: {}.{}", class_name, field_name))?;
-
-            // Get the global value reference and load from it
-            let global_val = module.declare_data_in_func(*data_id, builder.func);
-            let ptr = builder.ins().global_value(types::I64, global_val);
-            let value = builder.ins().load(types::F64, MemFlags::new(), ptr, 0);
-            Ok(value)
+            if let Some(class_meta) = classes.get(class_name) {
+                let data_id = class_meta.static_field_ids.get(field_name)
+                    .ok_or_else(|| anyhow!("Unknown static field: {}.{}", class_name, field_name))?;
+                let global_val = module.declare_data_in_func(*data_id, builder.func);
+                let ptr = builder.ins().global_value(types::I64, global_val);
+                Ok(builder.ins().load(types::F64, MemFlags::new(), ptr, 0))
+            } else {
+                eprintln!("  Warning: Unknown class '{}' for static field '{}'", class_name, field_name);
+                Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64)))
+            }
         }
         Expr::StaticFieldSet { class_name, field_name, value } => {
-            // Compile the value to store
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
-
-            // Get the data ID for the static field
-            let class_meta = classes.get(class_name)
-                .ok_or_else(|| anyhow!("Unknown class: {}", class_name))?;
-            let data_id = class_meta.static_field_ids.get(field_name)
-                .ok_or_else(|| anyhow!("Unknown static field: {}.{}", class_name, field_name))?;
-
-            // Store to the global
-            let global_val = module.declare_data_in_func(*data_id, builder.func);
-            let ptr = builder.ins().global_value(types::I64, global_val);
-            builder.ins().store(MemFlags::new(), val, ptr, 0);
-
-            // Return the value (assignment expression evaluates to the assigned value)
-            Ok(val)
+            if let Some(class_meta) = classes.get(class_name) {
+                let data_id = class_meta.static_field_ids.get(field_name)
+                    .ok_or_else(|| anyhow!("Unknown static field: {}.{}", class_name, field_name))?;
+                let global_val = module.declare_data_in_func(*data_id, builder.func);
+                let ptr = builder.ins().global_value(types::I64, global_val);
+                builder.ins().store(MemFlags::new(), val, ptr, 0);
+                Ok(val)
+            } else {
+                eprintln!("  Warning: Unknown class '{}' for static field set '{}'", class_name, field_name);
+                Ok(val)
+            }
         }
         Expr::StaticMethodCall { class_name, method_name, args } => {
-            // Get the function ID for the static method
-            let class_meta = classes.get(class_name)
-                .ok_or_else(|| anyhow!("Unknown class: {}", class_name))?;
-            let method_id = class_meta.static_method_ids.get(method_name)
-                .ok_or_else(|| anyhow!("Unknown static method: {}.{}", class_name, method_name))?;
-
-            // Compile arguments
-            let mut arg_vals = Vec::new();
-            for arg in args {
-                let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arg, this_ctx)?;
-                arg_vals.push(val);
+            if let Some(class_meta) = classes.get(class_name) {
+                let method_id = class_meta.static_method_ids.get(method_name)
+                    .ok_or_else(|| anyhow!("Unknown static method: {}.{}", class_name, method_name))?;
+                let mut arg_vals = Vec::new();
+                for arg in args {
+                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arg, this_ctx)?;
+                    arg_vals.push(val);
+                }
+                let converted_args: Vec<Value> = arg_vals.iter().map(|&val| ensure_f64(builder, val)).collect();
+                let func_ref = module.declare_func_in_func(*method_id, builder.func);
+                let actual_sig = module.declarations().get_function_decl(*method_id);
+                let expected_param_count = actual_sig.signature.params.len();
+                let mut final_call_args = converted_args;
+                while final_call_args.len() < expected_param_count {
+                    final_call_args.push(builder.ins().f64const(f64::NAN));
+                }
+                final_call_args.truncate(expected_param_count);
+                let call = builder.ins().call(func_ref, &final_call_args);
+                Ok(builder.inst_results(call)[0])
+            } else {
+                eprintln!("  Warning: Unknown class '{}' for static method '{}'", class_name, method_name);
+                for arg in args {
+                    let _ = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arg, this_ctx)?;
+                }
+                Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64)))
             }
-
-            // Convert arguments to f64 - static methods are declared with f64 parameters
-            let converted_args: Vec<Value> = arg_vals.iter()
-                .map(|&val| ensure_f64(builder, val))
-                .collect();
-
-            // Call the static method (no 'this' argument)
-            let func_ref = module.declare_func_in_func(*method_id, builder.func);
-
-            // Get expected parameter count from the function signature
-            let actual_sig = module.declarations().get_function_decl(*method_id);
-            let expected_param_count = actual_sig.signature.params.len();
-
-            // Pad or truncate arguments to match expected count
-            let mut final_call_args = converted_args;
-            while final_call_args.len() < expected_param_count {
-                // Add undefined (f64 NaN) for missing optional arguments
-                final_call_args.push(builder.ins().f64const(f64::NAN));
-            }
-            final_call_args.truncate(expected_param_count);
-
-            let call = builder.ins().call(func_ref, &final_call_args);
-            let result = builder.inst_results(call)[0];
-            Ok(result)
         }
         Expr::EnvGet(var_name) => {
             // Create a string with the env var name
@@ -24508,8 +24618,11 @@ fn compile_expr(
                     }
                 } else {
                     // new Array(e1, e2, ...) - create array with elements
+                    let alloc_func2 = extern_funcs.get("js_array_alloc")
+                        .ok_or_else(|| anyhow!("js_array_alloc not declared"))?;
+                    let func_ref2 = module.declare_func_in_func(*alloc_func2, builder.func);
                     let cap = builder.ins().iconst(types::I32, args.len() as i64);
-                    let call = builder.ins().call(func_ref, &[cap]);
+                    let call = builder.ins().call(func_ref2, &[cap]);
                     let mut arr_ptr = builder.inst_results(call)[0];
 
                     // Push each element
@@ -25068,7 +25181,11 @@ fn compile_expr(
                 }
             }
 
-            Err(anyhow!("Unknown class: {}", class_name))
+            eprintln!("  Warning: Unknown class '{}' in new expression, returning undefined", class_name);
+            for arg in args {
+                let _ = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arg, this_ctx)?;
+            }
+            Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64)))
         }
         Expr::NewDynamic { callee, args } => {
             // Handle dynamic new expressions (new with non-identifier callee)
@@ -30430,4 +30547,44 @@ fn compile_stmt_with_this(
         class_meta: class_meta.clone(),
     };
     compile_stmt(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, closure_returning_funcs, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, next_var, stmt, Some(&this_ctx), loop_ctx, boxed_vars)
+}
+
+/// Generate a stub object file for missing symbols from unresolved imports.
+pub fn generate_stub_object(missing_data_symbols: &[String], missing_func_symbols: &[String]) -> Result<Vec<u8>> {
+    let mut flag_builder = settings::builder();
+    flag_builder.set("use_colocated_libcalls", "false").unwrap();
+    flag_builder.set("is_pic", "true").unwrap();
+    let isa_builder = cranelift_native::builder().map_err(|e| anyhow!("{}", e))?;
+    let isa = isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?;
+    let builder = ObjectBuilder::new(isa, "perry_stubs", cranelift_module::default_libcall_names())?;
+    let mut module = ObjectModule::new(builder);
+    const TAG_UNDEF: u64 = 0x7FFC_0000_0000_0001;
+    for name in missing_data_symbols {
+        let data_id = module.declare_data(name, Linkage::Export, true, false)?;
+        let mut dd = DataDescription::new();
+        dd.define(TAG_UNDEF.to_le_bytes().to_vec().into_boxed_slice());
+        module.define_data(data_id, &dd)?;
+    }
+    for name in missing_func_symbols {
+        let mut sig = module.make_signature();
+        sig.returns.push(AbiParam::new(types::F64));
+        let func_id = module.declare_function(name, Linkage::Export, &sig)?;
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig;
+        let mut fc = FunctionBuilderContext::new();
+        {
+            let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fc);
+            let block = fb.create_block();
+            fb.append_block_params_for_function_params(block);
+            fb.switch_to_block(block);
+            fb.seal_block(block);
+            let undef = fb.ins().f64const(f64::from_bits(TAG_UNDEF));
+            fb.ins().return_(&[undef]);
+            fb.finalize();
+        }
+        module.define_function(func_id, &mut ctx)?;
+        module.clear_context(&mut ctx);
+    }
+    let product = module.finish();
+    Ok(product.emit().map_err(|e| anyhow!("Failed to emit stub object: {}", e))?)
 }
