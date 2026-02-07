@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.138
+**Current Version:** 0.2.139
 
 ## Workflow Requirements
 
@@ -423,6 +423,14 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.139
+- Fix keyboard shortcuts registered before App() (dead code after blocking event loop)
+  - `addKeyboardShortcut()` called before `App()` was silently failing because `mainMenu()` didn't exist yet
+  - Added `PENDING_SHORTCUTS` thread-local buffer in perry-ui-macos/src/app.rs
+  - `add_keyboard_shortcut()` now checks if mainMenu exists: if yes, installs immediately; if no, buffers
+  - `flush_pending_shortcuts()` called inside `app_run()` after `setup_menu_bar()` but before `app.run()`
+  - Shortcuts registered before `App()` are now properly installed when the menu bar is created
 
 ### v0.2.138
 - **iOS support**: New `perry-ui-ios` crate + `--target ios-simulator`/`--target ios` CLI flag

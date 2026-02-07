@@ -15,6 +15,14 @@ use crate::widgets;
 
 thread_local! {
     static APPS: RefCell<Vec<AppEntry>> = RefCell::new(Vec::new());
+    /// Buffered keyboard shortcuts registered before the menu bar exists.
+    static PENDING_SHORTCUTS: RefCell<Vec<PendingShortcut>> = RefCell::new(Vec::new());
+}
+
+struct PendingShortcut {
+    key_ptr: *const u8,
+    modifiers: f64,
+    callback: f64,
 }
 
 struct AppEntry {
@@ -157,6 +165,9 @@ pub fn app_run(_app_handle: i64) {
     // Set up menu bar with Cmd+Q support
     setup_menu_bar(&app, mtm);
 
+    // Install any keyboard shortcuts that were registered before the menu existed
+    flush_pending_shortcuts(mtm);
+
     APPS.with(|a| {
         let apps = a.borrow();
         for entry in apps.iter() {
@@ -246,10 +257,27 @@ impl PerryShortcutTarget {
 /// `key_ptr` is a StringHeader pointer to the key character (e.g., "s" for Cmd+S).
 /// `modifiers` is a bitfield: 1=Cmd, 2=Shift, 4=Option, 8=Control.
 /// `callback` is a NaN-boxed closure pointer.
+///
+/// If the menu bar doesn't exist yet (called before `app_run`), the shortcut
+/// is buffered and will be installed once the menu is created.
 pub fn add_keyboard_shortcut(key_ptr: *const u8, modifiers: f64, callback: f64) {
-    let key_str = str_from_header(key_ptr);
     let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
+    let app = NSApplication::sharedApplication(mtm);
 
+    // If the menu bar exists, install immediately; otherwise buffer for later.
+    let has_menu = unsafe { app.mainMenu().is_some() };
+    if has_menu {
+        install_keyboard_shortcut(key_ptr, modifiers, callback, mtm);
+    } else {
+        PENDING_SHORTCUTS.with(|ps| {
+            ps.borrow_mut().push(PendingShortcut { key_ptr, modifiers, callback });
+        });
+    }
+}
+
+/// Install a single keyboard shortcut into the existing app menu.
+fn install_keyboard_shortcut(key_ptr: *const u8, modifiers: f64, callback: f64, mtm: MainThreadMarker) {
+    let key_str = str_from_header(key_ptr);
     let app = NSApplication::sharedApplication(mtm);
 
     unsafe {
@@ -293,4 +321,14 @@ pub fn add_keyboard_shortcut(key_ptr: *const u8, modifiers: f64, callback: f64) 
             }
         }
     }
+}
+
+/// Flush any keyboard shortcuts that were registered before the menu bar existed.
+fn flush_pending_shortcuts(mtm: MainThreadMarker) {
+    PENDING_SHORTCUTS.with(|ps| {
+        let pending: Vec<PendingShortcut> = ps.borrow_mut().drain(..).collect();
+        for shortcut in pending {
+            install_keyboard_shortcut(shortcut.key_ptr, shortcut.modifiers, shortcut.callback, mtm);
+        }
+    });
 }
