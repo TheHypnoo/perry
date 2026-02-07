@@ -4955,6 +4955,73 @@ impl Compiler {
         }
 
         // ========================================================================
+        // worker_threads stdlib functions
+        // ========================================================================
+
+        // js_worker_threads_get_worker_data() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(
+                "js_worker_threads_get_worker_data",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_worker_threads_get_worker_data".to_string(), func_id);
+        }
+
+        // js_worker_threads_parent_port() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(
+                "js_worker_threads_parent_port",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_worker_threads_parent_port".to_string(), func_id);
+        }
+
+        // js_worker_threads_post_message(data: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // data
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(
+                "js_worker_threads_post_message",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_worker_threads_post_message".to_string(), func_id);
+        }
+
+        // js_worker_threads_on(event_ptr: i64, callback: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // event string ptr
+            sig.params.push(AbiParam::new(types::I64)); // callback closure ptr
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(
+                "js_worker_threads_on",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_worker_threads_on".to_string(), func_id);
+        }
+
+        // js_worker_threads_has_pending() -> i32
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function(
+                "js_worker_threads_has_pending",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_worker_threads_has_pending".to_string(), func_id);
+        }
+
+        // ========================================================================
         // MySQL2 stdlib functions
         // ========================================================================
 
@@ -9151,6 +9218,54 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::I64)); // prefix string ptr
             let func_id = self.module.declare_function("perry_ui_state_bind_text_numeric", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_state_bind_text_numeric".to_string(), func_id);
+        }
+
+        // perry_ui_spacer_create() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_spacer_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_spacer_create".to_string(), func_id);
+        }
+
+        // perry_ui_divider_create() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_divider_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_divider_create".to_string(), func_id);
+        }
+
+        // perry_ui_textfield_create(placeholder_ptr: i64, on_change: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // placeholder string ptr
+            sig.params.push(AbiParam::new(types::F64)); // on_change closure (NaN-boxed)
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_textfield_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textfield_create".to_string(), func_id);
+        }
+
+        // perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // label string ptr
+            sig.params.push(AbiParam::new(types::F64)); // on_change closure (NaN-boxed)
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_toggle_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_toggle_create".to_string(), func_id);
+        }
+
+        // perry_ui_slider_create(min: f64, max: f64, initial: f64, on_change: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // min
+            sig.params.push(AbiParam::new(types::F64)); // max
+            sig.params.push(AbiParam::new(types::F64)); // initial
+            sig.params.push(AbiParam::new(types::F64)); // on_change closure (NaN-boxed)
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_slider_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_slider_create".to_string(), func_id);
         }
 
         // ============================================
@@ -26858,6 +26973,94 @@ fn compile_expr(
 
                         return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), app_handle));
                     }
+                    "TextField" => {
+                        // TextField("placeholder", (text) => { ... })
+                        // First arg: placeholder string, second arg: onChange closure
+                        let placeholder_i64 = if !arg_vals.is_empty() {
+                            let placeholder_f64 = ensure_f64(builder, arg_vals[0]);
+                            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                            let str_call = builder.ins().call(get_str_ref, &[placeholder_f64]);
+                            builder.inst_results(str_call)[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+
+                        let on_change_f64 = if arg_vals.len() > 1 {
+                            ensure_f64(builder, arg_vals[1])
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+
+                        let tf_func = extern_funcs.get("perry_ui_textfield_create")
+                            .ok_or_else(|| anyhow!("perry_ui_textfield_create not declared"))?;
+                        let tf_ref = module.declare_func_in_func(*tf_func, builder.func);
+                        let tf_call = builder.ins().call(tf_ref, &[placeholder_i64, on_change_f64]);
+                        let tf_handle = builder.inst_results(tf_call)[0];
+                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), tf_handle));
+                    }
+                    "Toggle" => {
+                        // Toggle("label", (checked) => { ... })
+                        // First arg: label string, second arg: onChange closure
+                        let label_i64 = if !arg_vals.is_empty() {
+                            let label_f64 = ensure_f64(builder, arg_vals[0]);
+                            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                            let str_call = builder.ins().call(get_str_ref, &[label_f64]);
+                            builder.inst_results(str_call)[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+
+                        let on_change_f64 = if arg_vals.len() > 1 {
+                            ensure_f64(builder, arg_vals[1])
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+
+                        let toggle_func = extern_funcs.get("perry_ui_toggle_create")
+                            .ok_or_else(|| anyhow!("perry_ui_toggle_create not declared"))?;
+                        let toggle_ref = module.declare_func_in_func(*toggle_func, builder.func);
+                        let toggle_call = builder.ins().call(toggle_ref, &[label_i64, on_change_f64]);
+                        let toggle_handle = builder.inst_results(toggle_call)[0];
+                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), toggle_handle));
+                    }
+                    "Slider" => {
+                        // Slider(min, max, initial, (value) => { ... })
+                        // First 3 args: f64 numbers, fourth arg: onChange closure
+                        let min_f64 = if !arg_vals.is_empty() {
+                            ensure_f64(builder, arg_vals[0])
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+
+                        let max_f64 = if arg_vals.len() > 1 {
+                            ensure_f64(builder, arg_vals[1])
+                        } else {
+                            builder.ins().f64const(100.0)
+                        };
+
+                        let initial_f64 = if arg_vals.len() > 2 {
+                            ensure_f64(builder, arg_vals[2])
+                        } else {
+                            builder.ins().f64const(50.0)
+                        };
+
+                        let on_change_f64 = if arg_vals.len() > 3 {
+                            ensure_f64(builder, arg_vals[3])
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+
+                        let slider_func = extern_funcs.get("perry_ui_slider_create")
+                            .ok_or_else(|| anyhow!("perry_ui_slider_create not declared"))?;
+                        let slider_ref = module.declare_func_in_func(*slider_func, builder.func);
+                        let slider_call = builder.ins().call(slider_ref, &[min_f64, max_f64, initial_f64, on_change_f64]);
+                        let slider_handle = builder.inst_results(slider_call)[0];
+                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), slider_handle));
+                    }
                     _ => {} // Fall through to generic dispatch
                 }
             }
@@ -26963,6 +27166,12 @@ fn compile_expr(
                 ("async_hooks", true, "enterWith") => "js_async_local_storage_enter_with",
                 ("async_hooks", true, "exit") => "js_async_local_storage_exit",
                 ("async_hooks", true, "disable") => "js_async_local_storage_disable",
+
+                // worker_threads module
+                ("worker_threads", false, "workerData") => "js_worker_threads_get_worker_data",
+                ("worker_threads", false, "parentPort") => "js_worker_threads_parent_port",
+                ("worker_threads", false, "postMessage") => "js_worker_threads_post_message",
+                ("worker_threads", false, "on") => "js_worker_threads_on",
 
                 // lru-cache module (LRUCache)
                 ("lru-cache", true, "get") => "js_lru_cache_get",
@@ -27366,6 +27575,8 @@ fn compile_expr(
                 // Widget constructors (no object)
                 ("perry/ui", false, "Text") => "perry_ui_text_create",
                 ("perry/ui", false, "State") => "perry_ui_state_create",
+                ("perry/ui", false, "Spacer") => "perry_ui_spacer_create",
+                ("perry/ui", false, "Divider") => "perry_ui_divider_create",
                 // State methods (with object)
                 ("perry/ui", true, "value") => "perry_ui_state_get",
                 ("perry/ui", true, "set") => "perry_ui_state_set",
@@ -27580,6 +27791,7 @@ fn compile_expr(
                           native_module == "rate-limiter-flexible" ||
                           native_module == "fastify" ||
                           native_module == "async_hooks" ||
+                          native_module == "worker_threads" ||
                           native_module == "perry/ui" {
                     // These modules return NaN-boxed pointers, extract the raw pointer
                     let obj_f64 = ensure_f64(builder, obj_val);
@@ -28385,6 +28597,32 @@ fn compile_expr(
                         }
                         _ => arg_vals.clone()
                     }
+                } else if native_module == "worker_threads" {
+                    // worker_threads module functions (no object - all called as module-level)
+                    match method.as_str() {
+                        "workerData" | "parentPort" => {
+                            // Zero-arg getters - no arguments needed
+                            vec![]
+                        }
+                        "postMessage" => {
+                            // postMessage(data) - data is any NaN-boxed value (f64)
+                            if !arg_vals.is_empty() {
+                                vec![ensure_f64(builder, arg_vals[0])]
+                            } else {
+                                vec![]
+                            }
+                        }
+                        "on" => {
+                            // on(event, callback) - event is NaN-boxed string (i64), callback is closure (i64)
+                            let mut args = Vec::new();
+                            if arg_vals.len() >= 2 {
+                                args.push(ensure_i64(builder, arg_vals[0]));
+                                args.push(ensure_i64(builder, arg_vals[1]));
+                            }
+                            args
+                        }
+                        _ => arg_vals.clone()
+                    }
                 } else if native_module == "fastify" {
                     // fastify module functions
                     match method.as_str() {
@@ -28490,6 +28728,11 @@ fn compile_expr(
                 } else if native_module == "async_hooks" {
                     // AsyncLocalStorage: run/getStore/exit return f64 directly,
                     // enterWith/disable are void (result is meaningless, return 0.0)
+                    Ok(result)
+                } else if native_module == "worker_threads" {
+                    // worker_threads: all functions return f64 directly
+                    // workerData returns NaN-boxed value, parentPort returns NaN-boxed handle,
+                    // postMessage/on return undefined (f64)
                     Ok(result)
                 } else if native_module == "events" && (method == "emit" || method == "listenerCount") {
                     // emit and listenerCount return f64 directly (boolean/number)

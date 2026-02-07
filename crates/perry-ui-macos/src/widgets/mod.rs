@@ -2,6 +2,11 @@ pub mod text;
 pub mod button;
 pub mod vstack;
 pub mod hstack;
+pub mod spacer;
+pub mod divider;
+pub mod textfield;
+pub mod toggle;
+pub mod slider;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;

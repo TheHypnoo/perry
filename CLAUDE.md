@@ -6,14 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.126
+**Current Version:** 0.2.127
 
 ## Workflow Requirements
 
 **IMPORTANT:** Follow these practices for every code change:
 
 1. **Update CLAUDE.md**: After making any code changes, update this file to document:
-   - New features or fixes in the "Recent Fixes" section
+   - New features or fixes in the "Recent Changes" section
    - Any new patterns, APIs, or important implementation details
    - Changes to build commands or architecture
 
@@ -29,14 +29,8 @@ Perry is a native TypeScript compiler written in Rust that compiles TypeScript s
 ## Build Commands
 
 ```bash
-# Build all crates (debug)
-cargo build
-
 # Build all crates (release)
 cargo build --release
-
-# Build just the CLI
-cargo build -p perry
 
 # Build the runtime library (required for linking)
 cargo build --release -p perry-runtime
@@ -47,16 +41,9 @@ cargo test
 # Run tests for a specific crate
 cargo test -p perry-hir
 
-# Run a specific test
-cargo test -p perry-parser test_name
-
-# Check code without building
+# Check / format / lint
 cargo check
-
-# Format code
 cargo fmt
-
-# Lint code
 cargo clippy
 ```
 
@@ -64,24 +51,16 @@ cargo clippy
 
 ```bash
 # Compile a TypeScript file to executable
-cargo run -- test_factorial.ts
-
-# Compile with custom output name
-cargo run -- test_factorial.ts -o factorial
+cargo run --release -- test_factorial.ts -o factorial
 
 # Print HIR for debugging
-cargo run -- test_factorial.ts --print-hir
+cargo run --release -- test_factorial.ts --print-hir
 
 # Produce object file only (no linking)
-cargo run -- test_factorial.ts --no-link
-
-# Keep intermediate .o files
-cargo run -- test_factorial.ts --keep-intermediates
+cargo run --release -- test_factorial.ts --no-link
 ```
 
 ## Architecture
-
-The compiler follows a multi-stage pipeline:
 
 ```
 TypeScript (.ts) → Parse (SWC) → AST → Lower → HIR → Transform → Codegen (Cranelift) → .o → Link (cc) → Executable
@@ -89,23 +68,19 @@ TypeScript (.ts) → Parse (SWC) → AST → Lower → HIR → Transform → Cod
 
 ### Crate Structure
 
-- **perry** - CLI driver that orchestrates the pipeline
-- **perry-parser** - SWC wrapper for TypeScript parsing
-- **perry-types** - Type system definitions (Void, Boolean, Number, String, Array, Object, Function, Union, Promise, etc.)
-- **perry-hir** - High-level IR structures and AST→HIR lowering
-  - `ir.rs` - HIR data structures (Module, Class, Function, Statement, Expression)
-  - `lower.rs` - Lowering context and AST to HIR conversion
-- **perry-transform** - IR transformation passes (closure conversion, async lowering)
-- **perry-codegen** - Cranelift-based native code generation
-- **perry-runtime** - Runtime library linked into executables
-  - `value.rs` - JSValue representation (NaN-boxing)
-  - `object.rs`, `array.rs`, `string.rs`, `bigint.rs`, `closure.rs` - Heap types
-  - `promise.rs` - Promise implementation with closure-based callbacks
-  - `builtins.rs` - Built-in functions (console.log, etc.)
-- **perry-stdlib** - Standard library (Node.js API support: mysql2, redis, fetch, etc.)
-- **perry-ui** - Platform-agnostic UI types (WidgetHandle, WidgetKind, StateId)
-- **perry-ui-macos** - macOS AppKit UI backend (NSWindow, NSButton, NSTextField, NSStackView)
-- **perry-jsruntime** - JavaScript interop via QuickJS
+| Crate | Purpose |
+|-------|---------|
+| **perry** | CLI driver that orchestrates the pipeline |
+| **perry-parser** | SWC wrapper for TypeScript parsing |
+| **perry-types** | Type system definitions (Void, Boolean, Number, String, Array, Object, Function, Union, Promise, etc.) |
+| **perry-hir** | HIR data structures (`ir.rs`) and AST→HIR lowering (`lower.rs`) |
+| **perry-transform** | IR transformation passes (closure conversion, async lowering, inlining) |
+| **perry-codegen** | Cranelift-based native code generation |
+| **perry-runtime** | Runtime library linked into executables (`value.rs`, `object.rs`, `array.rs`, `string.rs`, `bigint.rs`, `closure.rs`, `promise.rs`, `builtins.rs`) |
+| **perry-stdlib** | Standard library — Node.js API support (mysql2, redis, fetch, fastify, ws, etc.) |
+| **perry-ui** | Platform-agnostic UI types (WidgetHandle, WidgetKind, StateId) |
+| **perry-ui-macos** | macOS AppKit UI backend (NSWindow, NSButton, NSTextField, NSStackView) |
+| **perry-jsruntime** | JavaScript interop via QuickJS |
 
 ### Key Data Flow
 
@@ -123,14 +98,62 @@ The HIR (`crates/perry-hir/src/ir.rs`) represents a simplified, typed intermedia
 - **Statement**: Let, Expr, Return, If, While, For, Break, Continue, Throw, Try
 - **Expression**: Literals, variable access (LocalGet/Set, GlobalGet/Set), operations, calls, object/array literals
 
+## NaN-Boxing Implementation
+
+Perry uses NaN-boxing to represent JavaScript values efficiently in 64 bits. Key tag constants in `perry-runtime/src/value.rs`:
+
+```rust
+TAG_UNDEFINED = 0x7FFC_0000_0000_0001
+TAG_NULL      = 0x7FFC_0000_0000_0002
+TAG_FALSE     = 0x7FFC_0000_0000_0003
+TAG_TRUE      = 0x7FFC_0000_0000_0004
+BIGINT_TAG    = 0x7FFA_0000_0000_0000  // BigInt pointer (lower 48 bits)
+STRING_TAG    = 0x7FFF_0000_0000_0000  // String pointer (lower 48 bits)
+POINTER_TAG   = 0x7FFD_0000_0000_0000  // Object/Array pointer (lower 48 bits)
+INT32_TAG     = 0x7FFE_0000_0000_0000  // Int32 value (lower 32 bits)
+```
+
+### Key Runtime Functions
+
+- `js_nanbox_string(ptr)` / `js_nanbox_pointer(ptr)` / `js_nanbox_bigint(ptr)` — Wrap pointers with tags
+- `js_nanbox_get_pointer(f64)` — Extract object/array pointer from NaN-boxed value
+- `js_nanbox_get_bigint(f64)` — Extract BigInt pointer
+- `js_get_string_pointer_unified(f64)` — Extract raw pointer from NaN-boxed or raw string
+- `js_jsvalue_to_string(f64)` — Convert any NaN-boxed value to string
+- `js_is_truthy(f64)` — Proper JavaScript truthiness semantics
+
+### Module-Level Variables
+
+- **Strings**: Stored as F64 (NaN-boxed with STRING_TAG), NOT I64 raw pointers
+- **Arrays/Objects**: Stored as I64 (raw pointers)
+- Functions access module variables via `module_var_data_ids` mapping
+
+## Promise System
+
+Promises use closure-based callbacks (`ClosurePtr`) instead of raw function pointers:
+
+```rust
+pub type ClosurePtr = *const crate::closure::ClosureHeader;
+pub struct Promise {
+    state: PromiseState,
+    value: f64,
+    reason: f64,
+    on_fulfilled: ClosurePtr,
+    on_rejected: ClosurePtr,
+    next: *mut Promise,
+}
+```
+
+Callbacks are invoked via `js_closure_call1(closure, value)` which properly passes the closure environment.
+
 ## Native UI Architecture (`perry/ui`)
 
-Perry supports native macOS GUI apps via the `perry/ui` module. Developers write declarative TypeScript that compiles to AppKit calls — no Electron, no WebView.
+Perry supports native macOS GUI apps via `perry/ui`. Declarative TypeScript compiles to AppKit calls — no Electron, no WebView.
 
 ### TypeScript API
 
 ```typescript
-import { App, VStack, HStack, Text, Button, State } from "perry/ui"
+import { App, VStack, HStack, Text, Button, State, Spacer, Divider, TextField, Toggle, Slider } from "perry/ui"
 
 const count = State(0)
 
@@ -141,411 +164,198 @@ App({
     body: VStack(16, [
         Text(`Count: ${count.value}`),
         Button("Increment", () => count.set(count.value + 1)),
+        Divider(),
+        TextField("Enter name", (text: string) => { console.log(text) }),
+        Toggle("Notifications", (on: boolean) => { console.log(on) }),
+        Slider(0, 100, 50, (val: number) => { count.set(val) }),
+        Spacer(),
     ])
 })
 ```
 
-### End-to-End Pipeline
+### Pipeline
 
 ```
 TypeScript: import { Text, Button } from "perry/ui"
-    ↓
-HIR: "perry/ui" in NATIVE_MODULES → NativeMethodCall { module: "perry/ui", method: "Text" }
-    ↓
-Codegen: Special dispatch for VStack/HStack/Button/App → calls perry_ui_* FFI functions
-         Generic dispatch for Text/State → calls perry_ui_text_create / perry_ui_state_*
-    ↓
-Linker: Detects perry/ui import → links libperry_ui_macos.a + AppKit framework
-    ↓
-Runtime: perry-ui-macos uses objc2 to create NSWindow, NSStackView, NSTextField, NSButton
+  → HIR: "perry/ui" in NATIVE_MODULES → NativeMethodCall { module: "perry/ui", method: "Text" }
+  → Codegen: Special dispatch → calls perry_ui_* FFI functions
+  → Linker: Detects perry/ui import → links libperry_ui_macos.a + AppKit framework
+  → Runtime: perry-ui-macos uses objc2 for NSWindow, NSStackView, NSTextField, NSButton
 ```
-
-### Crate Structure
-
-- **`perry-ui`** (`crates/perry-ui/`) — Platform-agnostic types: `WidgetHandle`, `WidgetKind`, `StateId`. Pure `rlib`, no platform deps.
-- **`perry-ui-macos`** (`crates/perry-ui-macos/`) — macOS AppKit backend via `objc2`. Builds as `staticlib` (`libperry_ui_macos.a`).
-- Future: `perry-ui-linux` (GTK4), `perry-ui-ios`, etc.
 
 ### Handle-Based Widget System
 
-All UI objects (windows, widgets, state cells) are stored in thread-local `Vec`s and referenced by **1-based i64 handles**:
-
-```rust
-thread_local! {
-    static WIDGETS: RefCell<Vec<Retained<NSView>>> = RefCell::new(Vec::new());
-}
-fn register_widget(view: Retained<NSView>) -> i64 {
-    WIDGETS.with(|w| { w.borrow_mut().push(view); w.borrow().len() as i64 })
-}
-fn get_widget(handle: i64) -> Option<Retained<NSView>> { /* index = handle - 1 */ }
-```
-
-Handles are NaN-boxed with `POINTER_TAG` when returned from generic `NativeMethodCall` codegen, so callers must use `js_nanbox_get_pointer(f64) -> i64` to extract raw handles.
+All UI objects are stored in thread-local `Vec`s and referenced by **1-based i64 handles**. Handles are NaN-boxed with `POINTER_TAG` from generic `NativeMethodCall` codegen — callers must use `js_nanbox_get_pointer(f64) -> i64` to extract raw handles.
 
 ### Reactive State Binding
 
-State cells hold `f64` values. Text widgets can be **bound** to state so they auto-update:
-
-1. **Compile time**: `detect_text_state_binding()` in codegen detects `Text("prefix" + State.value)` pattern
-2. **Compile time**: Emits `perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr)` after creating the Text widget
-3. **Runtime**: `state_set()` iterates all bindings for that state, formats `"{prefix}{value}"`, calls `set_text_str()` on NSTextField
+1. **Compile time**: `detect_text_state_binding()` detects `Text("prefix" + State.value)` pattern
+2. **Compile time**: Emits `perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr)`
+3. **Runtime**: `state_set()` iterates bindings, formats `"{prefix}{value}"`, updates NSTextField
 
 ### FFI Surface (all `#[no_mangle] pub extern "C"`)
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `perry_ui_app_create` | `(title: i64, w: f64, h: f64) -> i64` | Create NSWindow, return app handle |
+| `perry_ui_app_create` | `(title: i64, w: f64, h: f64) -> i64` | Create NSWindow |
 | `perry_ui_app_set_body` | `(app: i64, root: i64)` | Set root widget with Auto Layout |
-| `perry_ui_app_run` | `(app: i64)` | Run NSApplication event loop (blocks) |
+| `perry_ui_app_run` | `(app: i64)` | Run NSApplication event loop |
 | `perry_ui_text_create` | `(text_ptr: i64) -> i64` | Create NSTextField label |
-| `perry_ui_button_create` | `(label: i64, on_press: f64) -> i64` | Create NSButton with closure callback |
-| `perry_ui_vstack_create` | `(spacing: f64) -> i64` | Create vertical NSStackView |
-| `perry_ui_hstack_create` | `(spacing: f64) -> i64` | Create horizontal NSStackView |
+| `perry_ui_button_create` | `(label: i64, on_press: f64) -> i64` | Create NSButton with closure |
+| `perry_ui_vstack_create` / `hstack` | `(spacing: f64) -> i64` | Create NSStackView |
 | `perry_ui_widget_add_child` | `(parent: i64, child: i64)` | Add child to container |
 | `perry_ui_state_create` | `(initial: f64) -> i64` | Create reactive state cell |
-| `perry_ui_state_get` | `(state: i64) -> f64` | Read state value |
-| `perry_ui_state_set` | `(state: i64, value: f64)` | Write state + trigger bindings |
-| `perry_ui_state_bind_text_numeric` | `(state: i64, text: i64, prefix: i64)` | Bind text to `"{prefix}{value}"` |
+| `perry_ui_state_get` / `set` | `(state: i64) -> f64` / `(state: i64, val: f64)` | Read/write state |
+| `perry_ui_state_bind_text_numeric` | `(state: i64, text: i64, prefix: i64)` | Bind text to state |
+| `perry_ui_spacer_create` | `() -> i64` | Create flexible spacer view |
+| `perry_ui_divider_create` | `() -> i64` | Create horizontal separator (NSBox) |
+| `perry_ui_textfield_create` | `(placeholder: i64, on_change: f64) -> i64` | Create editable text field |
+| `perry_ui_toggle_create` | `(label: i64, on_change: f64) -> i64` | Create switch + label |
+| `perry_ui_slider_create` | `(min: f64, max: f64, initial: f64, on_change: f64) -> i64` | Create horizontal slider |
 
 ### How to Add a New Widget
 
-Adding a new widget (e.g., `Slider`, `TextField`, `Image`) requires changes in **4 places**:
+Changes required in **4 places**:
 
-#### 1. Runtime: `crates/perry-ui-macos/src/widgets/`
+1. **Runtime** (`crates/perry-ui-macos/src/widgets/`): Create widget file, register with `register_widget(view)`
+2. **FFI** (`crates/perry-ui-macos/src/lib.rs`): Add `#[no_mangle] pub extern "C" fn perry_ui_<widget>_create(...) -> i64`
+3. **Codegen** (`crates/perry-codegen/src/codegen.rs`):
+   - Declare extern function in `declare_runtime_functions` (search for `perry_ui_`)
+   - Add dispatch entry in `NativeMethodCall` match (search for `"perry/ui"`)
+   - Simple widgets: `("perry/ui", false, "Widget") => "perry_ui_widget_create"`
+   - Container widgets: Follow VStack/HStack pattern for children array handling
+4. **HIR** (`crates/perry-hir/src/lower.rs`): Only if widget has instance methods — register as native instance class like State
 
-Create `slider.rs` (example):
-
-```rust
-pub fn create(min: f64, max: f64, initial: f64) -> i64 {
-    let mtm = MainThreadMarker::new().expect("must run on main thread");
-    let slider = unsafe { NSSlider::initWithTarget_action(NSSlider::alloc(mtm), None, None) };
-    // Configure min/max/value...
-    let view: Retained<NSView> = unsafe { Retained::cast_unchecked(slider) };
-    super::register_widget(view)
-}
-```
-
-Add `pub mod slider;` to `widgets/mod.rs`.
-
-#### 2. FFI: `crates/perry-ui-macos/src/lib.rs`
-
-```rust
-#[no_mangle]
-pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64) -> i64 {
-    widgets::slider::create(min, max, initial)
-}
-```
-
-#### 3. Codegen: `crates/perry-codegen/src/codegen.rs`
-
-**3a. Declare extern function** (in `declare_runtime_functions`, search for `perry_ui_`):
-
-```rust
-// perry_ui_slider_create(min: f64, max: f64, initial: f64) -> i64
-{
-    let mut sig = self.module.make_signature();
-    sig.params.push(AbiParam::new(types::F64)); // min
-    sig.params.push(AbiParam::new(types::F64)); // max
-    sig.params.push(AbiParam::new(types::F64)); // initial
-    sig.returns.push(AbiParam::new(types::I64)); // handle
-    let func_id = self.module.declare_function("perry_ui_slider_create", Linkage::Import, &sig)?;
-    self.extern_funcs.insert("perry_ui_slider_create".to_string(), func_id);
-}
-```
-
-**3b. Add dispatch entry** (in `NativeMethodCall` match, search for `"perry/ui"`):
-
-For simple widgets (no children array), add to the func_name match:
-```rust
-("perry/ui", false, "Slider") => "perry_ui_slider_create",
-```
-
-For container widgets (with children array), add a special handler in the `if native_module == "perry/ui"` block, following the VStack/HStack pattern.
-
-**3c. Result handling** is automatic — the `perry/ui` result handler NaN-boxes i64 handles with `POINTER_TAG`.
-
-#### 4. HIR: `crates/perry-hir/src/lower.rs` (only if widget has stateful methods)
-
-If the widget has instance methods (e.g., `slider.value`, `slider.onChange(cb)`), register it as a native instance class like State:
-
-```rust
-if module_name == "perry/ui" && method_name == "Slider" {
-    ctx.register_native_instance(name.clone(), module_name.to_string(), "Slider".to_string());
-}
-```
-
-This enables `slider.value` → `NativeMethodCall { method: "value", object: Some(slider_local) }`.
-
-### Build & Test UI
-
-```bash
-# Build UI crate
-cargo build --release -p perry-ui-macos
-
-# Full build (compiler + runtime + UI)
-cargo build --release && cargo build --release -p perry-runtime
-
-# Compile & run UI app
-cargo run --release -- test-files/test_ui_counter.ts -o counter && ./counter
-```
-
-Non-UI programs are completely unaffected — `libperry_ui_macos.a` and AppKit are only linked when `perry/ui` is imported.
-
-## NaN-Boxing Implementation
-
-Perry uses NaN-boxing to represent JavaScript values efficiently in 64 bits. Key tag constants in `perry-runtime/src/value.rs`:
-
-```rust
-TAG_UNDEFINED = 0x7FFC_0000_0000_0001  // undefined value
-TAG_NULL      = 0x7FFC_0000_0000_0002  // null value
-TAG_FALSE     = 0x7FFC_0000_0000_0003  // false
-TAG_TRUE      = 0x7FFC_0000_0000_0004  // true
-BIGINT_TAG    = 0x7FFA_0000_0000_0000  // BigInt pointer (lower 48 bits)
-STRING_TAG    = 0x7FFF_0000_0000_0000  // String pointer (lower 48 bits)
-POINTER_TAG   = 0x7FFD_0000_0000_0000  // Object/Array pointer (lower 48 bits)
-INT32_TAG     = 0x7FFE_0000_0000_0000  // Int32 value (lower 32 bits)
-```
-
-### Important Runtime Functions
-
-- `js_nanbox_string(ptr)` - Wrap a string pointer with STRING_TAG
-- `js_nanbox_pointer(ptr)` - Wrap an object/array pointer with POINTER_TAG
-- `js_nanbox_bigint(ptr)` - Wrap a BigInt pointer with BIGINT_TAG
-- `js_nanbox_get_bigint(f64)` - Extract BigInt pointer from NaN-boxed value
-- `js_get_string_pointer_unified(f64)` - Extract raw pointer from NaN-boxed or raw string
-- `js_jsvalue_to_string(f64)` - Convert any NaN-boxed value to string
-- `js_is_truthy(f64)` - Proper JavaScript truthiness semantics
-
-### Module-Level Variables
-
-Module-level variables are stored in global data slots:
-- **Strings**: Stored as F64 (NaN-boxed), NOT I64 raw pointers
-- **Arrays/Objects**: Stored as I64 (raw pointers)
-- Functions access module variables via `module_var_data_ids` mapping
-
-## Promise System
-
-Promises use closure-based callbacks (`ClosurePtr`) instead of raw function pointers:
-
-```rust
-pub type ClosurePtr = *const crate::closure::ClosureHeader;
-
-pub struct Promise {
-    state: PromiseState,
-    value: f64,
-    reason: f64,
-    on_fulfilled: ClosurePtr,  // Closure, not raw fn pointer
-    on_rejected: ClosurePtr,
-    next: *mut Promise,
-}
-```
-
-Callbacks are invoked via `js_closure_call1(closure, value)` which properly passes the closure environment.
+Build: `cargo build --release -p perry-ui-macos`. Non-UI programs are unaffected — UI libs only linked when `perry/ui` is imported.
 
 ## Known Working Features
 
-- Basic arithmetic, comparisons, logical operators
-- Variables, constants, type annotations
-- Functions (regular, async, arrow, closures)
+- Arithmetic, comparisons, logical operators, variables, constants, type annotations
+- Functions (regular, async, arrow, closures with up to 8 args)
 - Classes with constructors, methods, inheritance
-- Arrays with methods (push, pop, map, filter, find, etc.)
+- Arrays with methods (push, pop, map, filter, find, join, reduce, etc.)
 - Objects with property access (dot and bracket notation)
 - Template literals with interpolation
-- Promises with .then(), .catch(), .finally()
-- Promise.resolve(), Promise.reject()
-- async/await
+- Promises (.then, .catch, .finally, Promise.all, Promise.resolve, Promise.reject)
+- async/await with proper rejection propagation
 - try/catch/finally
 - fetch() with custom headers
-- Multi-module compilation with imports/exports
+- Multi-module compilation with imports/exports/re-exports
+- Native modules: mysql2, ioredis, ws, fastify, ethers, pg, async_hooks, and more
+- Native macOS UI via `perry/ui`
+- BigInt with arithmetic and comparisons
 
 ## Known Limitations
 
 ### No Garbage Collection
-Perry uses a **bump arena allocator** (`crates/perry-runtime/src/arena.rs`) for all heap objects. Memory is never individually freed — the arena grows in 8MB blocks and objects persist for the lifetime of the process. This design gives O(1) allocation speed but means:
-- **Best suited for short-running programs** (CLI tools, scripts, batch jobs, request handlers)
-- Long-running programs will gradually consume more memory
-- No reference counting, no tracing GC, no mark-and-sweep
-- `process.memoryUsage()` is available to monitor arena usage at runtime:
-  - `rss` - Resident Set Size (total process memory from OS)
-  - `heapTotal` - Total arena capacity (8MB per block)
-  - `heapUsed` - Bytes allocated within arena blocks
-  - `external` / `arrayBuffers` - Always 0 (not tracked)
+Uses a **bump arena allocator** (`crates/perry-runtime/src/arena.rs`). Memory is never freed — arena grows in 8MB blocks. Best suited for short-running programs. `process.memoryUsage()` available to monitor.
 
 ### No Runtime Type Checking
-TypeScript types are **erased at compile time**. Perry compiles based on inferred types and NaN-boxing tags, but does not enforce TypeScript's type system at runtime:
-- `as` casts are no-ops (no runtime validation)
-- Type guards (`if (typeof x === 'string')`) work via `typeof` operator, which correctly inspects NaN-boxing tags at runtime
-- `typeof` returns: `"number"`, `"string"`, `"boolean"`, `"object"`, `"function"`, `"undefined"` — including `"function"` for closures
-- `instanceof` works for class instances via class ID chain
-- Union-typed variables use NaN-boxed F64 for runtime dispatch
-- There is no runtime enforcement of interfaces, generic constraints, or type assertions
+TypeScript types are **erased at compile time**. `as` casts are no-ops. `typeof` works via NaN-boxing tag inspection. `instanceof` works for class instances via class ID chain. No runtime enforcement of interfaces or generics.
 
 ### Single-Threaded
-User code runs on a **single thread**. There is no `Worker`, `SharedArrayBuffer`, or `Atomics` support:
-- Async I/O (database queries, HTTP, WebSocket) runs on a 4-thread tokio worker pool
-- Promise callbacks and user code always execute on the main thread
-- Thread-local arenas mean JSValues cannot be shared between threads
-- The `spawn_for_promise_deferred()` pattern ensures safe cross-thread data transfer
-
-## Test Files
-
-Root-level `test_*.ts` files serve as integration tests for various language features:
-- `test_factorial.ts` - Recursive functions
-- `test_for.ts` - For loop
-- `test_break_continue.ts` - Break and continue statements
-- `test_class.ts`, `test_class_method.ts` - Class definitions
-- `test_array.ts`, `test_array_loop.ts` - Array operations
-- `test_bigint.ts` - BigInt support
-- `test_closure.ts` - Closure handling
-- `test_string.ts` - String operations
-
-To test a feature, compile and run:
-```bash
-cargo run --release -- test_factorial.ts && ./test_factorial
-```
+User code runs on a single thread. Async I/O runs on a 4-thread tokio worker pool. Promise callbacks always execute on the main thread. Thread-local arenas mean JSValues cannot be shared between threads — use `spawn_for_promise_deferred()` for safe cross-thread data transfer.
 
 ## Cross-Platform Development
 
-Perry supports development on macOS with deployment to Linux via multiple methods:
+- **GitHub Actions**: Templates in `templates/github-actions/` (ci.yml, release.yml) — copy to `.github/workflows/` to activate
+- **Docker**: `Dockerfile` (multi-stage), `Dockerfile.dev` (development), `docker-compose.yml` (with MySQL, Redis, PostgreSQL)
+- See `docs/CROSS_PLATFORM.md` for details
 
-### GitHub Actions CI/CD (Templates)
-- `templates/github-actions/ci.yml` - Tests on Ubuntu and macOS for every push/PR
-- `templates/github-actions/release.yml` - Builds release binaries on version tags
-- Copy to `.github/workflows/` to activate
+## Test Files
 
-### Docker Support
-- `Dockerfile` - Multi-stage build with `compiler` and `runtime` targets
-- `Dockerfile.dev` - Full development environment with Rust toolchain
-- `docker-compose.yml` - Development setup with MySQL, Redis, PostgreSQL for testing
+Root-level `test_*.ts` files serve as integration tests. Compile and run: `cargo run --release -- test_factorial.ts && ./test_factorial`
 
-### Quick Start
-```bash
-# Build Linux binary via Docker
-docker compose run --rm perry myfile.ts -o myfile
+## Debugging Tips
 
-# Development with test databases
-docker compose up -d mysql redis
-docker compose run --rm perry-dev cargo test
-```
+1. **Print HIR**: `--print-hir` shows the intermediate representation
+2. **Keep object files**: `--keep-intermediates` to inspect .o files
+3. **Check value types**: NaN-boxed values can be inspected by their bit patterns
+4. **Module init order**: Entry module calls `_perry_init_*` for each imported module
 
-See `docs/CROSS_PLATFORM.md` for detailed documentation on:
-- GitHub Actions workflows
-- Docker compilation
-- Cross-compilation with `cross`
-- Alternative approaches (Multipass, Lima, Codespaces, Nix)
+## Common Pitfalls & Patterns
 
-## Recent Fixes (v0.2.37-0.2.125)
+These are recurring issues encountered during development. Check these first when debugging.
 
-**Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+### NaN-Boxing Mistakes
+- **Double NaN-boxing**: If value is already F64 (NaN-boxed), don't NaN-box again. Check `builder.func.dfg.value_type(val)` first.
+- **Wrong tag**: Strings use STRING_TAG, objects use POINTER_TAG, BigInt uses BIGINT_TAG.
+- **`as f64` vs `from_bits`**: Rust `u64 as f64` is numeric conversion (corrupts NaN-boxing). Use `f64::from_bits(u64_value)` to preserve bit patterns.
+- **Handle extraction**: Handle-based objects (Fastify, ioredis, UI widgets) are small integers NaN-boxed with POINTER_TAG. Use `js_nanbox_get_pointer` to extract, not bitcast.
 
-### v0.2.123
-- Fix Cmd+Q to quit and button callbacks in perry/ui apps
-  - **Cmd+Q**: Added standard macOS menu bar with Quit menu item wired to `terminate:` action
-  - **Button callbacks**: `js_closure_call0` expects raw `*const ClosureHeader` but received NaN-boxed
-    POINTER_TAG bits (`0x7FFD...`). Now uses `js_nanbox_get_pointer` to extract raw closure pointer
-    before calling `js_closure_call0`
-  - Clicking "Increment" now correctly calls the closure which updates the State value
-  - Note: Text label reactivity (updating when state changes) is a Phase 2 feature
+### Cranelift Type Mismatches
+- Loop counter optimization produces I32 values — always convert before passing to functions expecting F64/I64
+- Check `builder.func.dfg.value_type(val)` before conversion; handle all combinations: F64↔I64, I32→F64, I32→I64
+- Variables declared as F64 (due to `is_union` flag) must not receive I64 values — check `is_pointer && !is_union`
+- Constructor parameters are always F64 (NaN-boxed) at signature level, even for pointer types
 
-### v0.2.122
-- Fix VStack/HStack children not rendering — NaN-boxed handle extraction
-  - Root cause: VStack child loop used `ensure_i64` (raw bitcast) on child values, but Text/State
-    widgets return NaN-boxed POINTER_TAG handles from the generic NativeMethodCall result path
-  - For a widget handle like 2, the NaN-boxed value has bits `0x7FFD_0000_0000_0002`
-  - `ensure_i64` bitcast gave i64 `0x7FFD...`, but `get_widget` expected raw handle `2`
-  - `(0x7FFD... - 1) as usize` was way out of bounds, so `get_widget` returned None → child silently skipped
-  - Button worked because its special handler returns raw bitcast (not NaN-boxed)
-  - Fix: Use `js_nanbox_get_pointer` to extract raw handle from child values
-  - This handles both NaN-boxed (Text, State) and raw bitcast (Button, nested VStack) children
-  - Counter app now correctly shows "Count: 0" text AND "Increment" button
+### Function Inlining (inline.rs)
+- `try_inline_call` returns full function body including `Stmt::Return` — in `Stmt::Expr` context, convert `Return(Some(e))` → `Expr(e)`
+- `substitute_locals` must handle ALL expression types (Object, JSON, Set/Map/Array methods, Await, etc.)
 
-### v0.2.121
-- Fix UI widgets not rendering text — string pointer format mismatch
-  - Widget FFI functions (`perry_ui_text_create`, `perry_ui_button_create`, `perry_ui_app_create`)
-    used `libc::strlen` assuming null-terminated C strings, but received `*const StringHeader` pointers
-  - `StringHeader` is `{ length: u32, capacity: u32 }` followed by UTF-8 data (not null-terminated)
-  - `libc::strlen` read the header bytes as characters, producing garbled/empty strings
-  - Fix: Read `length` from `StringHeader`, skip 8-byte header to get data pointer
-  - Added `str_from_header` helper in text.rs, button.rs, and app.rs
-- Fix VStack/HStack child views not visible — missing Auto Layout constraints
-  - Root widget was set as `contentView` but had no constraints to fill the window
-  - Added `translatesAutoresizingMaskIntoConstraints = false` and pinned all edges
-  - Added edge insets (20px padding) to NSStackView for visual spacing
-- Counter app now shows "Count: 0" text and "Increment" button correctly
+### Async / Threading
+- Thread-local arenas: JSValues created on tokio worker threads are invalid on main thread
+- Use `spawn_for_promise_deferred()` — return raw Rust data from async block, convert to JSValue on main thread via converter that runs during `js_stdlib_process_pending()`
+- Async closures: `Expr::Closure` has `is_async` field; Promise pointer (I64) must be NaN-boxed with POINTER_TAG (not bitcast) before returning as F64
 
-### v0.2.120
-- Contained i32 index arithmetic optimization for array access in loops
-  - Added `try_compile_index_as_i32` helper that compiles index expressions entirely in i32 arithmetic
-  - Handles: integer literals, i32 loop counters, i32 shadows, `is_integer` params, and Binary Add/Sub/Mul
-  - Applied in IndexGet and IndexSet else branches (complex index expressions like `i * size + k`)
-  - Unlike v0.2.117's broad i32 fast path (disabled in v0.2.118), i32 values are **contained** —
-    they never escape into the wider `compile_expr` return path, only used as immediate array indices
-  - Before: `i * size + k` required 3 f64↔i32 conversions + 2 float ops per array access
-  - After: 2 integer ops per array access (Cranelift CSEs the `size` f64→i32 conversion)
-  - Matrix multiply benchmark: ~50ms → ~41ms (Perry) vs ~39ms (Node) — 1.28x → 1.05x gap
-  - No regressions: fibonacci, object_create, string methods, array operations all unchanged
+### Cross-Module Issues
+- ExternFuncRef values are NaN-boxed — use `js_nanbox_get_pointer` to extract, not bitcast
+- Module init order: topological sort by import dependencies
+- Functions with optional params: `imported_func_param_counts` propagation needed, including through re-exports
+- Wrapper functions: truncate `call_args` to match declared signature when caller provides excess args
 
-### v0.2.119
-- Fix UI counter app SIGILL crash and module init variable ID conflicts
-  - Use fresh `FunctionBuilderContext` for module init function to avoid variable ID conflicts
-    with previously compiled functions (shared `func_ctx` accumulated stale variable declarations)
-  - Fix `create_field_name` in App() codegen: use `js_string_from_bytes` to create proper
-    `StringHeader*` pointers instead of raw C strings for `js_object_get_field_by_name_f64`
-  - Fix body widget handle extraction: use `js_nanbox_get_pointer` instead of `fcvt_to_sint`
-    for extracting NaN-boxed POINTER_TAG values (float-to-int conversion corrupts NaN-boxed bits)
-  - Counter app now opens a native macOS window with text and button widgets
+### Closure Captures
+- `collect_local_refs_expr()` must explicitly handle all expression types — catch-all patterns silently skip variable references
+- Captured string/pointer values must be NaN-boxed before storing (`js_nanbox_string`/`js_nanbox_pointer`), not raw bitcast
+- Loop counter i32 values must be converted to f64 via `fcvt_from_sint` before capture storage
 
-### v0.2.118
-- Disable i32 arithmetic fast path in Binary expressions to fix type mismatch errors
-  - The broad i32 fast path (`can_be_i32`/`to_i32`) produced i32 results that weren't converted
-    back to f64 when used in contexts expecting f64 (Math.pow, function calls, etc.)
-  - Loop counter optimization already handles i32 for array indexing via IndexGet/IndexSet special paths
-  - Number-typed function parameters still marked `is_integer` (from v0.2.117) for Pattern 4 loop optimization
-  - Could be re-enabled with careful tracking of which expressions are only used for array indexing
+### Loop Optimization
+- Generic accumulator optimization (Pattern 3: `x = x + f(i)`) creates 8 f64 accumulators — skip for string variables
+- While-loop unrolling disabled (bloated i-cache); CSE optimization (x*x caching) still active
+- Const propagation: `const` numeric literals emit `f64const` inline instead of variable loads
+- Array pointer caching: `cached_array_ptr` hoists `js_nanbox_get_pointer` out of for-loops
+- i32 index arithmetic: `try_compile_index_as_i32` keeps integer ops contained to array indexing only
 
-### v0.2.117
-- Integer arithmetic optimization for array index computations in tight loops
-  - **Number-typed function parameters now marked `is_integer`**: Enables loop counter i32 optimization
-    (Pattern 4) for loops bounded by function parameters like `for (let i = 0; i < size; i++)`
-  - **i32 arithmetic fast path in Binary expressions**: When both operands of Add/Sub/Mul can be
-    i32 (loop counters, integer-typed variables, integer literals, or sub-expressions of these),
-    uses native `iadd`/`isub`/`imul` instead of `fadd`/`fsub`/`fmul` with f64 conversions
-    - Placed BEFORE FMA optimization to prevent `fma(i, size, k)` on pure integer index expressions
-    - Recursive `can_be_i32` check handles nested expressions like `i * size + k`
-    - `to_i32` helper converts f64→i32 via `fcvt_to_sint` when needed (e.g., for `is_integer` params)
-  - **i32 index passthrough in IndexGet/IndexSet**: When compiled index expression already produces
-    i32, skips the `ensure_f64` → `fcvt_to_sint` round-trip conversion
-  - Matrix multiply benchmark: ~69ms → ~50ms (Perry) vs ~37ms (Node) — 1.86x → 1.35x gap
-  - All existing benchmarks and tests unaffected (no regressions)
+### Handle-Based Dispatch
+- TWO dispatch systems: `HANDLE_METHOD_DISPATCH` (method calls) and `HANDLE_PROPERTY_DISPATCH` (property access)
+- Both must be registered for handles to work fully
+- Small pointer detection: value < 0x100000 indicates handle, not real pointer
 
-### v0.2.116
-- Add native macOS UI support via `perry/ui` module (Phase 1)
-  - New crate `perry-ui`: Platform-agnostic core types (WidgetHandle, WidgetKind, StateId)
-  - New crate `perry-ui-macos`: AppKit backend via objc2 bindings, produces `libperry_ui_macos.a`
-  - Widgets: Text (NSTextField label), Button (NSButton with closure callback), VStack/HStack (NSStackView)
-  - State management: `State(initialValue)` creates reactive state, `.value` reads, `.set(v)` updates
-  - App: `App({ title, width, height, body })` creates NSWindow and runs NSApplication event loop
-  - Button callbacks use `define_class!` to create PerryButtonTarget NSObject subclass with target-action pattern
-  - Widget registry: thread-local `Vec<Retained<NSView>>` with 1-based handle IDs
-  - Stack views auto-detect NSStackView via `isKindOfClass` for `addArrangedSubview`
-  - HIR: Added `"perry/ui"` to NATIVE_MODULES, State instance tracking for `.value`/`.set()` method dispatch
-  - Codegen: 11 `perry_ui_*` extern function declarations, special handling for VStack/HStack children arrays,
-    Button label+closure extraction, App config object field extraction
-  - Linker: Auto-detects `perry/ui` imports, conditionally links `libperry_ui_macos.a` and `-framework AppKit`
-  - Non-UI programs are completely unaffected (no UI libs linked, no size increase)
-  - Example usage:
-    ```typescript
-    import { App, VStack, Text, Button, State } from "perry/ui"
-    const count = State(0)
-    App({
-        title: "Counter", width: 400, height: 300,
-        body: VStack(16, [
-            Text(`Count: ${count.value}`),
-            Button("Increment", () => count.set(count.value + 1)),
-        ])
-    })
-    ```
-  - Build UI crate: `cargo build --release -p perry-ui-macos`
+### UI Codegen (perry/ui)
+- NativeMethodCall has TWO arg-passing paths: has-object (appends to `call_args` starting with handle) and no-object (builds complete `call_args`)
+- For has-object methods like `State.set()`, add args in the has-object chain, NOT in the no-object section
+- Use `js_object_get_field_by_name_f64` (NOT `js_object_get_field_by_name`) for runtime field extraction
+- StringHeader format: `{ length: u32, capacity: u32 }` + data (not null-terminated) — use `str_from_header` helper
+
+### objc2 v0.6 API (perry-ui-macos)
+- `define_class!` (not `declare_class!`) with `#[unsafe(super(NSObject))]`
+- `Retained::cast_unchecked` (not `Retained::cast`)
+- `msg_send!` returns `Retained` directly (not `msg_send_id!`)
+- All AppKit constructors require `MainThreadMarker`
+- `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
+
+## Recent Changes
+
+### v0.2.127
+- Add 5 new perry/ui widgets: Spacer, Divider, TextField, Toggle, Slider
+  - **Spacer**: Transparent NSView with low content-hugging priority — stretches to fill available space in stack views
+  - **Divider**: NSBox with separator type — horizontal line between sections
+  - **TextField**: Editable NSTextField with placeholder string and onChange callback
+    - Uses NSNotificationCenter to observe `NSControlTextDidChangeNotification`
+    - Callback receives NaN-boxed string (STRING_TAG) of current text content
+    - API: `TextField("placeholder", (text: string) => { ... })`
+  - **Toggle**: NSSwitch + NSTextField label in horizontal NSStackView, with onChange callback
+    - Callback receives TAG_TRUE/TAG_FALSE NaN-boxed boolean values
+    - API: `Toggle("label", (checked: boolean) => { ... })`
+  - **Slider**: Horizontal NSSlider with min/max/initial values and onChange callback
+    - Continuous mode — fires callback while dragging
+    - Callback receives plain f64 value (no NaN-boxing needed for numbers)
+    - API: `Slider(0, 100, 50, (value: number) => { ... })`
+  - All callback widgets follow the Button pattern: `define_class!` for target, thread-local HashMap for callbacks, `std::mem::forget(target)` to prevent deallocation
+  - Added `NSBox`, `NSSwitch`, `NSSlider` features to objc2-app-kit Cargo.toml
+  - Special codegen handlers for TextField, Toggle, Slider (string pointer extraction + closure handling)
+  - Spacer and Divider use generic dispatch (no args)
+  - New demo: `test-files/test_ui_controls.ts`
 
 ### v0.2.126
 - Eliminate js_is_truthy FFI calls in while-loop conditions for Compare expressions
@@ -560,811 +370,69 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Extend constant folding to handle LocalGet with const_value
   - `get_constant_value()` now checks `locals` for variables with `const_value` set
   - Expressions like `WIDTH / 2.0` (where `const WIDTH = 800`) now fold to `f64const(400.0)`
-  - Enables Cranelift to strength-reduce subsequent divisions by known constants
 
-### v0.2.124
-- Implement reactive text binding for perry/ui State
-  - Text widgets bound to State values now auto-update when State.set() is called
-  - Added `perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr)` FFI
-  - Detects `Text("prefix" + State.value)` pattern at compile time in VStack/HStack children
-  - When state changes, formats `"{prefix}{value}"` and updates NSTextField's stringValue
-  - Integer values formatted without decimal point (matches JavaScript behavior)
-  - Counter demo now works: clicking "Increment" updates "Count: 0" → "Count: 1" → "Count: 2" etc.
-  - Added `set_text_str(handle, text)` to `widgets/text.rs` for runtime text updates
-  - Added text binding registry to `state.rs` with per-state-handle binding lists
-- Disable while-loop unrolling and add const value propagation for numeric literals
-  - **While-loop unrolling disabled**: The 8x unrolling for while loops with CSE (squared variable caching)
-    bloated data-dependent loops (like mandelbrot) beyond CPU i-cache/loop stream detector limits.
-    The CSE optimization (caching x*x, y*y at loop header) is independent and continues to work.
-    Mandelbrot improved from ~55ms to ~48ms (with unrolling disabled).
-  - **Const value propagation**: `const` variables initialized with numeric literals (`Integer` or `Number`)
-    now emit `f64const` inline instead of loading from Cranelift variables. Enables Cranelift constant folding.
-    - Added `const_value: Option<f64>` field to `LocalInfo` struct
-    - Tracked for both module-level and function-level `const` variables with `mutable: false`
-    - Only applies to non-pointer, non-string, non-bigint variables with literal initializers
-    - `Expr::LocalGet` returns `f64const(val)` when `const_value` is `Some`
-
-### v0.2.115
-- Performance optimizations: array pointer caching in loops and integer function specialization
-  - **Array pointer caching**: Hoist `js_nanbox_get_pointer` calls out of for-loops for arrays used in IndexGet/IndexSet
-    - Before: Every `a[i*size+k]` access called `js_nanbox_get_pointer` FFI to extract the raw array pointer
-    - After: Array pointer extracted once before loop, cached in a Cranelift Variable, reused for all accesses
-    - Matrix multiply benchmark improved from ~91ms to ~71ms (Perry) vs ~36ms (Node) — 2.5x→1.75x
-    - Added `cached_array_ptr: Option<Variable>` field to `LocalInfo` struct
-    - Helper functions `collect_array_ids_from_expr` and `collect_array_ids_from_stmts` scan loop bodies for array usage
-  - **Integer function specialization**: Detect functions using only integer operations and generate i64 variants
-    - `is_integer_only_function` checks: all params Number/Any, return Number/Any, body only uses integer arithmetic/comparisons/self-calls
-    - For qualifying functions, generates `{name}_i64` with I64 params/return using `icmp`/`iadd`/`isub` instead of `fcmp`/`fadd`/`fsub`
-    - Original function becomes thin wrapper: `f64→i64` (fcvt_to_sint), call i64 variant, `i64→f64` (fcvt_from_sint)
-    - Self-recursive calls within i64 variant call the i64 variant directly (no conversion overhead)
-    - Fibonacci benchmark: Perry ~505ms vs Node ~1050ms — Perry is now **2x faster** than Node.js (was 1.16x slower)
-    - Added `compile_integer_specialized_function`, `compile_i64_body`, `compile_i64_stmt`, `compile_i64_expr` methods
-  - New benchmark file: `benchmarks/suite/16_matrix_multiply.ts`
-
-### v0.2.114
-- Fix Fastify request properties (`request.method`, `request.url`, etc.) returning numbers instead of strings
-  - Root cause: `JSValue::string_ptr(ptr).bits() as f64` uses Rust's numeric conversion, NOT bitcast
-  - In Rust, `u64 as f64` converts the integer VALUE to a floating-point number (e.g., 0x7FFF... becomes 9.22e18)
-  - This corrupted the NaN-boxed STRING_TAG value, causing console.log to print the raw number
-  - Fix: Change `JSValue::string_ptr(ptr).bits() as f64` to `f64::from_bits(JSValue::string_ptr(ptr).bits())`
-  - `f64::from_bits()` interprets the bits directly as a float (preserving the NaN-boxing)
-  - Fixed in: `perry-stdlib/src/common/dispatch.rs` (13 occurrences) and `perry-runtime/src/object.rs` (5 occurrences)
-  - Before: `console.log("method:", request.method)` → "method: 9223090566290150400"
-  - After: `console.log("method:", request.method)` → "method: GET"
-
-### v0.2.113
-- Document and support known limitations: No GC, No Runtime Type Checking, Single-Threaded
-- Add `process.memoryUsage()` support matching Node.js API
-  - Returns object with `{ rss, heapTotal, heapUsed, external, arrayBuffers }`
-  - `rss` uses platform-specific APIs (mach_task_basic_info on macOS, /proc/self/statm on Linux)
-  - `heapTotal`/`heapUsed` reports arena allocator stats via new `js_arena_stats` function
-  - Added `ProcessMemoryUsage` HIR variant, lowering, and codegen
-- Fix `typeof` returning `"object"` for closures - now correctly returns `"function"`
-  - Root cause: Closures use POINTER_TAG (same as objects/arrays), so `js_value_typeof` couldn't distinguish them
-  - Fix: Added `CLOSURE_MAGIC` (0x434C4F53) type tag to `ClosureHeader.type_tag` field (previously `_reserved`)
-  - `js_value_typeof` now reads the tag at offset 12 of POINTER_TAG values to detect closures
-- Added "Known Limitations" section to CLAUDE.md documenting all three constraints
-
-### v0.2.112
-- Fix constructor parameter variable declarations causing Cranelift verifier type mismatch
-  - Root cause: v0.2.111 changed constructor parameter variable declarations from F64 to I64 for pointer types
-  - But constructor signatures declare ALL parameters as F64 (NaN-boxed values) at function signature level
-  - When `builder.block_params(entry_block)[i]` returned F64 and `builder.def_var(var, val)` expected I64,
-    Cranelift verifier failed with "declared type of variable var1 doesn't match type of value v1"
-  - Fix: Revert variable declaration to always use F64 (matching the signature)
-  - Set `is_pointer: false` since constructor params are NaN-boxed F64 values, not raw I64 pointers
-  - The `is_array`/`is_string`/`is_closure` flags indicate the type for proper NaN-box extraction at usage time
-
-### v0.2.111
-- Attempt to fix constructor parameter type declarations (partially incorrect - fixed in v0.2.112)
-  - Computed `is_pointer` and `is_union` before variable declaration
-  - Changed variable type to I64 for pointer types - this was wrong because signature uses F64
-
-### v0.2.110
-- Fix module-level variable LocalIds overwriting function parameter LocalIds
-  - Root cause: When function inlining creates new Let statements in the module's init section, those
-    LocalIds can collide with function parameter LocalIds (HIR uses a global counter for all LocalIds)
-  - In `compile_function_inner`, module-level variables were loaded into the `locals` HashMap keyed by
-    LocalId. If a function parameter had the same LocalId as a module-level variable, the module variable
-    would overwrite the parameter entry
-  - Example: Function `test(msg, code, ctx)` has params with LocalIds 0,1,2. After inlining `test("hello", 1, obj)`,
-    a module-level Let with LocalId 1 for "ctx" would overwrite the "code" parameter entry in locals
-  - This caused `LocalGet(1)` (code param) to resolve to the wrong variable (module-level ctx), producing
-    Cranelift verifier errors: "arg 0 (v4) has type i64, expected f64"
-  - Fix: Before loading module-level variables into the locals map, check if the LocalId is already present
-    (meaning it's a function parameter). Skip loading module variables that would shadow parameters.
-  - Applied fix to 3 locations: standalone functions, class methods, and closure functions
-
-### v0.2.109
-- Fix string concatenation in unrolled loops producing wrong results
-  - Root cause: The loop unrolling "generic accumulator" optimization (Pattern 3: `x = x + f(i)`)
-    was incorrectly matching string concatenation patterns like `str = str + 'A'`
-  - This optimization creates 8 separate f64 accumulator variables and sums them at the end,
-    which is designed for numeric accumulation but completely breaks string concatenation
-  - String variables would get their `info.var` redirected to different accumulators on each
-    unrolled iteration, causing the string append optimization to write to wrong variables
-  - Test case: `for (let i = 0; i < 10; i++) { str = str + 'A' }` produced "AA" instead of "AAAAAAAAAA"
-  - Fix: Added check in Pattern 3 detection to skip when the target variable is a string
-    (`is_string_var = locals.get(set_id).map(|i| i.is_string).unwrap_or(false)`)
-- Also added `String.fromCharCode` support:
-  - Added `StringFromCharCode(Box<Expr>)` HIR expression variant
-  - Added `js_string_from_char_code` runtime function for single character creation
-  - Added `StringFromCharCode` to `is_string_expr` for proper string type inference
-
-### v0.2.108
-- Fix function inlining not substituting LocalIds in Object literals and JSON operations
-  - Root cause: `substitute_locals` in inline.rs didn't handle `Expr::Object` or `Expr::JsonStringify`/`Expr::JsonParse`
-  - When inlining a function like `function getKey(node) { return JSON.stringify({ name: node.name }); }`,
-    the object literal `{ name: node.name }` kept `LocalGet(0)` from the inlined function's scope
-  - At the call site, `LocalGet(0)` didn't exist, causing "Undefined local variable: 0 (LocalGet)"
-  - Fix: Added handling for `Expr::Object` (recurse into field values) and `Expr::JsonStringify`/`Expr::JsonParse`
-    (recurse into inner expression) in the `substitute_locals` function
-
-### v0.2.107 (skipped, version sync)
-
-### v0.2.106
-- Fix async closure Promise values not being detected by callers (Fastify handlers returning wrong values)
-  - Root cause 1: Promise pointer was bitcast to F64, not NaN-boxed with POINTER_TAG
-  - Callers (like Fastify server) check `is_pointer()` to detect Promises, which requires POINTER_TAG
-  - Fix: Use `js_nanbox_pointer` instead of bitcast for async closure return values
-  - Root cause 2: `is_string_expr` in `compile_async_stmt` didn't recognize `Expr::ArrayJoin`
-  - `array.join()` results returned from async closures weren't NaN-boxed with STRING_TAG
-  - Fix: Added `Expr::ArrayJoin` pattern to `is_string_expr` helper function
-  - Now properly returns JSON responses from Fastify async handlers
-
-### v0.2.105
-- Fix async closures (async arrow functions) returning 0 instead of Promise values
-  - Root cause: `Expr::Closure` in HIR did not have an `is_async` field, so async arrow functions lost their async property during lowering
-  - Async closures were compiled with `compile_stmt` instead of `compile_async_stmt`, never creating a Promise
-  - Route handlers like `app.get('/api', async (req, reply) => { ... })` returned 0 instead of proper response
-  - Fixes:
-    1. Added `is_async: bool` field to `Expr::Closure` in ir.rs
-    2. Updated HIR lowering (lower.rs) to set `is_async` from arrow function and function expression
-    3. Updated monomorph.rs to preserve `is_async` during expression substitution
-    4. Updated codegen to track `is_async` in closure tuple type (8-element tuple)
-    5. Updated `declare_closure` to register async closures in `async_func_ids`
-    6. Updated `compile_closure` to create Promise and use `compile_async_stmt` for async closures
-    7. Added `return_as_f64` parameter to `compile_async_stmt` - closures return F64 (bitcast of Promise pointer) for ABI compatibility with `js_closure_call*` functions
-  - This fixes perry-demo benchmarks returning 0 - async route handlers now work correctly
-
-### v0.2.104
-- Fix `['a', 'b'].join('-')` returning garbage value when returned directly from closures
-  - Root cause 1 (HIR lowering): Array methods on inline array literals were not being converted to specialized expressions
-    - `['a', 'b'].join('-')` remained as `Call { callee: PropertyGet { object: Array(...), property: "join" } }`
-    - Instead of `ArrayJoin { array: Array(...), separator: String("-") }`
-    - Added handling in lower.rs for array methods (join, map, filter, forEach, find, indexOf, includes, slice, reduce)
-      when the object is an inline array literal (`ast::Expr::Array`)
-  - Root cause 2 (Codegen): Expr::Array element handling was double NaN-boxing string elements
-    - `Expr::String` already returns NaN-boxed F64 (with STRING_TAG)
-    - The array element code was bitcasting F64→I64 then calling `js_nanbox_string` again
-    - This corrupted the value by applying STRING_TAG twice
-    - Fix: Check `builder.func.dfg.value_type(val)` - if already F64, just bitcast to I64; only NaN-box if I64
-  - Test cases now pass:
-    - `return ['a', 'b'].join('-')` correctly returns "a-b"
-    - `const parts = ['a']; return parts.join('-')` also works (was already working via LocalGet path)
-
-### v0.2.103
-- Fix SIGSEGV when accessing properties on Fastify handle-based objects (request.query, request.params, etc.)
-  - Root cause: Handle-based objects (small integer IDs NaN-boxed with POINTER_TAG) only had dispatch for method calls, not property access
-  - `js_dynamic_object_get_property` would extract the small integer handle and try to dereference it as an ObjectHeader → SIGSEGV
-  - Fix: Added handle property dispatch system parallel to existing method dispatch:
-    - `HANDLE_PROPERTY_DISPATCH` function pointer in `object.rs` (like `HANDLE_METHOD_DISPATCH`)
-    - Handle detection in `js_dynamic_object_get_property` (value.rs): check if extracted pointer < 0x100000
-    - `js_handle_property_dispatch` in dispatch.rs dispatches to FastifyContext properties
-    - Supports: query, params, body, headers, method, url properties on request/reply handles
-  - This fixes the perry-demo benchmark SIGSEGV: `const query = request.query as any` no longer crashes
-
-### v0.2.102
-- Fix function inlining emitting `return` terminators mid-block inside for loops
-  - Root cause: `try_inline_call` in inline.rs inlined function bodies including `Stmt::Return` statements
-  - When a function call like `foo(30)` was used as a `Stmt::Expr` (result discarded) inside a for loop,
-    the inlined `return n + 1` became a Cranelift `return` instruction in the loop body block
-  - This caused "a terminator instruction was encountered before the end of block" verifier errors
-  - Fix: In `Stmt::Expr` context, convert trailing `Stmt::Return(Some(expr))` to `Stmt::Expr(expr)`
-    (evaluate and discard) and skip inlining when non-trailing returns exist (early returns in if branches)
-- Add handle-based method dispatch for Fastify cross-module calls
-  - When `app` (Fastify handle) is passed to functions in other modules as a generic parameter,
-    codegen can't statically determine the type for method calls like `app.get('/route', handler)`
-  - Added `js_handle_method_dispatch` in perry-stdlib with registration via `js_register_handle_method_dispatch`
-  - perry-runtime's `js_native_call_method` now detects small pointers (< 0x100000) as handles
-    and routes to the registered dispatch function
-  - Supports all Fastify app methods (get/post/put/delete/etc.) and context methods (send/status/header/etc.)
-- Fix Fastify route handlers receiving wrong number of arguments
-  - Changed from `js_closure_call1` to `js_closure_call2` with NaN-boxed context handles for both request and reply
-- Fix Fastify JSON response serialization returning "[object Object]"
-  - Use `js_json_stringify` for pointer values in `jsvalue_to_json_string` instead of `js_jsvalue_to_string`
-- Fix Map/Set reallocation invalidating header pointers
-  - MapHeader and SetHeader now use a separate entries/elements pointer instead of inline storage
-  - Reallocation only changes the pointer, not the header address
-- Fix cross-module PropertyGet using bitcast instead of NaN-box pointer extraction
-  - ExternFuncRef PropertyGet now uses `js_nanbox_get_pointer` to properly extract object pointers
-- Fix exported function pre-registration in HIR lowering
-  - Functions declared after first use (e.g., hoisted function declarations) now get pre-registered
-- Add topological sorting for module initialization order
-  - Modules are now initialized in dependency order to ensure module-level variables are allocated
-    before other modules try to use them via imported functions
-
-### v0.2.101
-- Fix Cranelift verifier error "arg 2 has type i32, expected f64" in closure capture storage
-  - Root cause: Loop counter optimization produces i32 values, but closure capture storage
-    (`js_closure_set_capture_f64`) expects f64 for all captured values
-  - When a loop counter variable (optimized to i32) is captured by a closure (e.g., async arrow
-    in `batch.map(async (pool, index) => { ... })` capturing outer `i`), the i32 value was
-    stored directly without conversion
-  - Fixed both mutable and immutable capture paths to convert i32→f64 via `fcvt_from_sint`
-    before storing in closure environment
-
-### v0.2.100
-- Fix default parameter expansion using wrong scope for parameter references
-  - Root cause: When a function with default parameters was called with fewer args than params,
-    the defaults were cloned from the callee's scope and inserted at the call site
-  - Default expressions containing `LocalGet(callee_param_id)` referenced the callee's local IDs,
-    which don't exist in the caller's scope
-  - Example: `function f(a: string, b: string[] = [a])` — the default `[a]` used `LocalGet(0)` from
-    `f`'s scope, but at the call site `LocalGet(0)` doesn't refer to anything valid
-  - Fix: Store parameter LocalIds alongside defaults, build a substitution map from callee param IDs
-    to actual caller argument expressions, and recursively substitute references in default expressions
-  - Also handles chained defaults (e.g., `function f(a, b = a, c = b)`) by building the map
-    incrementally as each default is expanded
-  - Fixes "Undefined local variable" errors when calling functions with fewer args than params
-    where the default value references another parameter
-
-### v0.2.99
-- Performance optimizations for JSON.stringify, object literals, and recursive function calls
-  - **JSON.stringify shared buffer**: Refactored to use internal `stringify_value()` writing to a shared `String` buffer instead of recursive FFI calls and intermediate `StringHeader` allocations. Nested objects/arrays are serialized inline.
-  - **JSON.stringify type hints**: Added `type_hint` parameter (0=unknown, 1=object, 2=array) to skip runtime heuristic detection when the type is known at compile time. Codegen passes hints based on expression type (e.g., `Expr::Object` → 1, `Expr::Array` → 2, `LocalGet` with `is_array` → 2).
-  - **Object literal inline field writes**: Replaced per-field `js_object_set_field_f64` FFI calls with direct Cranelift `store` instructions at offset `24 + i*8` into the `ObjectHeader`. Eliminates N function calls per object literal.
-  - **Self-recursive call fast path**: Added thread-local `CURRENT_FUNC_HIR_ID` tracking. When a function calls itself and argument types already match the signature, skips both conversion passes (union NaN-boxing, signature matching) and calls directly.
-
-### v0.2.98
-- Add `WebSocketServer` from `ws` module
-  - `new WebSocketServer({ port })` creates a server and starts listening immediately
-  - `wss.on('connection', (ws) => ...)` handles new client connections
-  - `wss.on('error', (error) => ...)` handles server errors
-  - `wss.on('listening', () => ...)` fires when bound to port
-  - `wss.close()` shuts down server and closes all client connections
-  - Per-client events: `ws.on('message', cb)`, `ws.on('close', cb)`, `ws.on('error', cb)`
-  - Per-client methods: `ws.send(data)`, `ws.close()`
-  - Unified `js_ws_on()` function handles both server and client `.on()` calls
-  - Thread-safe event dispatch: async events queued to `WS_PENDING_EVENTS`, processed on main thread via `js_ws_process_pending()` during `js_stdlib_process_pending()`
-  - Closure callbacks invoked on main thread to avoid thread-local arena issues
-  - Server uses `tokio::net::TcpListener` + `tokio_tungstenite::accept_async` for WebSocket upgrade
-  - Graceful shutdown via `mpsc` channel from `js_ws_server_close`
-  - `js_ws_close()` auto-detects server vs client handle at runtime
-  - Added `"WebSocketServer"` to all 4 class-to-module mappings in HIR lowering
-  - Added `"WebSocketServer"` to native parent extends clause for inheritance support
-  - Added extern declarations: `js_ws_server_new`, `js_ws_on`, `js_ws_server_close`
-  - Added `Expr::New` codegen for `new WebSocketServer({ port })`
-  - Added NativeMethodCall dispatch for `("ws", true, "on")`
-  - Options object port extraction via `js_object_get_field_by_name`
-
-### v0.2.97
-- Add `AsyncLocalStorage` from `async_hooks` / `node:async_hooks`
-  - `new AsyncLocalStorage()` creates a new instance
-  - `als.run(store, callback)` runs callback with store context, returns callback result
-  - `als.getStore()` returns current store or undefined
-  - `als.enterWith(store)` pushes store onto context stack
-  - `als.exit(callback)` temporarily clears context, runs callback, restores context
-  - `als.disable()` clears the store stack
-  - Handle-based implementation using `perry-stdlib` common handle registry
-  - Added `"async_hooks"` to NATIVE_MODULES list
-  - Fixed `is_native_module()` to strip `node:` prefix (e.g., `"node:async_hooks"` → `"async_hooks"`)
-  - Normalized import source paths in HIR lowering to strip `node:` prefix
-
-### v0.2.96
-- Fix Cranelift "declared type of variable doesn't match type of value" panics caused by I32 values
-  - Root cause: Multiple code paths in codegen.rs only handled F64<->I64 conversions but not I32
-  - When loop counter optimizations or runtime function returns produced I32 values, they were passed to `def_var()` without conversion
-  - Fixed 6 locations:
-    1. `Stmt::Let` init fallthrough: Added I32->F64 (`fcvt_from_sint`) and I32->I64 (`sextend`) conversions
-    2. `Stmt::Let` `is_pointer && !is_union` path: Added I32->I64 conversion via `sextend`
-    3. `Stmt::Let` `is_union` path: Added I32->F64 conversion via `fcvt_from_sint`
-    4. `Expr::LocalSet` fallthrough: Added I32->F64, I32->I64, and F64->I32 conversions
-    5. `Logical::And` / `Logical::Or` rhs merge: Added I32 handling using `ensure_f64` and `sextend`
-    6. `Logical::Coalesce` rhs merge: Added I32->F64 and I32->I64 conversions
-
-### v0.2.95
-- Fix closure capture missing variable references in Delete, Error, Uint8Array, EnvGetDynamic, and JS runtime expressions
-  - Root cause: `collect_local_refs_expr()` and `collect_assigned_locals_expr()` in `lower.rs` had catch-all patterns that silently skipped these expression types
-  - When closures contained these expressions, variables referenced inside them weren't detected as needing capture
-  - Caused "Undefined local variable" errors at runtime
-  - Fix: Added explicit handling for Delete, ErrorNew, ErrorMessage, Uint8ArrayNew, Uint8ArrayFrom, Uint8ArrayLength, Uint8ArrayGet, Uint8ArraySet, EnvGetDynamic, JsGetProperty, JsSetProperty, JsNew, JsNewFromHandle, JsCreateCallback
-
-### v0.2.94
-- Fix function inlining breaking Set.has(), Map.has(), and other Set/Map/Array operations
-  - Root cause: `substitute_locals()` in `inline.rs` didn't handle Set/Map/Array expression types
-  - When inlining functions containing these operations, LocalGet references weren't substituted
-  - Caused "Undefined local variable" errors when inlined functions used Set/Map/Array methods
-  - Fix: Added handling for SetHas, SetAdd, SetDelete, SetSize, SetClear, MapHas, MapGet, MapSet, MapDelete, ArrayIndexOf, ArrayIncludes, ArraySlice, ArraySplice, ArrayForEach, ArrayMap, ArrayFilter, ArrayFind, ArrayFindIndex, ArrayReduce, ArrayJoin, and Await expressions
-
-### v0.2.93
-- Fix JSON.stringify() returning garbage numbers for objects stored in union-typed variables
-  - Root cause: Double NaN-boxing - objects in is_union=true variables are already NaN-boxed
-  - Codegen was NaN-boxing them again, corrupting the pointer to look like a large number
-  - Fix: Only NaN-box raw I64 pointers, pass F64 values (already NaN-boxed) directly
-
-### v0.2.92
-- Improved error diagnostics for undefined local variable errors
-  - Now shows variable names alongside LocalIds for easier debugging
-  - Helps identify which variable failed to be captured or loaded
-
-### v0.2.91
-- Fix Cranelift panic "declared type of variable var0 doesn't match type of value" in try/catch blocks
-  - Root cause: Loop optimization inside try blocks could change a variable from f64 to i32
-  - After longjmp to catch block, restoration code tried to assign f64/i64 value to the modified i32 variable
-  - Fix: Store original variable and is_i32 state before try block, restore to original variable after longjmp
-
-### v0.2.90
-- Fix i32/f64 type mismatch in wrapper function argument conversion
-  - Root cause: Wrapper functions only handled i64<->f64 conversions, not i32->f64 or i32->i64
-  - i32 values can appear when loop counter variables are passed through wrapper functions
-  - Fix: Added i32->f64 (fcvt_from_sint) and i32->i64 (sextend) conversion branches in wrapper arg conversion
-
-### v0.2.89
-- Add support for computed property update expressions (`obj[key]++`, `arr[i]--`)
-  - Added new `IndexUpdate` HIR variant in `ir.rs`
-  - Updated `lower.rs` to emit `IndexUpdate` for computed property updates
-  - Added codegen support in `codegen.rs` for both string keys and integer indices
-- Fix Cranelift verifier error when exporting NaN-boxed module variables
-  - Root cause: Variables stored as f64 (already NaN-boxed) were being passed to `js_nanbox_pointer` which expects i64
-  - Fix: Check `builder.func.dfg.value_type(val)` before NaN-boxing - only box if value is i64
-- Fix "Undefined local variable" errors for variables inside nested blocks
-  - Root cause: `create_module_var_globals` and `analyze_module_var_types` only scanned top-level statements
-  - Variables declared inside for loops, if blocks, try/catch, switch cases were not getting global data slots
-  - Fix: Made both functions recursive to walk into nested statement bodies
-  - Now properly handles: For loop bodies/inits, While bodies, If branches, Try/catch/finally, Switch cases
-- Improved verifier error diagnostics with CLIF IR output for constructors and init functions
-
-### v0.2.88
-- Extend closure call support from 4 to 8 arguments
-  - Added `js_closure_call5`, `js_closure_call6`, `js_closure_call7`, `js_closure_call8` to runtime
-  - Declared all new closure call functions in codegen
-  - Updated `js_native_call_value` to handle up to 8 arguments
-  - Fixes "Closure calls with N arguments not supported (max 4)" errors in large codebases
-
-### v0.2.87
-- Add missing `js_string_char_code_at` extern function declaration in codegen
-- Update runtime function to return f64 (NaN for out-of-bounds) instead of i32 (-1)
-- Properly follows JavaScript spec: `charCodeAt` returns NaN for invalid indices
-
-### v0.2.86
-- Fix "mismatched argument count" Cranelift verifier error for cross-module function calls
-  - Root cause: When calling a wrapper function that was already declared with fewer params than the call site provided, the call_args were not truncated to match the expected signature
-  - Example: If function declared with 2 params but called with 3 args, verifier error "got 3, expected 2"
-  - This happened when functions with optional parameters were called with more args than the previously-declared signature expected
-  - Fix: Add `call_args.truncate(full_param_count + 1)` after the padding loop to ensure call_args match the wrapper signature
-  - The padding loop only added missing args (when too few) but never removed excess args (when too many)
-
-### v0.2.85
-- Fix HTTP server handles returned as tiny floats instead of proper handles
-  - Root cause: `js_http_server_create` and `js_http_server_accept_v2` return i64 handles, but codegen was doing a raw bitcast to f64
-  - Integer 1 as i64 bits = 0x0000000000000001, interpreted as f64 = 4.94e-324 (denormalized tiny float)
-  - This caused HTTP server to not work - curl got empty replies because handles were invalid
-  - Fix: NaN-box HTTP server/request handles with POINTER_TAG using `js_nanbox_pointer`
-  - Also NaN-box HTTP string-returning functions with STRING_TAG using `js_nanbox_string`:
-    - `js_http_request_method`, `js_http_request_path`, `js_http_request_query`, `js_http_request_body`
-    - `js_http_request_content_type`, `js_http_request_header`, `js_http_request_query_param`
-    - `js_http_request_query_all`, `js_http_request_headers_all`, `js_http_respond_status_text`
-  - Before: `Server handle: 4.9e-324` (tiny float, invalid)
-  - After: `Server handle: [object Object]` (proper NaN-boxed handle)
-
-### v0.2.85
-- Fix object literals not being NaN-boxed with POINTER_TAG when passed to functions
-  - Root cause: `Expr::Object` codegen was doing raw bitcast from i64 to f64 instead of NaN-boxing
-  - This caused functions like `app.listen({ port: 3003 })` to receive invalid objects
-  - Runtime's `jsv.is_pointer()` check failed because the object had no POINTER_TAG
-  - Fix: Use `js_nanbox_pointer` to properly tag object pointers before returning
-  - Before: `Server listening on http://0.0.0.0:0` (port extraction failed)
-  - After: `Server listening on http://0.0.0.0:3003` (port correctly extracted from object)
-
-### v0.2.83
-- Fix Cranelift verifier type mismatch errors (f64/i64 confusion)
-  - Root cause: Variables declared as f64 (due to is_union flag) were sometimes being updated with i64 values
-  - Variable declaration uses `is_pointer && !is_union` to determine if a variable should be i64
-  - But some code paths only checked `is_pointer` or `is_array` without checking `!is_union`
-  - Fixed locations:
-    - `this.field = value` in class setters: ensure value is f64 before calling setter
-    - ArraySplice: check `is_pointer && !is_union` when determining if variable is i64
-    - Map/Set method calls: check `(is_map || is_pointer) && !is_union` for i64 variable type
-    - Set method calls: check `(is_set || is_pointer) && !is_union` for i64 variable type
-  - This prevents "arg 0 (v4) has type f64, expected i64" and "declared type of variable doesn't match" errors
-
-### v0.2.82
-- Fix Fastify route registration causing Cranelift verifier error "arg 0 has type i32, expected i64"
-  - Root cause: Fastify route methods (`get`, `post`, etc.) return bool (i32), not Handle (i64)
-  - The NaN-boxing code was treating all fastify returns as pointers and passing i32 to `js_nanbox_pointer` which expects i64
-  - Fix: Added method-specific return type handling for fastify:
-    - Route methods (`get`, `post`, `put`, `delete`, `patch`, `head`, `options`, `all`, `route`, `addHook`, `setErrorHandler`, `register`): Convert i32 bool to f64
-    - `listen`: Returns undefined (void method)
-    - Constructor and other methods: NaN-box with POINTER_TAG as before
-  - Route registration now works correctly:
-    ```typescript
-    const app = Fastify();
-    app.get('/', () => true);           // inline arrow function
-    app.get('/api', handler);           // named function reference
-    app.get('/async', async (req, reply) => { ... }); // async handler
-    ```
-
-### v0.2.81
-- Fix cross-module function calls via re-exports causing argument count mismatch errors
-  - Extended the `imported_func_param_counts` propagation to handle `export * from "./module"` re-exports
-  - Previously only direct imports were tracked, so re-exported functions with optional params would fail
-  - Example: If module B exports `queryFunc(a, b, c?)` and module A has `export * from "./B"`,
-    imports from A would not know the full param count, causing wrapper signature mismatches
-  - Fix: Re-export propagation loop now iterates over both classes AND functions until no new entries are added
-  - Supports chained re-exports (A re-exports B which re-exports C)
-
-### v0.2.80
-- Add codegen integration for Fastify HTTP framework
-  - Added "fastify" to NATIVE_MODULES list in ir.rs
-  - Added 30+ extern function declarations in codegen.rs for all Fastify FFI functions
-  - Added NativeMethodCall mappings for all Fastify app methods:
-    - Constructor: `Fastify()` / `Fastify({ options })` via default export pattern
-    - Route methods: `app.get()`, `app.post()`, `app.put()`, `app.delete()`, etc.
-    - Lifecycle: `app.addHook()`, `app.setErrorHandler()`, `app.register()`
-    - Server: `app.listen()`
-  - Added context/request/reply method mappings for handlers
-  - Added fastify to modules using `js_nanbox_get_pointer` for handle extraction
-  - Added HIR lowering for default import function calls (e.g., `import F from 'fastify'; F()`)
-    - Uses method name "default" for default export calls
-  - Full TypeScript API now supported:
-    ```typescript
-    import Fastify from 'fastify';
-    const app = Fastify();
-    app.get('/users/:id', async (req, reply) => {
-      return { id: req.params.id };
-    });
-    app.listen({ port: 3000 });
-    ```
-
-### v0.2.79
-- Add Fastify-compatible native HTTP framework runtime
-  - New module: `crates/perry-stdlib/src/fastify/` with Fastify-like API
-  - `mod.rs` - Core data structures (FastifyApp, Route, Hooks, RoutePattern)
-  - `router.rs` - Route pattern parsing and matching (supports `:param` and `*` wildcard)
-  - `context.rs` - Unified context for Fastify and Hono style handlers
-  - `app.rs` - Route registration, hooks, plugins
-  - `server.rs` - Hyper-based server with event loop
-  - FFI functions for route handlers, request/response context
-  - Supports: GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS routes
-  - Supports: Lifecycle hooks (onRequest, preHandler, etc.)
-  - Supports: Plugins with URL prefix
-  - Supports: Hono-style context methods (c.json(), c.text(), c.req.param())
-  - Re-exported promise functions (js_promise_run_microtasks, js_promise_state, js_is_promise) for stdlib
-
-### v0.2.78
-- Fix cross-module function calls with optional parameters causing signature mismatch errors
-  - Functions with optional parameters can now be called with different argument counts from other modules
-  - Example: `executeQuery(query, params?, options?)` can be called as `executeQuery('SELECT 1')`,
-    `executeQuery('SELECT ?', [42])`, or `executeQuery('SELECT ?', [42], { timeout: 1000 })`
-  - Root cause: wrapper functions were being declared with call-site arity instead of full function signature
-  - Fix: Added `imported_func_param_counts` map to propagate function param counts between modules during compilation
-  - When calling with fewer args than params, missing arguments are padded with `undefined`
-  - Also added fallback: if wrapper is already declared with different signature, find existing declaration and adapt
-
-### v0.2.77
-- Add GitHub Actions CI/CD workflow templates (in `templates/github-actions/`)
-  - `ci.yml` - Tests on Ubuntu and macOS, uploads build artifacts
-  - `release.yml` - Builds release binaries for Linux x86_64, macOS x86_64/aarch64
-  - Templates are not active by default; copy to `.github/workflows/` to enable
-- Add Docker support for cross-platform development
-  - `Dockerfile` - Multi-stage build (builder, compiler, runtime stages)
-  - `Dockerfile.dev` - Development environment with full Rust toolchain
-  - `docker-compose.yml` - Dev setup with MySQL, Redis, PostgreSQL services
-  - `.dockerignore` - Excludes unnecessary files from Docker build context
-- Add cross-platform development documentation (`docs/CROSS_PLATFORM.md`)
-  - Covers GitHub Actions, Docker, cross-compilation, and alternative approaches
-
-### v0.2.76
-- Fix Error objects not displaying in console.log/console.error
-  - Added Error object formatting in `format_jsvalue()` and `format_jsvalue_for_json()` in builtins.rs
-  - Error objects now display as "Error: <message>" instead of empty/invalid output
-  - Check `OBJECT_TYPE_ERROR` tag to distinguish Error objects from regular objects/arrays
-- Fix `new Error(message)` passing corrupted message string
-  - Use `js_get_string_pointer_unified` to extract string pointer from NaN-boxed value in codegen
-- Fix console.error with multiple arguments not displaying values
-  - Added multi-argument spread support for console.error (was only implemented for console.log)
-  - console.error("prefix:", errorObj, "suffix") now works correctly
-
-### v0.2.75
-- Fix ethers.js module returning wrong values
-  - Added `getAddress()` - returns EIP-55 checksummed Ethereum addresses
-  - Added `parseEther()` - parses ether string to BigInt wei (uses 18 decimals)
-  - Added `formatEther()` - formats BigInt wei to ether string (uses 18 decimals)
-  - Fixed `parseUnits()` and `parseEther()` returning garbage values
-    - Added `is_bigint_expr` detection for NativeMethodCall returning BigInt
-    - Now properly marks local variables as `is_bigint` when assigned from ethers BigInt functions
-  - Fixed chained `toString()` on BigInt-returning ethers methods (e.g., `parseEther('1.5').toString()`)
-    - Added special handling in codegen to detect BigInt-returning NativeMethodCall and call `js_bigint_to_string`
-  - Implemented Keccak-256 hash for EIP-55 address checksumming in pure Rust
-
-### v0.2.74
-- Fix pool.getConnection() - full support for getting connections and calling methods on them
-  - Extended `detect_native_instance_creation_with_context` to track variables assigned from `await pool.getConnection()`
-  - `PoolConnection` class type now tracked through await expressions
-  - Added `js_mysql2_pool_connection_execute` for prepared statements on pool connections
-  - Codegen now routes `PoolConnection` methods to correct FFI functions (`query`, `execute`, `release`)
-  - Fixed `js_mysql2_pool_connection_release` to enter tokio runtime context before dropping connection
-  - Full example now works: `const conn = await pool.getConnection(); await conn.query(...); conn.release();`
-
-### v0.2.73
-- Partial fix for pool.getConnection() - connection acquisition works but method calls on the connection crash
-  - Implemented `MysqlPoolConnectionHandle` wrapper with proper connection lifecycle
-  - `js_mysql2_pool_get_connection` now acquires actual connections from the pool
-  - Connection handle is NaN-boxed with POINTER_TAG for proper extraction
-  - Promise resolution correctly passes the NaN-boxed handle to JavaScript
-  - `js_mysql2_connection_query` now handles both regular and pool connections
-  - ~~**Known issue**: After `await pool.getConnection()`, calling methods like `conn.release()` crashes~~ (fixed in v0.2.74)
-
-### v0.2.72
-- Fix mysql2 config parsing using wrong fields
-  - Changed `parse_mysql_config` to use field names (`host`, `user`, `password`, etc.) instead of field indices
-  - Now uses `js_object_get_field_by_name` for proper field lookup
-  - Fixes issue where `user` and `password` fields were swapped
-- Fix pool.getConnection() SIGSEGV crash
-  - Added extern function declarations for `js_mysql2_pool_get_connection` and `js_mysql2_pool_connection_release`
-  - Added method mappings in codegen for `getConnection` and `release`
-  - Now returns proper error message instead of crashing
-
-### v0.2.71
-- Fix BigInt.toString() SIGSEGV crash
-  - BigInt variables were stored as I64 (raw pointer) but values were NaN-boxed F64
-  - Changed BigInt storage to F64 (is_pointer=false) to match NaN-boxed representation
-  - BigInt.toString() now correctly extracts pointer via `js_nanbox_get_bigint`
-
-### v0.2.70
-- Fix ethers.formatUnits() and ethers.parseUnits() SIGSEGV crash
-  - formatUnits: Extract BigInt from NaN-boxed value using `js_nanbox_get_bigint`
-  - parseUnits: Extract string from NaN-boxed value using `js_get_string_pointer_unified`
-  - formatUnits: NaN-box return string with STRING_TAG
-  - parseUnits: NaN-box return BigInt with BIGINT_TAG
-
-### v0.2.69
-- Fix parseInt() and parseFloat() SIGSEGV crash
-  - String arguments were bitcast instead of properly extracted from NaN-boxed values
-  - Now use `js_get_string_pointer_unified` to extract the raw string pointer
-  - `parseInt(process.env.REDIS_PORT || '6379')` now works correctly
-
-### v0.2.68
-- Fix ioredis `new Redis()` returning number instead of object when called without await
-  - `new Redis()` now works synchronously like real ioredis (connects lazily on first command)
-  - Changed `js_ioredis_new` to return Handle synchronously instead of Promise
-  - NaN-box returned handle with POINTER_TAG so it's recognized as an object
-  - Add ioredis to the list of modules that use `js_nanbox_get_pointer` for method calls
-- This matches real ioredis API where `new Redis()` is synchronous and connection happens lazily
-
-### v0.2.67
-- Fix native instance method calls returning 0 when instance is awaited
-  - `await new Redis()`, `await new WebSocket()`, etc. now properly register native instances
-  - HIR lowering now handles `ast::Expr::Await(ast::Expr::New(...))` pattern
-  - Methods like `redis.set()`, `redis.get()` now correctly call the native FFI functions
-  - Added handling in both exported variable declarations and local variable declarations
-
-### v0.2.66
-- Fix await not propagating promise rejections (SIGSEGV crash)
-  - Added `js_promise_reason()` runtime function to get rejection reason
-  - Updated await codegen to check if promise was rejected and throw the rejection reason
-  - Await now properly handles both I64 (raw pointer) and F64 (NaN-boxed) promise values
-  - Functions returning `Promise<T>` type now work correctly with await rejection handling
-
-### v0.2.65
-- Fix async error strings using wrong NaN-box tag (POINTER_TAG instead of STRING_TAG)
-  - Error messages from async operations (mysql2, redis, fetch, etc.) now use `JSValue::string_ptr()`
-    instead of `JSValue::pointer()` for proper type identification
-  - Fixed in spawn_for_promise, spawn_for_promise_deferred, and create_error_value
-- This fixes crashes when error messages were being printed or handled as object pointers
-
-### v0.2.64
-- Fix JS runtime BigInt conversion - V8 BigInt values now properly converted to native Perry BigInt
-  - Added BigInt handling in `v8_to_native()` to convert V8 BigInt to native BigIntHeader
-  - Added BigInt handling in `native_to_v8()` to convert native BigInt back to V8
-  - Uses BIGINT_TAG (0x7FFA) for NaN-boxing BigInt pointers
-- Fix JS runtime module loading for bare module specifiers (e.g., "ethers", "@noble/hashes")
-  - `js_load_module` now properly resolves bare module names using node_modules resolution
-  - Added NodeModuleLoader integration for consistent module resolution
-- Add Node.js built-in module stubs for JS runtime compatibility
-  - Stub implementations for: net, tls, http, https, crypto, fs, path, os, stream, buffer,
-    util, events, assert, url, querystring, string_decoder, zlib
-  - Note: Ethers.js still requires CommonJS require() support which is partially implemented
-
-### v0.2.63
-- Fix Cranelift verifier type mismatch errors when passing string/pointer values to certain functions
-- Fix Array.includes() with string values - NaN-box string values and use jsvalue comparison for proper content matching
-- Fix Set.has(), Set.add(), Set.delete() with string values - NaN-box strings for proper comparison
-- Fix function call arguments with i32 type (from loop optimization) not being converted to f64/i64
-  - Added i32 -> f64 conversion using `fcvt_from_sint`
-  - Added i32 -> i64 conversion using `sextend`
-  - Fixed in: FuncRef calls, ExternFuncRef calls, closure calls
-- Add js_closure_call4 support for closures with 4 arguments
-
-### v0.2.62
-- Fix mysql2 pool.query() hanging indefinitely when MySQL server is unavailable
-- Added timeouts to all mysql2 operations to prevent indefinite hangs:
-  - Pool acquire timeout: 10 seconds (when getting connection from pool)
-  - Query timeout: 30 seconds (wraps all query operations with tokio::time::timeout)
-  - Connection timeout: 10 seconds (for createConnection and close operations)
-- Operations now error gracefully with descriptive messages instead of hanging:
-  - "Query timed out after 30 seconds (MySQL server may be unavailable)"
-  - "Connection timed out after 10 seconds (MySQL server may be unavailable)"
-- Affected functions in pool.rs: createPool, pool.query, pool.execute, pool.end
-- Affected functions in connection.rs: createConnection, connection.query,
-  connection.end, beginTransaction, commit, rollback
-
-### v0.2.61
-- Fix Promise.all returning tiny float numbers instead of string values with async promises
-- Root cause: When capturing string variables in closures, raw I64 pointers were bitcast to F64
-  instead of being properly NaN-boxed with STRING_TAG (0x7FFF)
-- Fix 1 (capture storage): When storing captured string/pointer values in closures, use
-  `js_nanbox_string` for strings and `js_nanbox_pointer` for objects/arrays instead of raw bitcast
-- Fix 2 (closure calls): Always use `js_closure_call*` functions when calling local variables
-  (they must be closures if being called), instead of requiring `is_closure` flag to be set
-- Affected pattern: `async function delay(ms, value) { return new Promise(resolve => setTimeout(() => resolve(value), ms)); }`
-  - The `value` parameter was extracted from NaN-box to I64 pointer for efficiency
-  - When captured by inner closure `() => resolve(value)`, the I64 was incorrectly bitcast to F64
-  - This produced tiny denormalized floats like `2.18e-308` when printed
-
-### v0.2.60
-- Fix ioredis SIGSEGV crash when calling Redis methods (set, get, etc.)
-- Root causes fixed:
-  1. **Codegen**: ioredis connection IDs are simple f64 numbers (1.0, 2.0, etc.), not NaN-boxed pointers
-     - Changed from `js_nanbox_get_pointer` to `fcvt_to_sint` for extracting connection handles
-     - Same pattern as fetch response IDs
-  2. **Runtime**: String values from Redis operations must be allocated on main thread
-     - Changed from `queue_promise_resolution` to `queue_deferred_resolution` for string results
-     - Strings created in async Tokio workers were using invalid thread-local arenas
-  3. **NaN-boxing**: Redis result strings should use STRING_TAG (0x7FFF), not POINTER_TAG (0x7FFD)
-     - Changed all `JSValue::pointer(str as *const u8)` to `JSValue::string_ptr(str)`
-  4. **Symbol collision**: Renamed `js_call_method` to `js_native_call_method` in codegen
-     - Matches the symbol rename done in perry-runtime v0.2.59
-- Note: ioredis API in Perry returns a Promise from `new Redis()`, use `await new Redis()` pattern
-
-### v0.2.59
-- Fix ethers.js duplicate symbol linker error when using perry-jsruntime
-- Root cause: Both `perry-runtime` and `perry-jsruntime` defined `js_call_method` and `js_call_value`
-  - `perry-runtime/src/object.rs` had `js_call_method` for native closure dispatch
-  - `perry-runtime/src/closure.rs` had `js_call_value` for native closure calls
-  - `perry-jsruntime/src/interop.rs` had the same functions for V8 JavaScript calls
-- When linking with jsruntime (which includes runtime via re-exports), both definitions conflicted
-- Solution: Rename the native closure versions to avoid collision:
-  - `js_call_method` -> `js_native_call_method` in perry-runtime/src/object.rs
-  - `js_call_value` -> `js_native_call_value` in perry-runtime/src/closure.rs
-- The V8 versions in perry-jsruntime keep the original names (used by codegen for JS runtime fallback)
-
-### v0.2.58
-- Fix mysql2 pool.query() and pool.execute() hanging indefinitely
-- Root cause: perry-runtime uses **thread-local arenas** for memory allocation
-- Async database operations run on tokio worker threads, but JSValue allocation happened there
-- Memory allocated on worker threads was invalid/inaccessible from the main thread
-- Solution: Implement deferred JSValue creation with `spawn_for_promise_deferred()`
-  1. Async block extracts raw Rust data on worker thread (no JSValue allocation)
-  2. Raw data is queued with a converter function
-  3. Converter runs on main thread during `js_stdlib_process_pending()`
-  4. JSValues created safely using main thread's arena allocator
-- Added `RawQueryResult`, `RawRowData`, `RawColumnInfo`, `RawValue` types for thread-safe data transfer
-- Updated mysql2 pool.query(), pool.execute(), connection.query() to use deferred conversion
-- Also fixed error string creation in spawn_for_promise - now deferred to main thread
-
-### v0.2.57
-- Fix cross-module array exports returning garbage (e.g., `9222246136947933184` instead of array)
-- Arrays exported from one module and imported in another were not properly NaN-boxed
-- Root causes fixed:
-  1. Export side: NaN-box array pointers with POINTER_TAG when storing to export globals
-  2. Import side: HIR lowering now generates proper array method expressions (ArrayJoin, ArrayMap, etc.) for imported arrays via `ExternFuncRef`
-  3. Codegen: All array methods (join, map, filter, forEach, reduce) now detect `ExternFuncRef` and extract pointer from NaN-boxed value using `js_nanbox_get_pointer`
-  4. PropertyGet: Handle `.length` on `ExternFuncRef` arrays using `js_dynamic_array_length`
-- Test results: `CHAIN_NAMES.join(', ')` now returns `"ethereum, base, bnb"` instead of garbage
-
-### v0.2.56
-- Fix `string.split('').slice(0, 5)` returning empty array
-- Issue: array slice was using `js_string_slice` instead of `js_array_slice` for arrays
-- Root causes fixed:
-  1. Add `split` to methods that return arrays in local variable type inference
-  2. Mark `split()` results as NaN-boxed arrays (`is_pointer = false`, `is_array = true`)
-  3. Add special handling for `.slice()` on arrays to call `js_array_slice`
-  4. Detect array slice for chained calls like `str.split('').slice()` by checking callee method
-  5. Extract array pointer from NaN-boxed value using `js_nanbox_get_pointer` before calling `js_array_slice`
-
-### v0.2.55
-- Implement Promise.all() - takes array of promises, returns promise that resolves with array of results
-- Add `js_promise_all(promises_arr: i64)` runtime function in promise.rs
-- Handles empty arrays (resolves immediately with empty array)
-- Handles mixed promises and non-promise values
-- Properly waits for all promises to resolve before completing
-- Rejects immediately if any promise rejects
-
-### v0.2.54
-- Fix ioredis "Unknown class: Redis" error
-- Add handler for `new Redis(config?)` in Expr::New codegen
-- Register Redis as a native handle class (uses f64, not i64 pointers)
-- `new Redis()` now correctly calls `js_ioredis_new` and returns a Promise
-
-### v0.2.53
-- Fix `array.join()` returning garbage - NaN-box result with STRING_TAG instead of bitcast
-- Fix `string.includes()` and `array.includes()` returning 1/0 instead of true/false
-- Fix Promise unwrapping when async function returns `new Promise(...)`
-- Add `js_promise_resolve_with_promise` runtime function for Promise chaining
-- When async function returns a Promise, outer promise now adopts inner promise's eventual value
-
-### v0.2.52
-- Fix async/await returning garbage data from nested async function calls
-- Await results are already NaN-boxed values, not raw pointers - set `is_pointer = false` to prevent double-boxing
-- Previously, returning an await result would strip STRING_TAG and incorrectly re-box with POINTER_TAG
-
-### v0.2.51
-- Fix boolean representation - use NaN-boxed TAG_TRUE/TAG_FALSE (0x7FFC_0000_0000_0004/0003) instead of 0.0/1.0
-- Fix boolean comparison - use integer comparison on bit patterns instead of fcmp (NaN != NaN)
-- Fix console.log boolean literals - route through js_console_log_dynamic for proper formatting
-- Fix array printing crash (SIGSEGV) - check array validity before accessing object keys_array
-- Add JSON-like object formatting to console.log output with format_object_as_json and format_jsvalue_for_json
-- Improve array/object detection in format_jsvalue to safely handle pointers
-
-### v0.2.50
-- Fix critical BigInt corruption - BigInt values were being stored as bitcast pointers instead of NaN-boxed values
-- Add BIGINT_TAG (0x7FFA) for proper BigInt NaN-boxing
-- Add `js_nanbox_bigint(ptr)`, `js_nanbox_get_bigint(f64)`, `js_nanbox_is_bigint(f64)` runtime functions
-- Add `is_bigint()`, `as_bigint_ptr()`, `bigint_ptr()` methods to JSValue
-- Update BigInt literal compilation to use NaN-boxing
-- Update BigInt arithmetic to extract pointers via `js_nanbox_get_bigint` before operations
-- Add BigInt comparison support using `js_bigint_cmp`
-- Update `format_jsvalue` to detect BigInt and format with "n" suffix
-- Fix BigInt function parameters - set `is_bigint` flag based on parameter type
-- Change BigInt ABI from i64 to f64 (NaN-boxed) for consistent handling
-- BigInt addition, subtraction, multiplication, division, comparisons now work correctly
-- BigInt in function parameters and nested expressions now work correctly
-
-### v0.2.48
-- Fix string.split() returning corrupted array elements
-- NaN-box string pointers with STRING_TAG when storing in split result array
-
-### v0.2.46
-- Fix string.split(), indexOf(), includes(), startsWith(), endsWith() SIGSEGV
-- Fix ArrayIndexOf/ArrayIncludes HIR to detect string vs array and use correct runtime functions
-- Extract NaN-boxed string pointers for all string method arguments (needle, delimiter, prefix, suffix, etc.)
-
-### v0.2.44
-- Fix string `===` comparison SIGSEGV - extract string pointers from NaN-boxed values
-- Fix switch statements with string cases - use `js_string_equals` instead of `fcmp`
-
-### v0.2.42
-- Fix native module method calls (pool.execute, redis.get, etc.) crashing with SIGSEGV
-- Extract raw pointers from NaN-boxed objects using `js_nanbox_get_pointer` for:
-  mysql2, ioredis, ws, events, lru-cache, commander, decimal.js, big.js,
-  bignumber.js, pg, mongodb, better-sqlite3, sharp, cheerio, nodemailer,
-  dayjs, moment, node-cron, rate-limiter-flexible
-- Extract NaN-boxed string arguments properly for SQL queries, Redis keys,
-  WebSocket messages, and EventEmitter event names
-- Extract NaN-boxed array pointers for execute params
-
-### v0.2.41
-- Fix mysql.createPool() returning number instead of object
-- NaN-box native module return values with POINTER_TAG
-
-### v0.2.40
-- Fix Promise.catch() crash - closures invoked properly with js_closure_call1
-- Add Promise.reject() static method
-- Fix bracket notation `obj['key']` SIGSEGV
-- Fix module-level const in template literals SIGSEGV
-- Improve string concatenation fallback handling
-
-### v0.2.39
-- Promise callback system rewritten to use ClosurePtr
-
-### v0.2.38
-- Fix bracket notation property access for NaN-boxed string keys
-
-### v0.2.37
-- Fix undefined truthiness (undefined now properly falsy)
-- NaN-box string literals with STRING_TAG
-- Fix fetch() with NaN-boxed URL strings
-- Add js_is_truthy() runtime function
-- Fix uninitialized variables (now TAG_UNDEFINED, not 0.0)
-- Special handling for undefined/null/NaN/Infinity identifiers
-
-## Debugging Tips
-
-1. **Print HIR**: Use `--print-hir` to see the intermediate representation
-2. **Keep object files**: Use `--keep-intermediates` to inspect .o files
-3. **Check value types**: NaN-boxed values can be inspected by their bit patterns
-4. **Module init order**: Entry module calls `_perry_init_*` for each imported module
-
-## Common Issues
-
-### SIGSEGV in string operations
-- Check if string pointers are being extracted from NaN-boxed values
-- Use `js_get_string_pointer_unified()` for strings that might be NaN-boxed
-
-### Promise callbacks not firing
-- Ensure callbacks are closures, not raw function pointers
-- Check that `js_promise_run_microtasks()` is being called in the event loop
-
-### Cross-module variable access
-- Module-level strings are F64 (NaN-boxed), not I64 pointers
-- Check `module_level_locals` for proper type info
-
-### Async operations hanging or returning garbage
-- **Root cause**: perry-runtime uses thread-local arenas for memory allocation
-- Async operations (mysql2, pg, etc.) run on tokio worker threads
-- JSValue objects created on worker threads use the wrong arena
-- **Solution**: Use `spawn_for_promise_deferred()` instead of `spawn_for_promise()`
-- Return raw Rust data from async block, convert to JSValue on main thread
-- The converter function runs during `js_stdlib_process_pending()` on main thread
+### v0.2.124-v0.2.125
+- Reactive text binding: `Text("prefix" + State.value)` auto-updates when State changes
+- Disable while-loop unrolling (i-cache pressure); keep CSE optimization
+- Const value propagation for numeric literals (`const_value: Option<f64>` in `LocalInfo`)
+
+### v0.2.122-v0.2.123
+- Fix Cmd+Q and button callbacks in perry/ui (extract raw closure pointer via `js_nanbox_get_pointer`)
+- Fix VStack/HStack children not rendering (use `js_nanbox_get_pointer` for child handle extraction)
+
+## Changelog Summary (v0.2.37-v0.2.121)
+
+### Performance Optimizations (v0.2.115-v0.2.121)
+- **Integer function specialization** (v0.2.115): Detect integer-only functions, generate i64 variants. Fibonacci 2x faster than Node.js.
+- **Array pointer caching** (v0.2.115): Hoist `js_nanbox_get_pointer` out of for-loops. Matrix multiply ~91ms → ~71ms.
+- **i32 index arithmetic** (v0.2.117-v0.2.120): Contained i32 ops for array indexing only (`try_compile_index_as_i32`). Matrix multiply → ~41ms (Node ~39ms).
+- **JSON.stringify optimization** (v0.2.99): Shared buffer, type hints, inline object field writes.
+- **Self-recursive call fast path** (v0.2.99): Skip conversion passes when argument types match.
+
+### Native UI (v0.2.116-v0.2.121)
+- v0.2.116: Initial perry/ui module — Text, Button, VStack/HStack, State, App
+- v0.2.119: Fix SIGILL crash, module init variable ID conflicts
+- v0.2.121: Fix StringHeader format mismatch, Auto Layout constraints
+
+### Fastify Framework (v0.2.79-v0.2.114)
+- v0.2.79: Fastify-compatible HTTP runtime (routing, hooks, plugins)
+- v0.2.80: Codegen integration (30+ extern functions, NativeMethodCall mappings)
+- v0.2.82: Method-specific return type handling (route methods return bool, not handle)
+- v0.2.102-v0.2.103: Handle-based method/property dispatch for cross-module calls
+- v0.2.114: Fix `as f64` vs `from_bits` NaN-boxing corruption in request properties
+
+### Async Closures & Promises (v0.2.39-v0.2.106)
+- v0.2.39: Promise callbacks rewritten to use ClosurePtr
+- v0.2.55: Promise.all()
+- v0.2.58: `spawn_for_promise_deferred()` for thread-safe async operations
+- v0.2.105-v0.2.106: `is_async` field on `Expr::Closure`, async closure Promise NaN-boxing
+
+### Cross-Module System (v0.2.57-v0.2.110)
+- v0.2.57: Cross-module array exports with NaN-boxing
+- v0.2.78: `imported_func_param_counts` for optional parameter propagation
+- v0.2.81: Re-export propagation for chained `export * from` patterns
+- v0.2.102: Topological sorting for module init order
+- v0.2.110: Fix module-level variable LocalId collisions with function parameters
+
+### Cranelift Type System Fixes (v0.2.83-v0.2.96)
+- Systematic I32 conversion fixes across 6+ codegen locations (v0.2.90, v0.2.96)
+- `is_pointer && !is_union` checks for variable type determination (v0.2.83)
+- Try/catch block variable type restoration after longjmp (v0.2.91)
+- Constructor parameters always F64 at signature level (v0.2.112)
+
+### Native Module Ecosystem (v0.2.41-v0.2.98)
+- mysql2: pool, connections, prepared statements, timeouts (v0.2.41-v0.2.74)
+- ioredis: synchronous constructor, handle-based dispatch (v0.2.54-v0.2.68)
+- WebSocketServer from `ws` module (v0.2.98)
+- AsyncLocalStorage from `async_hooks` (v0.2.97)
+- ethers.js: BigInt, Keccak-256, EIP-55 addresses (v0.2.64-v0.2.75)
+- Closure calls extended to 8 args (v0.2.88)
+
+### Foundation (v0.2.37-v0.2.51)
+- NaN-box string literals with STRING_TAG, undefined as TAG_UNDEFINED (v0.2.37)
+- Boolean TAG_TRUE/TAG_FALSE representation (v0.2.51)
+- BigInt with BIGINT_TAG, arithmetic, comparisons (v0.2.50)
+- Inline array literal method calls (v0.2.104)
+- Function inlining fixes: substitute_locals coverage, return-in-Expr-context (v0.2.94-v0.2.108)
+
+**Milestone: v0.2.49** — Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)

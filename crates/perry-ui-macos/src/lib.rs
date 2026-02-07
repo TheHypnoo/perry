@@ -80,3 +80,36 @@ pub extern "C" fn perry_ui_state_set(state_handle: i64, value: f64) {
 pub extern "C" fn perry_ui_state_bind_text_numeric(state_handle: i64, text_handle: i64, prefix_ptr: i64) {
     state::bind_text_numeric(state_handle, text_handle, prefix_ptr as *const u8);
 }
+
+/// Create a Spacer (flexible space). Returns widget handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_spacer_create() -> i64 {
+    widgets::spacer::create()
+}
+
+/// Create a Divider (horizontal separator). Returns widget handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_divider_create() -> i64 {
+    widgets::divider::create()
+}
+
+/// Create an editable TextField. placeholder_ptr = string, on_change = NaN-boxed closure.
+/// Returns widget handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_create(placeholder_ptr: i64, on_change: f64) -> i64 {
+    widgets::textfield::create(placeholder_ptr as *const u8, on_change)
+}
+
+/// Create a Toggle (switch + label). label_ptr = string, on_change = NaN-boxed closure.
+/// Returns widget handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64 {
+    widgets::toggle::create(label_ptr as *const u8, on_change)
+}
+
+/// Create a Slider. min/max/initial are f64, on_change = NaN-boxed closure.
+/// Returns widget handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
+    widgets::slider::create(min, max, initial, on_change)
+}
