@@ -410,3 +410,40 @@ pub extern "C" fn js_interval_timer_next_deadline() -> f64 {
             .unwrap_or(-1.0)
     })
 }
+
+/// GC root scanner: mark all values reachable from timer queues
+pub fn scan_timer_roots(mark: &mut dyn FnMut(f64)) {
+    // Scan promise-based timers
+    TIMER_QUEUE.with(|q| {
+        let q = q.borrow();
+        for timer in q.iter() {
+            if !timer.promise.is_null() {
+                let boxed = f64::from_bits(0x7FFD_0000_0000_0000 | (timer.promise as u64 & 0x0000_FFFF_FFFF_FFFF));
+                mark(boxed);
+            }
+            mark(timer.value);
+        }
+    });
+
+    // Scan callback timers (closure pointers stored as i64)
+    CALLBACK_TIMERS.with(|q| {
+        let q = q.borrow();
+        for timer in q.iter() {
+            if !timer.cleared && timer.callback != 0 {
+                let boxed = f64::from_bits(0x7FFD_0000_0000_0000 | (timer.callback as u64 & 0x0000_FFFF_FFFF_FFFF));
+                mark(boxed);
+            }
+        }
+    });
+
+    // Scan interval timers
+    INTERVAL_TIMERS.with(|q| {
+        let q = q.borrow();
+        for timer in q.iter() {
+            if !timer.cleared && timer.callback != 0 {
+                let boxed = f64::from_bits(0x7FFD_0000_0000_0000 | (timer.callback as u64 & 0x0000_FFFF_FFFF_FFFF));
+                mark(boxed);
+            }
+        }
+    });
+}

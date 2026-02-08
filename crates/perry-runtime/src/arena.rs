@@ -77,6 +77,9 @@ impl Arena {
         }
 
         // Need a new block — sized to fit the allocation
+        // Check GC trigger before allocating new block
+        crate::gc::gc_check_trigger();
+
         self.blocks.push(alloc_block(size));
         self.current += 1;
 
@@ -99,11 +102,123 @@ pub fn arena_alloc(size: usize, align: usize) -> *mut u8 {
     })
 }
 
+/// Allocate from arena with a GcHeader prepended.
+/// Returns pointer to usable memory AFTER the GcHeader.
+/// The object is NOT added to any tracking list — arena objects are discovered
+/// by walking arena blocks linearly.
+#[inline]
+pub fn arena_alloc_gc(size: usize, align: usize, obj_type: u8) -> *mut u8 {
+    use crate::gc::{GcHeader, GC_HEADER_SIZE, GC_FLAG_ARENA};
+
+    // First, try reusing a slot from the free list
+    let reused = crate::gc::ARENA_FREE_LIST.with(|fl| {
+        let mut fl = fl.borrow_mut();
+        // Find a slot that fits (exact or slightly larger)
+        let mut best_idx = None;
+        let mut best_waste = usize::MAX;
+        for (idx, &(_, slot_size)) in fl.iter().enumerate() {
+            if slot_size >= size && slot_size - size < best_waste {
+                best_waste = slot_size - size;
+                best_idx = Some(idx);
+                if best_waste == 0 {
+                    break; // Perfect fit
+                }
+            }
+        }
+        if let Some(idx) = best_idx {
+            let (ptr, _slot_size) = fl.swap_remove(idx);
+            Some(ptr)
+        } else {
+            None
+        }
+    });
+
+    if let Some(user_ptr) = reused {
+        // Reusing a free-list slot: the GcHeader is already in place (before user_ptr)
+        // Just update it
+        unsafe {
+            let header = user_ptr.sub(GC_HEADER_SIZE) as *mut GcHeader;
+            (*header).obj_type = obj_type;
+            (*header).gc_flags = GC_FLAG_ARENA;
+            (*header)._reserved = 0;
+            // size field already set from original allocation
+        }
+        return user_ptr;
+    }
+
+    let total = GC_HEADER_SIZE + size;
+    let raw = arena_alloc(total, align);
+
+    unsafe {
+        let header = raw as *mut GcHeader;
+        (*header).obj_type = obj_type;
+        (*header).gc_flags = GC_FLAG_ARENA;
+        (*header)._reserved = 0;
+        (*header).size = total as u32;
+    }
+
+    unsafe { raw.add(GC_HEADER_SIZE) }
+}
+
 /// Allocate an object of known size from the arena
 /// Returns a properly aligned pointer
 #[no_mangle]
 pub extern "C" fn js_arena_alloc(size: u32) -> *mut u8 {
     arena_alloc(size as usize, 8)
+}
+
+/// Get total bytes reserved across all arena blocks
+pub fn arena_total_bytes() -> usize {
+    ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        let mut total: usize = 0;
+        for block in &arena.blocks {
+            total += block.size;
+        }
+        total
+    })
+}
+
+/// Walk all GcHeader objects in arena blocks linearly.
+/// Calls `callback` for each GcHeader pointer found.
+/// Objects are discovered by their `size` field (hop from one to the next).
+pub fn arena_walk_objects(mut callback: impl FnMut(*mut u8)) {
+    use crate::gc::GcHeader;
+
+    ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        for block in &arena.blocks {
+            let mut offset = 0usize;
+            while offset < block.offset {
+                // Align to 8 bytes (all our allocations are 8-byte aligned)
+                let aligned = (offset + 7) & !7;
+                if aligned >= block.offset {
+                    break;
+                }
+
+                let header_ptr = unsafe { block.data.add(aligned) };
+                let header = header_ptr as *const GcHeader;
+
+                unsafe {
+                    let total_size = (*header).size as usize;
+                    if total_size == 0 || total_size > block.size {
+                        // Invalid header — we've hit uninitialized or non-GC memory.
+                        // This can happen because arena_alloc() (without GC) is still
+                        // used for some allocations. Skip the rest of this block.
+                        break;
+                    }
+
+                    // Only process if this looks like a valid GC object
+                    let obj_type = (*header).obj_type;
+                    if obj_type >= 1 && obj_type <= 7 {
+                        callback(header_ptr);
+                    }
+
+                    offset = aligned + total_size;
+                }
+            }
+        }
+    });
 }
 
 /// Get arena memory statistics: (heap_used, heap_total)

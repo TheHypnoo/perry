@@ -8672,7 +8672,7 @@ fn closure_uses_this(body: &[Stmt]) -> bool {
 
 /// Check if a name is a built-in global function provided by the runtime
 fn is_builtin_function(name: &str) -> bool {
-    matches!(name, "setTimeout" | "setInterval" | "clearTimeout" | "clearInterval" | "fetch")
+    matches!(name, "setTimeout" | "setInterval" | "clearTimeout" | "clearInterval" | "fetch" | "gc")
 }
 
 /// Fix imported enum references in a module's HIR.

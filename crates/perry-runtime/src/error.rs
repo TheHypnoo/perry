@@ -3,7 +3,6 @@
 //! Provides the built-in Error class and its subclasses.
 
 use crate::string::{js_string_from_bytes, StringHeader};
-use std::alloc::{alloc, Layout};
 
 /// Object type tag for runtime type discrimination
 pub const OBJECT_TYPE_REGULAR: u32 = 1;
@@ -27,18 +26,13 @@ pub struct ErrorHeader {
 /// Create a new Error with no message
 #[no_mangle]
 pub extern "C" fn js_error_new() -> *mut ErrorHeader {
-    unsafe {
-        let layout = Layout::new::<ErrorHeader>();
-        let ptr = alloc(layout) as *mut ErrorHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate Error");
-        }
+    let raw = crate::gc::gc_malloc(std::mem::size_of::<ErrorHeader>(), crate::gc::GC_TYPE_ERROR);
+    let ptr = raw as *mut ErrorHeader;
 
-        // Set type tag to identify as Error object
+    unsafe {
         (*ptr).object_type = OBJECT_TYPE_ERROR;
         (*ptr)._padding = 0;
 
-        // Create empty message
         let empty_msg = js_string_from_bytes(b"".as_ptr(), 0);
         let error_name = js_string_from_bytes(b"Error".as_ptr(), 5);
         let stack = js_string_from_bytes(b"".as_ptr(), 0);
@@ -46,22 +40,18 @@ pub extern "C" fn js_error_new() -> *mut ErrorHeader {
         (*ptr).message = empty_msg;
         (*ptr).name = error_name;
         (*ptr).stack = stack;
-
-        ptr
     }
+
+    ptr
 }
 
 /// Create a new Error with a message
 #[no_mangle]
 pub extern "C" fn js_error_new_with_message(message: *mut StringHeader) -> *mut ErrorHeader {
-    unsafe {
-        let layout = Layout::new::<ErrorHeader>();
-        let ptr = alloc(layout) as *mut ErrorHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate Error");
-        }
+    let raw = crate::gc::gc_malloc(std::mem::size_of::<ErrorHeader>(), crate::gc::GC_TYPE_ERROR);
+    let ptr = raw as *mut ErrorHeader;
 
-        // Set type tag to identify as Error object
+    unsafe {
         (*ptr).object_type = OBJECT_TYPE_ERROR;
         (*ptr)._padding = 0;
 
@@ -71,9 +61,9 @@ pub extern "C" fn js_error_new_with_message(message: *mut StringHeader) -> *mut 
         (*ptr).message = message;
         (*ptr).name = error_name;
         (*ptr).stack = stack;
-
-        ptr
     }
+
+    ptr
 }
 
 /// Get the message property of an Error

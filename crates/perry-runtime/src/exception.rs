@@ -120,3 +120,12 @@ pub extern "C" fn js_enter_finally() {
 pub extern "C" fn js_leave_finally() {
     unsafe { IN_FINALLY = false; }
 }
+
+/// GC root scanner: mark the current exception value
+pub fn scan_exception_roots(mark: &mut dyn FnMut(f64)) {
+    unsafe {
+        if HAS_EXCEPTION {
+            mark(CURRENT_EXCEPTION);
+        }
+    }
+}

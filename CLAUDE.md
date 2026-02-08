@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.142
+**Current Version:** 0.2.147
 
 ## Workflow Requirements
 
@@ -332,8 +332,8 @@ Build: `cargo build --release -p perry-ui-macos`. Non-UI programs are unaffected
 
 ## Known Limitations
 
-### No Garbage Collection
-Uses a **bump arena allocator** (`crates/perry-runtime/src/arena.rs`). Memory is never freed — arena grows in 8MB blocks. Best suited for short-running programs. `process.memoryUsage()` available to monitor.
+### Mark-Sweep Garbage Collection
+Uses a **mark-sweep GC** (`crates/perry-runtime/src/gc.rs`) with conservative stack scanning. Arena objects (arrays, objects) are discovered by linear block walking — zero per-allocation tracking overhead. Malloc objects (strings, closures, promises, bigints, errors) are tracked in a thread-local list. GC triggers automatically when new arena blocks are allocated (every ~8MB), or manually via `gc()`. `process.memoryUsage()` available to monitor. The GC adds ~8 bytes overhead per allocation (GcHeader) but has zero cost for programs that fit in a single arena block.
 
 ### No Runtime Type Checking
 TypeScript types are **erased at compile time**. `as` casts are no-ops. `typeof` works via NaN-boxing tag inspection. `instanceof` works for class instances via class ID chain. No runtime enforcement of interfaces or generics.
@@ -423,6 +423,79 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.147
+- **Mark-sweep garbage collection** for bounded memory in long-running programs
+  - New `crates/perry-runtime/src/gc.rs`: full GC infrastructure
+    - 8-byte `GcHeader` prepended to every heap allocation (obj_type, gc_flags, size)
+    - Conservative stack scanning: `setjmp` captures registers, walks stack with NaN-boxing tag validation
+    - Type-specific object tracing: arrays (elements), objects (fields + keys), closures (captures), promises (value/callbacks/chain), errors (message/name/stack)
+    - Iterative worklist-based marking (no recursion — safe for deep object graphs)
+    - Sweep: malloc objects freed via `dealloc`; arena objects added to free list for reuse
+  - Arena integration (`arena.rs`):
+    - `arena_alloc_gc(size, align, obj_type)`: allocates with GcHeader, checks free list first
+    - `arena_walk_objects(callback)`: linear block walking for zero-cost arena object discovery
+    - GC trigger check only on new block allocation (~every 8MB), not per-allocation
+  - All allocation sites instrumented:
+    - Arena: arrays (`js_array_alloc*`, `js_array_grow`), objects (`js_object_alloc*`) → `arena_alloc_gc`
+    - Malloc: strings (`js_string_from_bytes*`, `js_string_concat`, `js_string_append`) → `gc_malloc`/`gc_realloc`
+    - Malloc: closures (`js_closure_alloc`), promises (`js_promise_new`), bigints, errors → `gc_malloc`
+  - Root scanning: promise task queue, timer callbacks, exception state, module-level global variables
+  - Codegen: `gc()` callable from TypeScript, `js_gc_init()` in entry module, `js_gc_register_global_root()` for module globals
+  - HIR: `gc` added to `is_builtin_function()` for ExternFuncRef resolution
+  - `js_object_free()` and `js_promise_free()` made no-op (GC handles deallocation)
+  - **Performance**: Zero overhead for compute-heavy benchmarks (fibonacci, nested_loops); <5% for allocation-heavy code (8 extra bytes per alloc)
+  - **All 56 runtime tests pass**, all benchmarks run correctly
+
+### v0.2.146
+- Fix i64 → f64 type mismatches when passing local object variables as arguments to NativeMethodCall
+  - Root cause: When a local object variable (stored as i64 pointer) is passed as an argument to a method call
+    like `wallet.connect(provider)`, the i64 was passed directly without NaN-boxing
+  - This was a 9th location missed in v0.2.145 - specifically the default argument handling in NativeMethodCall
+  - Fix: Modified the two default cases in NativeMethodCall argument handling to convert i64 values to f64
+  - Both `_ => arg_vals.clone()` cases now iterate over arguments and use `inline_nanbox_pointer` for i64 values
+  - Example: `ethers.Wallet.createRandom().connect(provider)` now properly NaN-boxes the `provider` argument
+- Fix fs module NativeMethodCall using wrong argument types (ensure_i64 instead of ensure_f64)
+  - Root cause: fs functions were changed to accept f64 (NaN-boxed strings) in v0.2.143, but the
+    NativeMethodCall argument handling still used `ensure_i64()` to extract i64 pointers
+  - Affected functions: `existsSync`, `readFileSync`, `writeFileSync`, `appendFileSync`, `mkdirSync`, `unlinkSync`
+  - Fix: Changed fs module argument handling to use `inline_nanbox_string()` for i64 values and `ensure_f64()` otherwise
+  - Also added `appendFileSync` to the explicit handling (was missing)
+
+### v0.2.145
+- Fix i64 → f64 type mismatches when passing object parameters to cross-module function calls
+  - Root cause: When a function has an object parameter (stored as i64 pointer), and passes it to another
+    function expecting f64 (NaN-boxed), the i64 was being bitcast to f64 instead of properly NaN-boxed
+  - Bitcast produces tiny denormalized floats (e.g., 4.94e-324 for pointer 1), not valid NaN-boxed values
+  - Example: `function foo(provider: Provider) { bar(provider); }` where bar expects NaN-boxed f64
+  - Fix: Use `inline_nanbox_pointer()` instead of `bitcast` for i64→f64 conversions in 8 locations:
+    - Wrapper function argument conversion (line 12342)
+    - FuncRef call argument conversion (line 21048)
+    - ExternFuncRef call argument conversion (lines 22941, 23069)
+    - Closure call argument conversion (line 23966)
+    - CallSpread argument conversion (line 24427)
+    - Other cross-module call patterns (lines 25439, 26420)
+  - `inline_nanbox_pointer` properly tags i64 pointers with POINTER_TAG (0x7FFD) for correct NaN-boxing
+
+### v0.2.144
+- Fix duplicate symbol linker errors when using jsruntime
+  - Root cause: Stub generator was still adding `js_call_function`, `js_load_module`, `js_new_from_handle`
+    to undefined symbols even when jsruntime is enabled (where they're already defined)
+  - v0.2.141 added jsruntime to scan paths but the explicit symbol check was still adding them
+  - Fix: Only add these symbols to undefined list when `!use_jsruntime`
+  - Before: `_perry_stubs.o` contained stubs for these three functions, causing duplicate symbol errors
+  - After: These symbols are excluded from stub generation when jsruntime is linked
+
+### v0.2.143
+- Fix fs.readFileSync() SIGSEGV crash - NaN-boxed string pointers were dereferenced directly
+  - Root cause: `js_fs_read_file_sync` and other fs functions expected raw `*const StringHeader` pointers
+  - But codegen passes NaN-boxed f64 values (with STRING_TAG 0x7FFF in upper bits)
+  - Dereferencing 0x7fff000b0b4c5a70 (NaN-boxed) instead of 0x0000000b0b4c5a70 (raw) caused SIGSEGV
+  - Fix: Changed all fs functions to accept `f64` (NaN-boxed) and extract raw pointer via `& POINTER_MASK`
+  - Updated codegen function signatures from I64 to F64 for all fs functions
+  - Removed unnecessary bitcasts in codegen call sites - now pass f64 values directly
+  - Affected functions: `js_fs_read_file_sync`, `js_fs_write_file_sync`, `js_fs_append_file_sync`,
+    `js_fs_exists_sync`, `js_fs_mkdir_sync`, `js_fs_unlink_sync`
 
 ### v0.2.142
 - Shape-cached object literal allocation eliminates per-object key array construction

@@ -3,8 +3,6 @@
 //! Provides 256-bit integer arithmetic for cryptocurrency operations.
 //! Uses primitive_types::U256 for the underlying representation.
 
-use std::alloc::{alloc, Layout};
-
 /// BigInt is stored as a heap-allocated U256 (256-bit unsigned integer)
 /// Layout: 32 bytes (4 x u64)
 #[repr(C)]
@@ -13,29 +11,28 @@ pub struct BigIntHeader {
     pub limbs: [u64; 4],
 }
 
+/// Allocate a BigInt with GC tracking
+#[inline]
+fn bigint_alloc() -> *mut BigIntHeader {
+    let raw = crate::gc::gc_malloc(std::mem::size_of::<BigIntHeader>(), crate::gc::GC_TYPE_BIGINT);
+    raw as *mut BigIntHeader
+}
+
 /// Create a BigInt from a u64 value
 #[no_mangle]
 pub extern "C" fn js_bigint_from_u64(value: u64) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
         (*ptr).limbs = [value, 0, 0, 0];
-        ptr
     }
+    ptr
 }
 
 /// Create a BigInt from a signed i64 value
 #[no_mangle]
 pub extern "C" fn js_bigint_from_i64(value: i64) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
         if value >= 0 {
             (*ptr).limbs = [value as u64, 0, 0, 0];
         } else {
@@ -49,12 +46,8 @@ pub extern "C" fn js_bigint_from_i64(value: i64) -> *mut BigIntHeader {
 /// Create a BigInt from a string (decimal or hex with 0x prefix)
 #[no_mangle]
 pub extern "C" fn js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
 
         let bytes = std::slice::from_raw_parts(data, len as usize);
         let s = std::str::from_utf8_unchecked(bytes);
@@ -111,12 +104,8 @@ pub extern "C" fn js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIn
 /// Add two BigInts
 #[no_mangle]
 pub extern "C" fn js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
@@ -137,12 +126,8 @@ pub extern "C" fn js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Subtract two BigInts (a - b)
 #[no_mangle]
 pub extern "C" fn js_bigint_sub(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
@@ -168,12 +153,8 @@ pub extern "C" fn js_bigint_sub(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Multiply two BigInts
 #[no_mangle]
 pub extern "C" fn js_bigint_mul(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
@@ -199,12 +180,8 @@ pub extern "C" fn js_bigint_mul(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Divide two BigInts (a / b)
 #[no_mangle]
 pub extern "C" fn js_bigint_div(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
@@ -249,12 +226,8 @@ pub extern "C" fn js_bigint_div(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Modulo of two BigInts (a % b)
 #[no_mangle]
 pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
@@ -296,12 +269,8 @@ pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Note: b is interpreted as a u64 (only lower 64 bits are used)
 #[no_mangle]
 pub extern "C" fn js_bigint_pow(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
 
         // Get exponent as u64 (only lower 64 bits)
         let exp = (*b).limbs[0];
@@ -350,12 +319,8 @@ fn mul_limbs(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
 /// Note: b is interpreted as a u64 (only lower 64 bits are used)
 #[no_mangle]
 pub extern "C" fn js_bigint_shl(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
 
         let shift = (*b).limbs[0] as usize;
         if shift >= 256 {
@@ -403,12 +368,8 @@ pub extern "C" fn js_bigint_shl(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Note: b is interpreted as a u64 (only lower 64 bits are used)
 #[no_mangle]
 pub extern "C" fn js_bigint_shr(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
 
         let shift = (*b).limbs[0] as usize;
         if shift >= 256 {
@@ -448,12 +409,8 @@ pub extern "C" fn js_bigint_shr(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Bitwise AND of two BigInts (a & b)
 #[no_mangle]
 pub extern "C" fn js_bigint_and(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
@@ -471,12 +428,8 @@ pub extern "C" fn js_bigint_and(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Bitwise OR of two BigInts (a | b)
 #[no_mangle]
 pub extern "C" fn js_bigint_or(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
@@ -494,12 +447,8 @@ pub extern "C" fn js_bigint_or(a: *const BigIntHeader, b: *const BigIntHeader) -
 /// Bitwise XOR of two BigInts (a ^ b)
 #[no_mangle]
 pub extern "C" fn js_bigint_xor(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    let layout = Layout::new::<BigIntHeader>();
+    let ptr = bigint_alloc();
     unsafe {
-        let ptr = alloc(layout) as *mut BigIntHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate BigInt");
-        }
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;

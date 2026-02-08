@@ -6,7 +6,7 @@
 //! - Elements array (inline)
 
 use std::ptr;
-use crate::arena::arena_alloc;
+use crate::arena::arena_alloc_gc;
 
 /// Array header - precedes the elements in memory
 #[repr(C)]
@@ -31,7 +31,7 @@ const MIN_ARRAY_CAPACITY: u32 = 16;
 pub extern "C" fn js_array_alloc(capacity: u32) -> *mut ArrayHeader {
     // Use at least MIN_ARRAY_CAPACITY to reduce reallocations for growing arrays
     let actual_capacity = capacity.max(MIN_ARRAY_CAPACITY);
-    let ptr = arena_alloc(array_byte_size(actual_capacity as usize), 8) as *mut ArrayHeader;
+    let ptr = arena_alloc_gc(array_byte_size(actual_capacity as usize), 8, crate::gc::GC_TYPE_ARRAY) as *mut ArrayHeader;
 
     unsafe {
         // Initialize header
@@ -48,7 +48,7 @@ pub extern "C" fn js_array_alloc(capacity: u32) -> *mut ArrayHeader {
 #[no_mangle]
 pub extern "C" fn js_array_alloc_with_length(capacity: u32) -> *mut ArrayHeader {
     let actual_capacity = capacity.max(MIN_ARRAY_CAPACITY);
-    let ptr = arena_alloc(array_byte_size(actual_capacity as usize), 8) as *mut ArrayHeader;
+    let ptr = arena_alloc_gc(array_byte_size(actual_capacity as usize), 8, crate::gc::GC_TYPE_ARRAY) as *mut ArrayHeader;
 
     unsafe {
         (*ptr).length = capacity;  // Set length = requested capacity
@@ -157,7 +157,7 @@ pub extern "C" fn js_array_grow(arr: *mut ArrayHeader, min_capacity: u32) -> *mu
 
         // Allocate new from arena and copy old data
         // Old memory is abandoned (bump allocator never frees individually)
-        let new_ptr = arena_alloc(new_size, 8) as *mut ArrayHeader;
+        let new_ptr = arena_alloc_gc(new_size, 8, crate::gc::GC_TYPE_ARRAY) as *mut ArrayHeader;
         ptr::copy_nonoverlapping(arr as *const u8, new_ptr as *mut u8, old_size);
 
         (*new_ptr).capacity = new_capacity;

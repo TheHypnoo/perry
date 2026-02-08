@@ -131,6 +131,9 @@ struct LocalInfo {
     /// LICM: Hoisted i32 products from invariant index computations (i*size hoisted out of inner loop)
     /// Maps other_var_id -> cache_variable containing the pre-computed i32 product
     hoisted_i32_products: Option<HashMap<LocalId, Variable>>,
+    /// If this is a module-level variable, the DataId of its global slot.
+    /// Used by closure capture code to share storage with named functions.
+    module_var_data_id: Option<cranelift_module::DataId>,
 }
 
 /// Check if a block has been filled with a terminating instruction
@@ -1045,7 +1048,7 @@ impl Compiler {
                     cached_array_ptr: None,
                     const_value,
                     hoisted_element_loads: None,
-                    hoisted_i32_products: None,
+                    hoisted_i32_products: None, module_var_data_id: None,
                 };
                 self.module_level_locals.insert(*id, info);
                 }
@@ -1736,7 +1739,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                 });
             }
 
@@ -1770,7 +1773,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                     })
                 };
 
@@ -2026,7 +2029,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -2173,7 +2176,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                 });
             }
 
@@ -2194,7 +2197,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -2365,7 +2368,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                 });
             }
 
@@ -2386,7 +2389,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -2585,7 +2588,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                 });
             }
 
@@ -2606,7 +2609,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -4227,11 +4230,11 @@ impl Compiler {
             self.extern_funcs.insert("js_process_exit".to_string(), func_id);
         }
 
-        // File system runtime functions
-        // js_fs_read_file_sync(path_ptr: *const StringHeader) -> *mut StringHeader
+        // File system runtime functions - all accept NaN-boxed f64 string values
+        // js_fs_read_file_sync(path_value: f64) -> *mut StringHeader
         {
             let mut sig = self.module.make_signature();
-            sig.params.push(AbiParam::new(types::I64)); // path string pointer
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed path string
             sig.returns.push(AbiParam::new(types::I64)); // content string pointer (or null)
             let func_id = self.module.declare_function(
                 "js_fs_read_file_sync",
@@ -4241,11 +4244,11 @@ impl Compiler {
             self.extern_funcs.insert("js_fs_read_file_sync".to_string(), func_id);
         }
 
-        // js_fs_write_file_sync(path_ptr: *const StringHeader, content_ptr: *const StringHeader) -> i32
+        // js_fs_write_file_sync(path_value: f64, content_value: f64) -> i32
         {
             let mut sig = self.module.make_signature();
-            sig.params.push(AbiParam::new(types::I64)); // path string pointer
-            sig.params.push(AbiParam::new(types::I64)); // content string pointer
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed path string
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed content string
             sig.returns.push(AbiParam::new(types::I32)); // 1 on success, 0 on failure
             let func_id = self.module.declare_function(
                 "js_fs_write_file_sync",
@@ -4255,11 +4258,11 @@ impl Compiler {
             self.extern_funcs.insert("js_fs_write_file_sync".to_string(), func_id);
         }
 
-        // js_fs_append_file_sync(path_ptr: *const StringHeader, content_ptr: *const StringHeader) -> i32
+        // js_fs_append_file_sync(path_value: f64, content_value: f64) -> i32
         {
             let mut sig = self.module.make_signature();
-            sig.params.push(AbiParam::new(types::I64)); // path string pointer
-            sig.params.push(AbiParam::new(types::I64)); // content string pointer
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed path string
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed content string
             sig.returns.push(AbiParam::new(types::I32)); // 1 on success, 0 on failure
             let func_id = self.module.declare_function(
                 "js_fs_append_file_sync",
@@ -4269,10 +4272,10 @@ impl Compiler {
             self.extern_funcs.insert("js_fs_append_file_sync".to_string(), func_id);
         }
 
-        // js_fs_exists_sync(path_ptr: *const StringHeader) -> i32
+        // js_fs_exists_sync(path_value: f64) -> i32
         {
             let mut sig = self.module.make_signature();
-            sig.params.push(AbiParam::new(types::I64)); // path string pointer
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed path string
             sig.returns.push(AbiParam::new(types::I32)); // 1 if exists, 0 if not
             let func_id = self.module.declare_function(
                 "js_fs_exists_sync",
@@ -4282,10 +4285,10 @@ impl Compiler {
             self.extern_funcs.insert("js_fs_exists_sync".to_string(), func_id);
         }
 
-        // js_fs_mkdir_sync(path_ptr: *const StringHeader) -> i32
+        // js_fs_mkdir_sync(path_value: f64) -> i32
         {
             let mut sig = self.module.make_signature();
-            sig.params.push(AbiParam::new(types::I64)); // path string pointer
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed path string
             sig.returns.push(AbiParam::new(types::I32)); // 1 on success, 0 on failure
             let func_id = self.module.declare_function(
                 "js_fs_mkdir_sync",
@@ -4295,10 +4298,10 @@ impl Compiler {
             self.extern_funcs.insert("js_fs_mkdir_sync".to_string(), func_id);
         }
 
-        // js_fs_unlink_sync(path_ptr: *const StringHeader) -> i32
+        // js_fs_unlink_sync(path_value: f64) -> i32
         {
             let mut sig = self.module.make_signature();
-            sig.params.push(AbiParam::new(types::I64)); // path string pointer
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed path string
             sig.returns.push(AbiParam::new(types::I32)); // 1 on success, 0 on failure
             let func_id = self.module.declare_function(
                 "js_fs_unlink_sync",
@@ -10047,6 +10050,34 @@ impl Compiler {
             self.extern_funcs.insert("js_create_callback".to_string(), func_id);
         }
 
+        // ============================================
+        // Garbage Collection FFI functions
+        // ============================================
+
+        // js_gc_collect() -> void
+        {
+            let sig = self.module.make_signature();
+            let func_id = self.module.declare_function("js_gc_collect", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_gc_collect".to_string(), func_id);
+            // Also register as "gc" for TypeScript code: gc()
+            self.extern_funcs.insert("gc".to_string(), func_id);
+        }
+
+        // js_gc_register_global_root(ptr: i64) -> void
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // pointer to module global
+            let func_id = self.module.declare_function("js_gc_register_global_root", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_gc_register_global_root".to_string(), func_id);
+        }
+
+        // js_gc_init() -> void
+        {
+            let sig = self.module.make_signature();
+            let func_id = self.module.declare_function("js_gc_init", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_gc_init".to_string(), func_id);
+        }
+
         Ok(())
     }
 
@@ -10283,7 +10314,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                 });
             }
 
@@ -10376,7 +10407,7 @@ impl Compiler {
                         is_mixed_array: false, is_integer: false, is_integer_array: false, is_i32: false,
                         i32_shadow: None, bounded_by_array: None, bounded_by_constant: None,
                         scalar_fields: None, squared_cache: None, product_cache: None,
-                        cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                     })
                 };
                 // Use next_temp_var_id() for guaranteed unique variable IDs
@@ -11926,7 +11957,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                 });
             }
 
@@ -12000,7 +12031,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                     });
                 } else {
                     // For immutable captures, store the value directly
@@ -12029,7 +12060,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                     });
                 }
             }
@@ -12069,7 +12100,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                     })
                 };
 
@@ -12340,7 +12371,8 @@ impl Compiler {
                         if expected_type == types::I64 && actual_type == types::F64 {
                             builder.ins().bitcast(types::I64, MemFlags::new(), val)
                         } else if expected_type == types::F64 && actual_type == types::I64 {
-                            builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                            // i64 pointer -> f64: NaN-box with POINTER_TAG
+                            inline_nanbox_pointer(&mut builder, val)
                         } else if expected_type == types::F64 && actual_type == types::I32 {
                             // i32 (from loop optimization) -> f64
                             builder.ins().fcvt_from_sint(types::F64, val)
@@ -12616,6 +12648,11 @@ impl Compiler {
                     let init_dispatch_ref = self.module.declare_func_in_func(*init_dispatch_id, builder.func);
                     builder.ins().call(init_dispatch_ref, &[]);
                 }
+                // Initialize GC (registers root scanners for promises, timers, exceptions)
+                if let Some(gc_init_id) = self.extern_funcs.get("js_gc_init") {
+                    let gc_init_ref = self.module.declare_func_in_func(*gc_init_id, builder.func);
+                    builder.ins().call(gc_init_ref, &[]);
+                }
             }
 
             // Initialize JS runtime at the start of main() if needed
@@ -12700,6 +12737,12 @@ impl Compiler {
                             builder.ins().store(MemFlags::new(), val, ptr, 0);
                             // Store the LocalInfo so compile_function knows the type
                             self.module_level_locals.insert(*id, local_info);
+                            // Tag the local with its global slot DataId so that closures
+                            // capturing this variable mutably can use the global slot as
+                            // the box, keeping named-function reads in sync.
+                            if let Some(local_info_mut) = locals.get_mut(id) {
+                                local_info_mut.module_var_data_id = Some(data_id);
+                            }
                         }
                     }
                     continue;
@@ -12736,6 +12779,17 @@ impl Compiler {
                     let global_val = self.module.declare_data_in_func(*data_id, builder.func);
                     let ptr = builder.ins().global_value(types::I64, global_val);
                     builder.ins().store(MemFlags::new(), closure_val, ptr, 0);
+                }
+            }
+
+            // Register module-level variable addresses as GC roots
+            // This ensures the GC can find references stored in module globals
+            if let Some(gc_root_id) = self.extern_funcs.get("js_gc_register_global_root").copied() {
+                let gc_root_ref = self.module.declare_func_in_func(gc_root_id, builder.func);
+                for (_local_id, data_id) in &self.module_var_data_ids {
+                    let global_val = self.module.declare_data_in_func(*data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    builder.ins().call(gc_root_ref, &[ptr]);
                 }
             }
 
@@ -13672,7 +13726,7 @@ fn compile_stmt(
                 None
             };
 
-            locals.insert(*id, LocalInfo { var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: false, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None });
+            locals.insert(*id, LocalInfo { var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: false, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None });
         }
         Stmt::Return(expr) => {
             // Check if this is a void function (no return type) - e.g., constructors
@@ -15181,7 +15235,7 @@ fn compile_stmt(
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: Some(field_vars.clone()),
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                     });
 
                     scalar_replacement_vars = Some((obj_id, field_vars));
@@ -16165,7 +16219,7 @@ fn compile_stmt(
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
                     });
                 }
 
@@ -16894,14 +16948,21 @@ fn compile_expr(
         Expr::FsReadFileSync(path_expr) => {
             // Compile the path expression
             let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
-            // Convert f64 to i64 pointer
-            let path_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), path_val);
+            // Ensure path is NaN-boxed f64 (may be i64 raw string pointer from string variables)
+            let path_f64 = {
+                let val_type = builder.func.dfg.value_type(path_val);
+                if val_type == types::I64 {
+                    inline_nanbox_string(builder, path_val)
+                } else {
+                    path_val
+                }
+            };
 
-            // Call js_fs_read_file_sync
+            // Call js_fs_read_file_sync with NaN-boxed f64
             let func = extern_funcs.get("js_fs_read_file_sync")
                 .ok_or_else(|| anyhow!("js_fs_read_file_sync not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[path_ptr]);
+            let call = builder.ins().call(func_ref, &[path_f64]);
             let result_ptr = builder.inst_results(call)[0];
 
             // NaN-box the string pointer with STRING_TAG
@@ -16915,15 +16976,15 @@ fn compile_expr(
             // Compile path and content expressions
             let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
             let content_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, content_expr, this_ctx)?;
-            // Convert f64 to i64 pointers
-            let path_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), path_val);
-            let content_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), content_val);
+            // Ensure both are NaN-boxed f64
+            let path_f64 = { let t = builder.func.dfg.value_type(path_val); if t == types::I64 { inline_nanbox_string(builder, path_val) } else { path_val } };
+            let content_f64 = { let t = builder.func.dfg.value_type(content_val); if t == types::I64 { inline_nanbox_string(builder, content_val) } else { content_val } };
 
-            // Call js_fs_write_file_sync
+            // Call js_fs_write_file_sync with NaN-boxed f64 values
             let func = extern_funcs.get("js_fs_write_file_sync")
                 .ok_or_else(|| anyhow!("js_fs_write_file_sync not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[path_ptr, content_ptr]);
+            let call = builder.ins().call(func_ref, &[path_f64, content_f64]);
             let result_i32 = builder.inst_results(call)[0];
 
             // Return as f64 (1.0 = success, 0.0 = failure)
@@ -16933,15 +16994,15 @@ fn compile_expr(
             // Compile path and content expressions
             let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
             let content_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, content_expr, this_ctx)?;
-            // Convert f64 to i64 pointers
-            let path_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), path_val);
-            let content_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), content_val);
+            // Ensure both are NaN-boxed f64
+            let path_f64 = { let t = builder.func.dfg.value_type(path_val); if t == types::I64 { inline_nanbox_string(builder, path_val) } else { path_val } };
+            let content_f64 = { let t = builder.func.dfg.value_type(content_val); if t == types::I64 { inline_nanbox_string(builder, content_val) } else { content_val } };
 
-            // Call js_fs_append_file_sync
+            // Call js_fs_append_file_sync with NaN-boxed f64 values
             let func = extern_funcs.get("js_fs_append_file_sync")
                 .ok_or_else(|| anyhow!("js_fs_append_file_sync not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[path_ptr, content_ptr]);
+            let call = builder.ins().call(func_ref, &[path_f64, content_f64]);
             let result_i32 = builder.inst_results(call)[0];
 
             // Return as f64 (1.0 = success, 0.0 = failure)
@@ -16950,13 +17011,13 @@ fn compile_expr(
         Expr::FsExistsSync(path_expr) => {
             // Compile the path expression
             let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
-            let path_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), path_val);
+            let path_f64 = { let t = builder.func.dfg.value_type(path_val); if t == types::I64 { inline_nanbox_string(builder, path_val) } else { path_val } };
 
-            // Call js_fs_exists_sync
+            // Call js_fs_exists_sync with NaN-boxed f64
             let func = extern_funcs.get("js_fs_exists_sync")
                 .ok_or_else(|| anyhow!("js_fs_exists_sync not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[path_ptr]);
+            let call = builder.ins().call(func_ref, &[path_f64]);
             let result_i32 = builder.inst_results(call)[0];
 
             // Return as f64 (1.0 = true, 0.0 = false)
@@ -16965,13 +17026,13 @@ fn compile_expr(
         Expr::FsMkdirSync(path_expr) => {
             // Compile the path expression
             let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
-            let path_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), path_val);
+            let path_f64 = { let t = builder.func.dfg.value_type(path_val); if t == types::I64 { inline_nanbox_string(builder, path_val) } else { path_val } };
 
-            // Call js_fs_mkdir_sync
+            // Call js_fs_mkdir_sync with NaN-boxed f64
             let func = extern_funcs.get("js_fs_mkdir_sync")
                 .ok_or_else(|| anyhow!("js_fs_mkdir_sync not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[path_ptr]);
+            let call = builder.ins().call(func_ref, &[path_f64]);
             let result_i32 = builder.inst_results(call)[0];
 
             // Return as f64 (1.0 = success, 0.0 = failure)
@@ -16980,13 +17041,13 @@ fn compile_expr(
         Expr::FsUnlinkSync(path_expr) => {
             // Compile the path expression
             let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
-            let path_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), path_val);
+            let path_f64 = { let t = builder.func.dfg.value_type(path_val); if t == types::I64 { inline_nanbox_string(builder, path_val) } else { path_val } };
 
-            // Call js_fs_unlink_sync
+            // Call js_fs_unlink_sync with NaN-boxed f64
             let func = extern_funcs.get("js_fs_unlink_sync")
                 .ok_or_else(|| anyhow!("js_fs_unlink_sync not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[path_ptr]);
+            let call = builder.ins().call(func_ref, &[path_f64]);
             let result_i32 = builder.inst_results(call)[0];
 
             // Return as f64 (1.0 = success, 0.0 = failure)
@@ -17070,7 +17131,13 @@ fn compile_expr(
         Expr::JsonParse(json_str_expr) => {
             // Compile the JSON string expression
             let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, json_str_expr, this_ctx)?;
-            let str_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), str_val);
+            // Extract raw string pointer: i64 values are already raw pointers,
+            // f64 values are NaN-boxed and need the STRING_TAG stripped.
+            let str_ptr = if builder.func.dfg.value_type(str_val) == types::I64 {
+                str_val
+            } else {
+                inline_get_string_pointer(builder, str_val)
+            };
 
             // Call js_json_parse - returns JSValue bits as i64
             let func = extern_funcs.get("js_json_parse")
@@ -19813,7 +19880,9 @@ fn compile_expr(
                 let box_set_func = extern_funcs.get("js_box_set")
                     .ok_or_else(|| anyhow!("js_box_set not declared"))?;
                 let box_set_ref = module.declare_func_in_func(*box_set_func, builder.func);
-                builder.ins().call(box_set_ref, &[box_ptr, val]);
+                // js_box_set expects f64, but value may be i64 (e.g., pointer from inline string ops)
+                let val_f64 = ensure_f64(builder, val);
+                builder.ins().call(box_set_ref, &[box_ptr, val_f64]);
                 Ok(val)
             } else if info.is_union && is_string_expr_for_union(value, locals) {
                 // For union types with string values, NaN-box the pointer using STRING_TAG (inline, no FFI)
@@ -21057,7 +21126,9 @@ fn compile_expr(
                                 if expected_type == types::I64 && actual_type == types::F64 {
                                     builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else if expected_type == types::F64 && actual_type == types::I64 {
-                                    builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                                    // i64 pointer -> f64: NaN-box with POINTER_TAG, not just bitcast
+                                    // Raw bitcast would produce tiny denormalized floats instead of proper NaN-boxed values
+                                    inline_nanbox_pointer(builder, val)
                                 } else if expected_type == types::F64 && actual_type == types::I32 {
                                     // i32 (from loop optimization) -> f64
                                     builder.ins().fcvt_from_sint(types::F64, val)
@@ -22948,7 +23019,8 @@ fn compile_expr(
                                                     if expected_type == types::I64 && actual_type == types::F64 {
                                                         builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                                     } else if expected_type == types::F64 && actual_type == types::I64 {
-                                                        builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                                                        // i64 pointer -> f64: NaN-box with POINTER_TAG
+                                                        inline_nanbox_pointer(builder, val)
                                                     } else if expected_type == types::F64 && actual_type == types::I32 {
                                                         // i32 (from loop counter optimization) -> f64
                                                         builder.ins().fcvt_from_sint(types::F64, val)
@@ -23076,7 +23148,8 @@ fn compile_expr(
                                             if expected_type == types::I64 && actual_type == types::F64 {
                                                 builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                             } else if expected_type == types::F64 && actual_type == types::I64 {
-                                                builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                                                // i64 pointer -> f64: NaN-box with POINTER_TAG
+                                                inline_nanbox_pointer(builder, val)
                                             } else if expected_type == types::F64 && actual_type == types::I32 {
                                                 // i32 (from loop counter optimization) -> f64
                                                 builder.ins().fcvt_from_sint(types::F64, val)
@@ -23973,8 +24046,8 @@ fn compile_expr(
                                     // Bitcast f64 to i64 (for handle/pointer arguments)
                                     converted_args.push(builder.ins().bitcast(types::I64, MemFlags::new(), *arg_val));
                                 } else if expected_type == types::F64 && actual_type == types::I64 {
-                                    // Bitcast i64 to f64
-                                    converted_args.push(builder.ins().bitcast(types::F64, MemFlags::new(), *arg_val));
+                                    // i64 pointer -> f64: NaN-box with POINTER_TAG
+                                    converted_args.push(inline_nanbox_pointer(builder, *arg_val));
                                 } else if expected_type == types::F64 && actual_type == types::I32 {
                                     // i32 (from loop optimization) -> f64
                                     converted_args.push(builder.ins().fcvt_from_sint(types::F64, *arg_val));
@@ -24434,7 +24507,8 @@ fn compile_expr(
                                     if expected_type == types::I64 && actual_type == types::F64 {
                                         builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                     } else if expected_type == types::F64 && actual_type == types::I64 {
-                                        builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                                        // i64 pointer -> f64: NaN-box with POINTER_TAG
+                                        inline_nanbox_pointer(builder, val)
                                     } else if expected_type == types::F64 && actual_type == types::I32 {
                                         // i32 (from loop counter optimization) -> f64
                                         builder.ins().fcvt_from_sint(types::F64, val)
@@ -25446,7 +25520,8 @@ fn compile_expr(
                                 if expected_type == types::I64 && actual_type == types::F64 {
                                     builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else if expected_type == types::F64 && actual_type == types::I64 {
-                                    builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                                    // i64 pointer -> f64: NaN-box with POINTER_TAG
+                                    inline_nanbox_pointer(builder, val)
                                 } else if expected_type == types::F64 && actual_type == types::I32 {
                                     // i32 (from loop counter optimization) -> f64
                                     builder.ins().fcvt_from_sint(types::F64, val)
@@ -26427,7 +26502,8 @@ fn compile_expr(
                                         if expected_type == types::I64 && actual_type == types::F64 {
                                             builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                         } else if expected_type == types::F64 && actual_type == types::I64 {
-                                            builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                                            // i64 pointer -> f64: NaN-box with POINTER_TAG
+                                            inline_nanbox_pointer(builder, val)
                                         } else if expected_type == types::F64 && actual_type == types::I32 {
                                             // i32 (from loop counter optimization) -> f64
                                             builder.ins().fcvt_from_sint(types::F64, val)
@@ -27433,7 +27509,18 @@ fn compile_expr(
                         let val = builder.use_var(info.var);
 
                         let val_to_store = if mutable_set.contains(capture_id) {
-                            // For mutable captures, allocate a box and store the box pointer
+                            // For mutable captures that correspond to module-level variables,
+                            // use the global slot address as the box pointer instead of
+                            // allocating a separate heap box.  This keeps closure writes
+                            // (via js_box_set) and named-function reads (via global_value)
+                            // pointing at the same storage.
+                            if let Some(data_id) = info.module_var_data_id {
+                                let global_val = module.declare_data_in_func(data_id, builder.func);
+                                let slot_addr = builder.ins().global_value(types::I64, global_val);
+                                // Convert slot address to f64 for closure capture storage
+                                builder.ins().bitcast(types::F64, MemFlags::new(), slot_addr)
+                            } else {
+                            // For mutable captures without a global slot, allocate a box
                             // Ensure value is f64 for js_box_alloc
                             let val_type = builder.func.dfg.value_type(val);
                             let val_f64 = if val_type == types::I64 {
@@ -27449,6 +27536,7 @@ fn compile_expr(
                             let box_ptr = builder.inst_results(box_call)[0];
                             // Convert box pointer to f64 for storage
                             builder.ins().bitcast(types::F64, MemFlags::new(), box_ptr)
+                            }
                         } else {
                             // For immutable captures, store the value directly
                             // Ensure it's f64 for closure storage
@@ -30045,29 +30133,55 @@ fn compile_expr(
                         _ => arg_vals.clone()
                     }
                 } else if native_module == "fs" {
-                    // fs module functions - all path arguments are strings (pointers)
+                    // fs module functions - all path arguments are NaN-boxed strings (f64)
                     match method.as_str() {
                         "existsSync" | "mkdirSync" | "unlinkSync" => {
-                            // Single path argument
+                            // Single path argument - ensure f64 (NaN-boxed)
                             arg_vals.iter().map(|&val| {
-                                ensure_i64(builder, val)
+                                let t = builder.func.dfg.value_type(val);
+                                if t == types::I64 {
+                                    inline_nanbox_string(builder, val)
+                                } else {
+                                    ensure_f64(builder, val)
+                                }
                             }).collect()
                         }
                         "readFileSync" => {
-                            // readFileSync(path, options?) - we only need the path
+                            // readFileSync(path, options?) - path is NaN-boxed string
                             if !arg_vals.is_empty() {
-                                vec![ensure_i64(builder, arg_vals[0])]
+                                let val = arg_vals[0];
+                                let t = builder.func.dfg.value_type(val);
+                                if t == types::I64 {
+                                    vec![inline_nanbox_string(builder, val)]
+                                } else {
+                                    vec![ensure_f64(builder, val)]
+                                }
                             } else {
                                 vec![]
                             }
                         }
-                        "writeFileSync" => {
-                            // writeFileSync(path, content) - both strings
+                        "writeFileSync" | "appendFileSync" => {
+                            // writeFileSync(path, content) - both NaN-boxed strings
                             arg_vals.iter().map(|&val| {
-                                ensure_i64(builder, val)
+                                let t = builder.func.dfg.value_type(val);
+                                if t == types::I64 {
+                                    inline_nanbox_string(builder, val)
+                                } else {
+                                    ensure_f64(builder, val)
+                                }
                             }).collect()
                         }
-                        _ => arg_vals.clone()
+                        _ => {
+                            // Default: convert i64 to f64 by NaN-boxing as string
+                            arg_vals.iter().map(|&val| {
+                                let t = builder.func.dfg.value_type(val);
+                                if t == types::I64 {
+                                    inline_nanbox_string(builder, val)
+                                } else {
+                                    ensure_f64(builder, val)
+                                }
+                            }).collect()
+                        }
                     }
                 } else if native_module == "path" {
                     // path module functions - all arguments are strings (pointers)
@@ -30177,10 +30291,26 @@ fn compile_expr(
                                 vec![builder.ins().f64const(0.0)]
                             }
                         }
-                        _ => arg_vals.clone()
+                        _ => {
+                            // Convert any i64 arguments to f64 by NaN-boxing
+                            arg_vals.iter().map(|&val| {
+                                if builder.func.dfg.value_type(val) == types::I64 {
+                                    inline_nanbox_pointer(builder, val)
+                                } else {
+                                    val
+                                }
+                            }).collect()
+                        }
                     }
                 } else {
-                    arg_vals.clone()
+                    // Default: convert any i64 arguments to f64 by NaN-boxing
+                    arg_vals.iter().map(|&val| {
+                        if builder.func.dfg.value_type(val) == types::I64 {
+                            inline_nanbox_pointer(builder, val)
+                        } else {
+                            val
+                        }
+                    }).collect()
                 }
             };
 
@@ -30548,7 +30678,9 @@ fn compile_expr(
                 let len_val = builder.ins().iconst(types::I32, len as i64);
                 let call = builder.ins().call(alloc_ref, &[slot_addr, len_val]);
                 let str_ptr = builder.inst_results(call)[0];
-                Ok(builder.ins().bitcast(types::F64, MemFlags::new(), str_ptr))
+                // NaN-box the string pointer so it's recognized as a string by
+                // the rest of the system (string concat, comparison, etc.)
+                Ok(inline_nanbox_string(builder, str_ptr))
             } else {
                 // Need runtime type check - call js_value_typeof
                 // js_value_typeof expects f64 (NaN-boxed value)
@@ -30569,7 +30701,8 @@ fn compile_expr(
                 let typeof_ref = module.declare_func_in_func(*typeof_func, builder.func);
                 let call = builder.ins().call(typeof_ref, &[val_f64]);
                 let str_ptr = builder.inst_results(call)[0];
-                Ok(builder.ins().bitcast(types::F64, MemFlags::new(), str_ptr))
+                // NaN-box the string pointer so it's recognized as a string
+                Ok(inline_nanbox_string(builder, str_ptr))
             }
         }
         Expr::InstanceOf { expr, ty } => {

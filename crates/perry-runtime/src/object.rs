@@ -8,8 +8,7 @@
 
 use crate::JSValue;
 use crate::ArrayHeader;
-use crate::arena::arena_alloc;
-use std::alloc::{alloc, dealloc, Layout};
+use crate::arena::arena_alloc_gc;
 use std::cell::RefCell;
 use std::ptr;
 use std::collections::HashMap;
@@ -88,14 +87,6 @@ pub struct ObjectHeader {
     pub keys_array: *mut ArrayHeader,
 }
 
-/// Calculate the layout for an object with N fields
-fn object_layout(field_count: usize) -> Layout {
-    let header_size = std::mem::size_of::<ObjectHeader>();
-    let fields_size = field_count * std::mem::size_of::<JSValue>();
-    let total_size = header_size + fields_size;
-    Layout::from_size_align(total_size, 8).unwrap()
-}
-
 /// Allocate a new object with the given class ID and field count
 /// Returns a pointer to the object header
 #[no_mangle]
@@ -113,13 +104,13 @@ pub extern "C" fn js_object_alloc_with_parent(class_id: u32, parent_class_id: u3
         register_class(class_id, parent_class_id);
     }
 
-    let layout = object_layout(field_count as usize);
-    unsafe {
-        let ptr = alloc(layout) as *mut ObjectHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate object");
-        }
+    let header_size = std::mem::size_of::<ObjectHeader>();
+    let fields_size = (field_count as usize) * std::mem::size_of::<JSValue>();
+    let total_size = header_size + fields_size;
 
+    let ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;
+
+    unsafe {
         // Initialize header
         (*ptr).object_type = crate::error::OBJECT_TYPE_REGULAR;
         (*ptr).class_id = class_id;
@@ -146,7 +137,7 @@ pub extern "C" fn js_object_alloc_fast(class_id: u32, field_count: u32) -> *mut 
     let fields_size = (field_count as usize) * std::mem::size_of::<JSValue>();
     let total_size = header_size + fields_size;
 
-    let ptr = arena_alloc(total_size, 8) as *mut ObjectHeader;
+    let ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;
 
     unsafe {
         // Initialize header only - fields left uninitialized for constructor to fill
@@ -172,7 +163,7 @@ pub extern "C" fn js_object_alloc_fast_with_parent(class_id: u32, parent_class_i
     let fields_size = (field_count as usize) * std::mem::size_of::<JSValue>();
     let total_size = header_size + fields_size;
 
-    let ptr = arena_alloc(total_size, 8) as *mut ObjectHeader;
+    let ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;
 
     unsafe {
         (*ptr).object_type = crate::error::OBJECT_TYPE_REGULAR;
@@ -199,7 +190,7 @@ pub extern "C" fn js_object_alloc_with_shape(
     let header_size = std::mem::size_of::<ObjectHeader>();
     let fields_size = (field_count as usize) * 8;
     let total_size = header_size + fields_size;
-    let obj_ptr = arena_alloc(total_size, 8) as *mut ObjectHeader;
+    let obj_ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;
 
     unsafe {
         (*obj_ptr).object_type = crate::error::OBJECT_TYPE_REGULAR;
@@ -261,12 +252,8 @@ pub extern "C" fn js_object_get_class_id(obj: *const ObjectHeader) -> u32 {
 
 /// Free an object (for manual memory management / testing)
 #[no_mangle]
-pub extern "C" fn js_object_free(obj: *mut ObjectHeader) {
-    unsafe {
-        let field_count = (*obj).field_count as usize;
-        let layout = object_layout(field_count);
-        dealloc(obj as *mut u8, layout);
-    }
+pub extern "C" fn js_object_free(_obj: *mut ObjectHeader) {
+    // No-op: GC handles deallocation of arena-allocated objects
 }
 
 /// Convert an object pointer to a JSValue

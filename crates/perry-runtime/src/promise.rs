@@ -22,17 +22,17 @@ pub type ClosurePtr = *const crate::closure::ClosureHeader;
 #[repr(C)]
 pub struct Promise {
     /// Current state of the promise
-    state: PromiseState,
+    pub(crate) state: PromiseState,
     /// The resolved value (if fulfilled)
-    value: f64,
+    pub(crate) value: f64,
     /// The rejection reason (if rejected)
-    reason: f64,
+    pub(crate) reason: f64,
     /// Closure to run when fulfilled (null if none)
-    on_fulfilled: ClosurePtr,
+    pub(crate) on_fulfilled: ClosurePtr,
     /// Closure to run when rejected (null if none)
-    on_rejected: ClosurePtr,
+    pub(crate) on_rejected: ClosurePtr,
     /// Next promise in the chain (for .then())
-    next: *mut Promise,
+    pub(crate) next: *mut Promise,
 }
 
 impl Promise {
@@ -56,18 +56,18 @@ thread_local! {
 /// Allocate a new Promise
 #[no_mangle]
 pub extern "C" fn js_promise_new() -> *mut Promise {
-    let promise = Box::new(Promise::new());
-    Box::into_raw(promise)
+    let raw = crate::gc::gc_malloc(std::mem::size_of::<Promise>(), crate::gc::GC_TYPE_PROMISE);
+    let promise = raw as *mut Promise;
+    unsafe {
+        ptr::write(promise, Promise::new());
+    }
+    promise
 }
 
-/// Free a Promise
+/// Free a Promise (no-op — GC handles deallocation)
 #[no_mangle]
-pub extern "C" fn js_promise_free(promise: *mut Promise) {
-    if !promise.is_null() {
-        unsafe {
-            let _ = Box::from_raw(promise);
-        }
-    }
+pub extern "C" fn js_promise_free(_promise: *mut Promise) {
+    // GC handles deallocation now
 }
 
 /// Get promise state (0=pending, 1=fulfilled, 2=rejected)
@@ -604,4 +604,33 @@ extern "C" fn promise_all_reject_handler(closure: *const crate::closure::Closure
     js_promise_reject(result_promise, reason);
 
     0.0
+}
+
+/// GC root scanner: mark all values reachable from promise task queues
+pub fn scan_promise_roots(mark: &mut dyn FnMut(f64)) {
+    // Scan TASK_QUEUE entries
+    TASK_QUEUE.with(|q| {
+        let q = q.borrow();
+        for &(promise_ptr, value, _) in q.iter() {
+            // Mark the promise pointer (NaN-box it as a POINTER)
+            if !promise_ptr.is_null() {
+                let boxed = f64::from_bits(0x7FFD_0000_0000_0000 | (promise_ptr as u64 & 0x0000_FFFF_FFFF_FFFF));
+                mark(boxed);
+            }
+            // Mark the value
+            mark(value);
+        }
+    });
+
+    // Scan SCHEDULED_RESOLVES entries
+    SCHEDULED_RESOLVES.with(|q| {
+        let q = q.borrow();
+        for &(promise_ptr, value) in q.iter() {
+            if !promise_ptr.is_null() {
+                let boxed = f64::from_bits(0x7FFD_0000_0000_0000 | (promise_ptr as u64 & 0x0000_FFFF_FFFF_FFFF));
+                mark(boxed);
+            }
+            mark(value);
+        }
+    });
 }

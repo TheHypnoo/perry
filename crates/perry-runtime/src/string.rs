@@ -5,7 +5,6 @@
 //!   - StringHeader at the start
 //!   - Followed by `capacity` bytes of data (only `length` bytes are valid)
 
-use std::alloc::{alloc, realloc, Layout};
 use std::ptr;
 use std::slice;
 use std::str;
@@ -19,12 +18,6 @@ pub struct StringHeader {
     pub capacity: u32,
 }
 
-/// Calculate the layout for a string with given capacity
-fn string_layout(capacity: usize) -> Layout {
-    let total_size = std::mem::size_of::<StringHeader>() + capacity;
-    Layout::from_size_align(total_size, 8).unwrap()
-}
-
 /// Create a string from raw bytes
 /// Returns a pointer to StringHeader
 #[no_mangle]
@@ -36,14 +29,12 @@ pub extern "C" fn js_string_from_bytes(data: *const u8, len: u32) -> *mut String
 #[no_mangle]
 pub extern "C" fn js_string_from_bytes_with_capacity(data: *const u8, len: u32, capacity: u32) -> *mut StringHeader {
     let capacity = capacity.max(len); // Ensure capacity >= len
-    let layout = string_layout(capacity as usize);
+    let total_size = std::mem::size_of::<StringHeader>() + capacity as usize;
+
+    let raw = crate::gc::gc_malloc(total_size, crate::gc::GC_TYPE_STRING);
+    let ptr = raw as *mut StringHeader;
 
     unsafe {
-        let ptr = alloc(layout) as *mut StringHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate string");
-        }
-
         (*ptr).length = len;
         (*ptr).capacity = capacity;
 
@@ -52,9 +43,9 @@ pub extern "C" fn js_string_from_bytes_with_capacity(data: *const u8, len: u32, 
             let data_ptr = (ptr as *mut u8).add(std::mem::size_of::<StringHeader>());
             ptr::copy_nonoverlapping(data, data_ptr, len as usize);
         }
-
-        ptr
     }
+
+    ptr
 }
 
 /// Append a string to another string in-place if possible
@@ -99,13 +90,9 @@ pub extern "C" fn js_string_append(dest: *mut StringHeader, src: *const StringHe
 
         // Need to reallocate - use 2x growth strategy
         let new_cap = (new_len * 2).max(32); // At least 32 bytes, or 2x needed
-        let old_layout = string_layout(dest_cap as usize);
-        let new_layout = string_layout(new_cap as usize);
+        let new_total = std::mem::size_of::<StringHeader>() + new_cap as usize;
 
-        let new_ptr = realloc(dest as *mut u8, old_layout, new_layout.size()) as *mut StringHeader;
-        if new_ptr.is_null() {
-            panic!("Failed to reallocate string");
-        }
+        let new_ptr = crate::gc::gc_realloc(dest as *mut u8, new_total) as *mut StringHeader;
 
         (*new_ptr).capacity = new_cap;
 
@@ -167,14 +154,11 @@ pub extern "C" fn js_string_concat(a: *const StringHeader, b: *const StringHeade
     let total_len = len_a + len_b;
 
     let total_size = std::mem::size_of::<StringHeader>() + total_len as usize;
-    let layout = Layout::from_size_align(total_size, 8).unwrap();
+
+    let raw = crate::gc::gc_malloc(total_size, crate::gc::GC_TYPE_STRING);
+    let ptr = raw as *mut StringHeader;
 
     unsafe {
-        let ptr = alloc(layout) as *mut StringHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate string");
-        }
-
         (*ptr).length = total_len;
         (*ptr).capacity = total_len;
 
@@ -519,8 +503,6 @@ use crate::array::ArrayHeader;
 /// Returns an array of string pointers (stored as f64 bit patterns)
 #[no_mangle]
 pub extern "C" fn js_string_split(s: *const StringHeader, delimiter: *const StringHeader) -> *mut ArrayHeader {
-    use std::alloc::{alloc, Layout};
-
     if s.is_null() {
         // Return empty array
         return crate::array::js_array_alloc(0);

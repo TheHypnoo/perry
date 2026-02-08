@@ -5,8 +5,6 @@
 //!   - ClosureHeader at the start
 //!   - Followed by captured values (as f64 or i64 pointers)
 
-use std::alloc::{alloc, Layout};
-
 /// Magic value stored in ClosureHeader._reserved to identify closures at runtime.
 /// Used by js_value_typeof to return "function" instead of "object" for closures.
 pub const CLOSURE_MAGIC: u32 = 0x434C_4F53; // "CLOS" in ASCII
@@ -28,20 +26,17 @@ pub struct ClosureHeader {
 pub extern "C" fn js_closure_alloc(func_ptr: *const u8, capture_count: u32) -> *mut ClosureHeader {
     let captures_size = (capture_count as usize) * 8; // Each capture is 8 bytes (f64 or i64)
     let total_size = std::mem::size_of::<ClosureHeader>() + captures_size;
-    let layout = Layout::from_size_align(total_size, 8).unwrap();
+
+    let raw = crate::gc::gc_malloc(total_size, crate::gc::GC_TYPE_CLOSURE);
+    let ptr = raw as *mut ClosureHeader;
 
     unsafe {
-        let ptr = alloc(layout) as *mut ClosureHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate closure");
-        }
-
         (*ptr).func_ptr = func_ptr;
         (*ptr).capture_count = capture_count;
         (*ptr).type_tag = CLOSURE_MAGIC;
-
-        ptr
     }
+
+    ptr
 }
 
 /// Get the function pointer from a closure

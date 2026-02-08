@@ -9,6 +9,7 @@
 //! - Console and other global functions
 
 pub mod value;
+pub mod gc;
 pub mod arena;
 pub mod object;
 pub mod array;
