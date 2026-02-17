@@ -171,9 +171,26 @@ pub extern "C" fn js_set_alloc(capacity: u32) -> *mut SetHeader {
     }
 }
 
+/// Clean a set pointer that might have NaN-box tag bits
+#[inline(always)]
+fn clean_set_ptr(set: *const SetHeader) -> *const SetHeader {
+    let bits = set as usize;
+    let top16 = bits >> 48;
+    if top16 >= 0x7FF8 {
+        if top16 == 0x7FFC || (bits & 0x0000_FFFF_FFFF_FFFF) == 0 {
+            return std::ptr::null();
+        }
+        (bits & 0x0000_FFFF_FFFF_FFFF) as *const SetHeader
+    } else {
+        set
+    }
+}
+
 /// Get the number of elements in the set
 #[no_mangle]
 pub extern "C" fn js_set_size(set: *const SetHeader) -> u32 {
+    let set = clean_set_ptr(set);
+    if set.is_null() { return 0; }
     unsafe { (*set).size }
 }
 

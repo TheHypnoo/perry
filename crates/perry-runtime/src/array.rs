@@ -805,25 +805,39 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
 /// Returns 1.0 if the value is an array, 0.0 otherwise
 #[no_mangle]
 pub extern "C" fn js_array_is_array(value: f64) -> f64 {
+    use crate::gc::{GcHeader, GC_HEADER_SIZE, GC_TYPE_ARRAY};
     use crate::value::JSValue;
+
     let bits = value.to_bits();
     let jsvalue = JSValue::from_bits(bits);
 
-    if !jsvalue.is_pointer() {
+    // Get the raw pointer, handling both NaN-boxed and raw bitcast pointers
+    let raw_ptr: *const u8 = if jsvalue.is_pointer() {
+        jsvalue.as_pointer::<u8>()
+    } else {
+        // Check for raw bitcast pointer (no NaN-box tag, stored as f64 bits)
+        let raw = bits;
+        let upper = raw >> 48;
+        if upper == 0 && (raw & 0x0000_FFFF_FFFF_FFFF) > 0x10000 {
+            raw as *const u8
+        } else {
+            return 0.0;
+        }
+    };
+
+    if raw_ptr.is_null() {
         return 0.0;
     }
 
-    let ptr = jsvalue.as_pointer::<ArrayHeader>();
-    if ptr.is_null() {
-        return 0.0;
+    // Check the GC header's obj_type to confirm this is an array
+    unsafe {
+        let gc_header = raw_ptr.sub(GC_HEADER_SIZE) as *const GcHeader;
+        if (*gc_header).obj_type == GC_TYPE_ARRAY {
+            1.0
+        } else {
+            0.0
+        }
     }
-
-    // Check if it's an array by looking at the header
-    // Arrays have a specific structure - we check the magic/type indicator
-    // For now, assume all pointer values that are valid are arrays if they come from array context
-    // This is a simplified check - in a real implementation we'd have type tags
-    // Since we're using NaN-boxing with POINTER_TAG, we can assume arrays are valid
-    1.0
 }
 
 #[cfg(test)]

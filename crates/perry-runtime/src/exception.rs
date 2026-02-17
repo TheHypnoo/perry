@@ -75,11 +75,15 @@ pub extern "C" fn js_throw(value: f64) -> ! {
         HAS_EXCEPTION = true;
 
         if IN_FINALLY {
-            panic!("Cannot throw during finally block");
+            eprintln!("Cannot throw during finally block");
+            std::process::abort();
         }
 
         if TRY_DEPTH == 0 {
-            panic!("Uncaught exception: {}", value);
+            // Print the exception and abort cleanly.
+            // Cannot panic! in extern "C" functions (causes double-panic abort).
+            eprintln!("Uncaught exception: {}", value);
+            std::process::exit(1);
         }
 
         // Jump to the most recent try block

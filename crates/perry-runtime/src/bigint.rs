@@ -513,6 +513,9 @@ pub extern "C" fn js_bigint_xor(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Compare two BigInts (-1 if a < b, 0 if equal, 1 if a > b)
 #[no_mangle]
 pub extern "C" fn js_bigint_cmp(a: *const BigIntHeader, b: *const BigIntHeader) -> i32 {
+    if a.is_null() || b.is_null() {
+        return 0;
+    }
     unsafe {
         compare_limbs(&(*a).limbs, &(*b).limbs)
     }
@@ -521,6 +524,9 @@ pub extern "C" fn js_bigint_cmp(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Check if two BigInts are equal
 #[no_mangle]
 pub extern "C" fn js_bigint_eq(a: *const BigIntHeader, b: *const BigIntHeader) -> bool {
+    if a.is_null() || b.is_null() {
+        return a == b; // both null = equal, one null = not equal
+    }
     unsafe {
         (*a).limbs == (*b).limbs
     }
