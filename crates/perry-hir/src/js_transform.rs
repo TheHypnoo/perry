@@ -12,7 +12,7 @@
 
 use crate::ir::{Expr, Module, ModuleKind, Stmt};
 use perry_types::LocalId;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Information about a JavaScript module import
 #[derive(Debug, Clone)]
@@ -860,8 +860,8 @@ pub struct ExportedNativeInstance {
 /// * `exported_instances` - Map from (resolved_path, export_name) to native instance info
 pub fn fix_cross_module_native_instances(
     module: &mut Module,
-    exported_instances: &HashMap<(String, String), ExportedNativeInstance>,
-    exported_func_return_instances: &HashMap<(String, String), ExportedNativeInstance>,
+    exported_instances: &BTreeMap<(String, String), ExportedNativeInstance>,
+    exported_func_return_instances: &BTreeMap<(String, String), ExportedNativeInstance>,
 ) {
     // Build a map from local variable names to native instance info
     let mut local_native_instances: HashMap<String, (String, String)> = HashMap::new();

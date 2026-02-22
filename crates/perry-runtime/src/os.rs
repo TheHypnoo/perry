@@ -119,38 +119,101 @@ pub extern "C" fn js_os_tmpdir() -> *mut StringHeader {
 /// Get the total amount of system memory in bytes
 #[no_mangle]
 pub extern "C" fn js_os_totalmem() -> f64 {
-    #[cfg(feature = "full")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
-        use sysinfo::System;
-        let sys = System::new_all();
-        sys.total_memory() as f64
+        use std::mem;
+        let mut memsize: u64 = 0;
+        let mut size = mem::size_of::<u64>();
+        let mib = [libc::CTL_HW, libc::HW_MEMSIZE];
+        unsafe {
+            libc::sysctl(
+                mib.as_ptr() as *mut _,
+                2,
+                &mut memsize as *mut u64 as *mut _,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            );
+        }
+        memsize as f64
     }
-    #[cfg(not(feature = "full"))]
+    #[cfg(target_os = "linux")]
+    {
+        unsafe {
+            let mut info: libc::sysinfo = std::mem::zeroed();
+            libc::sysinfo(&mut info);
+            (info.totalram as u64 * info.mem_unit as u64) as f64
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
     { 0.0 }
 }
 
 /// Get the amount of free system memory in bytes
 #[no_mangle]
 pub extern "C" fn js_os_freemem() -> f64 {
-    #[cfg(feature = "full")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
-        use sysinfo::System;
-        let sys = System::new_all();
-        sys.free_memory() as f64
+        unsafe {
+            let mut vm_info: libc::vm_statistics64 = std::mem::zeroed();
+            let mut count = (std::mem::size_of::<libc::vm_statistics64>() / std::mem::size_of::<libc::integer_t>()) as u32;
+            let ret = libc::host_statistics64(
+                libc::mach_host_self(),
+                libc::HOST_VM_INFO64,
+                &mut vm_info as *mut _ as *mut _,
+                &mut count,
+            );
+            if ret != libc::KERN_SUCCESS {
+                return 0.0;
+            }
+            let page_size = libc::vm_page_size;
+            (vm_info.free_count as u64 * page_size as u64) as f64
+        }
     }
-    #[cfg(not(feature = "full"))]
+    #[cfg(target_os = "linux")]
+    {
+        unsafe {
+            let mut info: libc::sysinfo = std::mem::zeroed();
+            libc::sysinfo(&mut info);
+            (info.freeram as u64 * info.mem_unit as u64) as f64
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
     { 0.0 }
 }
 
 /// Get the system uptime in seconds
 #[no_mangle]
 pub extern "C" fn js_os_uptime() -> f64 {
-    #[cfg(feature = "full")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
-        use sysinfo::System;
-        System::uptime() as f64
+        use std::mem;
+        let mut boottime: libc::timeval = unsafe { std::mem::zeroed() };
+        let mut size = mem::size_of::<libc::timeval>();
+        let mib = [libc::CTL_KERN, libc::KERN_BOOTTIME];
+        unsafe {
+            libc::sysctl(
+                mib.as_ptr() as *mut _,
+                2,
+                &mut boottime as *mut libc::timeval as *mut _,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            );
+        }
+        let mut now: libc::timeval = unsafe { std::mem::zeroed() };
+        unsafe { libc::gettimeofday(&mut now, std::ptr::null_mut()) };
+        (now.tv_sec - boottime.tv_sec) as f64
     }
-    #[cfg(not(feature = "full"))]
+    #[cfg(target_os = "linux")]
+    {
+        unsafe {
+            let mut info: libc::sysinfo = std::mem::zeroed();
+            libc::sysinfo(&mut info);
+            info.uptime as f64
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
     { 0.0 }
 }
 
@@ -232,14 +295,22 @@ pub extern "C" fn js_os_type() -> *mut StringHeader {
 /// Get the operating system release
 #[no_mangle]
 pub extern "C" fn js_os_release() -> *mut StringHeader {
-    #[cfg(feature = "full")]
+    #[cfg(unix)]
     {
-        use sysinfo::System;
-        let release = System::os_version().unwrap_or_else(|| "unknown".to_string());
-        let bytes = release.as_bytes();
-        js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+        unsafe {
+            let mut info: libc::utsname = std::mem::zeroed();
+            if libc::uname(&mut info) == 0 {
+                let release = std::ffi::CStr::from_ptr(info.release.as_ptr());
+                let release_str = release.to_string_lossy();
+                let bytes = release_str.as_bytes();
+                js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+            } else {
+                let fallback = "unknown";
+                js_string_from_bytes(fallback.as_ptr(), fallback.len() as u32)
+            }
+        }
     }
-    #[cfg(not(feature = "full"))]
+    #[cfg(not(unix))]
     {
         let release = "unknown";
         js_string_from_bytes(release.as_ptr(), release.len() as u32)
@@ -319,14 +390,12 @@ mod tests {
         assert!(!tmpdir.is_null());
     }
 
-    #[cfg(feature = "full")]
     #[test]
     fn test_os_totalmem() {
         let mem = js_os_totalmem();
         assert!(mem > 0.0);
     }
 
-    #[cfg(feature = "full")]
     #[test]
     fn test_os_freemem() {
         let mem = js_os_freemem();

@@ -666,6 +666,336 @@ pub unsafe extern "C" fn js_ioredis_ping(handle: Handle) -> *mut perry_runtime::
     promise
 }
 
+/// HGET command
+/// redis.hget(key, field) -> Promise<string | null>
+#[no_mangle]
+pub unsafe extern "C" fn js_ioredis_hget(
+    handle: Handle,
+    key_ptr: *const StringHeader,
+    field_ptr: *const StringHeader,
+) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let promise_ptr = promise as usize;
+
+    let key = match string_from_header(key_ptr) {
+        Some(k) => k,
+        None => {
+            queue_promise_resolution(promise_ptr, true, JSValue::null().bits());
+            return promise;
+        }
+    };
+
+    let field = match string_from_header(field_ptr) {
+        Some(f) => f,
+        None => {
+            queue_promise_resolution(promise_ptr, true, JSValue::null().bits());
+            return promise;
+        }
+    };
+
+    spawn(async move {
+        match get_connection(handle).await {
+            Ok(mut conn) => {
+                let result: redis::RedisResult<Option<String>> = tokio::time::timeout(
+                    Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                    conn.hget(&key, &field)
+                )
+                .await
+                .map_err(|_| redis::RedisError::from((redis::ErrorKind::IoError, "Operation timed out")))
+                .and_then(|r| r);
+
+                match result {
+                    Ok(Some(value)) => {
+                        queue_deferred_resolution(promise_ptr, true, move || {
+                            let result_str = js_string_from_bytes(value.as_ptr(), value.len() as u32);
+                            JSValue::string_ptr(result_str).bits()
+                        });
+                    }
+                    Ok(None) => {
+                        queue_promise_resolution(promise_ptr, true, JSValue::null().bits());
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Redis HGET error: {}", e);
+                        queue_deferred_resolution(promise_ptr, false, move || {
+                            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                            JSValue::string_ptr(err_str).bits()
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(e.as_ptr(), e.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
+            }
+        }
+    });
+
+    promise
+}
+
+/// HSET command
+/// redis.hset(key, field, value) -> Promise<number>
+#[no_mangle]
+pub unsafe extern "C" fn js_ioredis_hset(
+    handle: Handle,
+    key_ptr: *const StringHeader,
+    field_ptr: *const StringHeader,
+    value_ptr: *const StringHeader,
+) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let promise_ptr = promise as usize;
+
+    let key = match string_from_header(key_ptr) {
+        Some(k) => k,
+        None => {
+            queue_promise_resolution(promise_ptr, true, (0f64).to_bits());
+            return promise;
+        }
+    };
+
+    let field = match string_from_header(field_ptr) {
+        Some(f) => f,
+        None => {
+            queue_promise_resolution(promise_ptr, true, (0f64).to_bits());
+            return promise;
+        }
+    };
+
+    let value = match string_from_header(value_ptr) {
+        Some(v) => v,
+        None => {
+            queue_promise_resolution(promise_ptr, true, (0f64).to_bits());
+            return promise;
+        }
+    };
+
+    spawn(async move {
+        match get_connection(handle).await {
+            Ok(mut conn) => {
+                let result: redis::RedisResult<i64> = tokio::time::timeout(
+                    Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                    conn.hset(&key, &field, &value)
+                )
+                .await
+                .map_err(|_| redis::RedisError::from((redis::ErrorKind::IoError, "Operation timed out")))
+                .and_then(|r| r);
+
+                match result {
+                    Ok(count) => {
+                        queue_promise_resolution(promise_ptr, true, (count as f64).to_bits());
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Redis HSET error: {}", e);
+                        queue_deferred_resolution(promise_ptr, false, move || {
+                            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                            JSValue::string_ptr(err_str).bits()
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(e.as_ptr(), e.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
+            }
+        }
+    });
+
+    promise
+}
+
+/// HGETALL command
+/// redis.hgetall(key) -> Promise<Record<string, string>>
+#[no_mangle]
+pub unsafe extern "C" fn js_ioredis_hgetall(
+    handle: Handle,
+    key_ptr: *const StringHeader,
+) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let promise_ptr = promise as usize;
+
+    let key = match string_from_header(key_ptr) {
+        Some(k) => k,
+        None => {
+            // Return empty object for invalid key
+            queue_deferred_resolution(promise_ptr, true, || {
+                let obj = perry_runtime::object::js_object_alloc(0, 0);
+                JSValue::pointer(obj as *mut u8).bits()
+            });
+            return promise;
+        }
+    };
+
+    spawn(async move {
+        match get_connection(handle).await {
+            Ok(mut conn) => {
+                let result: redis::RedisResult<HashMap<String, String>> = tokio::time::timeout(
+                    Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                    conn.hgetall(&key)
+                )
+                .await
+                .map_err(|_| redis::RedisError::from((redis::ErrorKind::IoError, "Operation timed out")))
+                .and_then(|r| r);
+
+                match result {
+                    Ok(hash) => {
+                        // Collect entries so we can move them into the closure
+                        let entries: Vec<(String, String)> = hash.into_iter().collect();
+                        queue_deferred_resolution(promise_ptr, true, move || {
+                            // Create a Perry object with dynamic fields
+                            let obj = perry_runtime::object::js_object_alloc(0, entries.len() as u32);
+                            for (k, v) in &entries {
+                                let key_str = js_string_from_bytes(k.as_ptr(), k.len() as u32);
+                                let val_str = js_string_from_bytes(v.as_ptr(), v.len() as u32);
+                                let val_bits = JSValue::string_ptr(val_str).bits();
+                                perry_runtime::object::js_object_set_field_by_name(
+                                    obj, key_str, f64::from_bits(val_bits)
+                                );
+                            }
+                            JSValue::pointer(obj as *mut u8).bits()
+                        });
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Redis HGETALL error: {}", e);
+                        queue_deferred_resolution(promise_ptr, false, move || {
+                            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                            JSValue::string_ptr(err_str).bits()
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(e.as_ptr(), e.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
+            }
+        }
+    });
+
+    promise
+}
+
+/// HDEL command
+/// redis.hdel(key, field) -> Promise<number>
+#[no_mangle]
+pub unsafe extern "C" fn js_ioredis_hdel(
+    handle: Handle,
+    key_ptr: *const StringHeader,
+    field_ptr: *const StringHeader,
+) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let promise_ptr = promise as usize;
+
+    let key = match string_from_header(key_ptr) {
+        Some(k) => k,
+        None => {
+            queue_promise_resolution(promise_ptr, true, (0f64).to_bits());
+            return promise;
+        }
+    };
+
+    let field = match string_from_header(field_ptr) {
+        Some(f) => f,
+        None => {
+            queue_promise_resolution(promise_ptr, true, (0f64).to_bits());
+            return promise;
+        }
+    };
+
+    spawn(async move {
+        match get_connection(handle).await {
+            Ok(mut conn) => {
+                let result: redis::RedisResult<i64> = tokio::time::timeout(
+                    Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                    conn.hdel(&key, &field)
+                )
+                .await
+                .map_err(|_| redis::RedisError::from((redis::ErrorKind::IoError, "Operation timed out")))
+                .and_then(|r| r);
+
+                match result {
+                    Ok(count) => {
+                        queue_promise_resolution(promise_ptr, true, (count as f64).to_bits());
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Redis HDEL error: {}", e);
+                        queue_deferred_resolution(promise_ptr, false, move || {
+                            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                            JSValue::string_ptr(err_str).bits()
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(e.as_ptr(), e.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
+            }
+        }
+    });
+
+    promise
+}
+
+/// HLEN command
+/// redis.hlen(key) -> Promise<number>
+#[no_mangle]
+pub unsafe extern "C" fn js_ioredis_hlen(
+    handle: Handle,
+    key_ptr: *const StringHeader,
+) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let promise_ptr = promise as usize;
+
+    let key = match string_from_header(key_ptr) {
+        Some(k) => k,
+        None => {
+            queue_promise_resolution(promise_ptr, true, (0f64).to_bits());
+            return promise;
+        }
+    };
+
+    spawn(async move {
+        match get_connection(handle).await {
+            Ok(mut conn) => {
+                let result: redis::RedisResult<i64> = tokio::time::timeout(
+                    Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                    conn.hlen(&key)
+                )
+                .await
+                .map_err(|_| redis::RedisError::from((redis::ErrorKind::IoError, "Operation timed out")))
+                .and_then(|r| r);
+
+                match result {
+                    Ok(len) => {
+                        queue_promise_resolution(promise_ptr, true, (len as f64).to_bits());
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Redis HLEN error: {}", e);
+                        queue_deferred_resolution(promise_ptr, false, move || {
+                            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                            JSValue::string_ptr(err_str).bits()
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(e.as_ptr(), e.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
+            }
+        }
+    });
+
+    promise
+}
+
 /// QUIT command - close connection
 /// redis.quit() -> Promise<"OK">
 #[no_mangle]

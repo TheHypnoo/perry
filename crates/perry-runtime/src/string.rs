@@ -192,6 +192,15 @@ pub extern "C" fn js_number_to_string(value: f64) -> *mut StringHeader {
     js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
 }
 
+/// Format a number with a fixed number of decimal places (Number.prototype.toFixed)
+#[no_mangle]
+pub extern "C" fn js_number_to_fixed(value: f64, decimals: f64) -> *mut StringHeader {
+    let dp = decimals as usize;
+    let s = format!("{:.prec$}", value, prec = dp);
+    let bytes = s.as_bytes();
+    js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
 /// Get a slice of a string (byte-based for now)
 /// Returns a new string from start to end (exclusive)
 #[no_mangle]

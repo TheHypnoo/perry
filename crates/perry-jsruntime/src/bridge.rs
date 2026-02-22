@@ -376,6 +376,26 @@ fn native_object_to_v8<'s>(scope: &mut v8::HandleScope<'s>, ptr: *const u8) -> v
         }
     }
 
+    // Safety check: If the pointer looks like a StringHeader (length + capacity match,
+    // and data after header is valid UTF-8), convert it as a string instead of an array.
+    // This handles the case where a string pointer accidentally gets POINTER_TAG instead of STRING_TAG.
+    {
+        let str_header = ptr as *const perry_runtime::string::StringHeader;
+        let str_len = unsafe { (*str_header).length } as usize;
+        let str_cap = unsafe { (*str_header).capacity } as usize;
+        if str_len > 0 && str_len <= 100_000 && str_cap >= str_len && str_cap <= str_len + 64 {
+            // Capacity is close to length — looks like a string, not an array
+            // (Arrays typically have capacity much larger than needed due to growth)
+            let data = unsafe { ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>()) };
+            let bytes = unsafe { std::slice::from_raw_parts(data, str_len) };
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                if let Some(v8_str) = v8::String::new(scope, s) {
+                    return v8_str.into();
+                }
+            }
+        }
+    }
+
     // Fallback: heuristic array detection for non-arena allocations (Maps, etc.)
     let header = ptr as *const perry_runtime::array::ArrayHeader;
     let length = unsafe { (*header).length };

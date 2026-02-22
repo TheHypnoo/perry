@@ -852,6 +852,7 @@ pub enum Expr {
     ArrayFilter { array: Box<Expr>, callback: Box<Expr> },   // arr.filter(fn) -> new array
     ArrayFind { array: Box<Expr>, callback: Box<Expr> },     // arr.find(fn) -> element | undefined
     ArrayFindIndex { array: Box<Expr>, callback: Box<Expr> }, // arr.findIndex(fn) -> index | -1
+    ArraySort { array: Box<Expr>, comparator: Box<Expr> },   // arr.sort(fn) -> same array (in-place)
     ArrayReduce { array: Box<Expr>, callback: Box<Expr>, initial: Option<Box<Expr>> }, // arr.reduce(fn, init?) -> value
     ArrayJoin { array: Box<Expr>, separator: Option<Box<Expr>> }, // arr.join(separator?) -> string
 

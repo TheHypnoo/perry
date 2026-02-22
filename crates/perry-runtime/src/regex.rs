@@ -97,16 +97,16 @@ pub extern "C" fn js_regexp_new(pattern: *const StringHeader, flags: *const Stri
 /// Test if a string matches the regex pattern
 /// regex.test(string) -> boolean
 #[no_mangle]
-pub extern "C" fn js_regexp_test(re: *const RegExpHeader, s: *const StringHeader) -> bool {
+pub extern "C" fn js_regexp_test(re: *const RegExpHeader, s: *const StringHeader) -> i32 {
     if re.is_null() || s.is_null() {
-        return false;
+        return 0;
     }
 
     let str_data = string_as_str(s);
 
     unsafe {
         let regex = &*(*re).regex_ptr;
-        regex.is_match(str_data)
+        if regex.is_match(str_data) { 1 } else { 0 }
     }
 }
 

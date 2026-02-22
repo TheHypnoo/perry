@@ -619,6 +619,43 @@ pub extern "C" fn js_array_map(arr: *const ArrayHeader, callback: *const Closure
     }
 }
 
+/// sort - sort array in-place using a comparator closure
+/// The comparator takes (a, b) and returns negative if a < b, positive if a > b, 0 if equal
+/// Returns the same array pointer (sorts in-place)
+#[no_mangle]
+pub extern "C" fn js_array_sort_with_comparator(arr: *mut ArrayHeader, comparator: *const ClosureHeader) -> *mut ArrayHeader {
+    unsafe {
+        let arr = clean_arr_ptr(arr as *const ArrayHeader) as *mut ArrayHeader;
+        if arr.is_null() {
+            return arr;
+        }
+        let length = (*arr).length as usize;
+        if length <= 1 {
+            return arr;
+        }
+        let elements_ptr = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+
+        // Insertion sort — stable, simple, and works well for typical JS array sizes.
+        // Each comparison calls the closure via js_closure_call2.
+        for i in 1..length {
+            let key = *elements_ptr.add(i);
+            let mut j = i as isize - 1;
+            while j >= 0 {
+                let cmp = js_closure_call2(comparator, *elements_ptr.add(j as usize), key);
+                if cmp > 0.0 {
+                    ptr::write(elements_ptr.add((j + 1) as usize), *elements_ptr.add(j as usize));
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+            ptr::write(elements_ptr.add((j + 1) as usize), key);
+        }
+
+        arr
+    }
+}
+
 /// filter - create new array with elements where callback(element) returns truthy
 /// Returns pointer to new array
 #[no_mangle]

@@ -152,6 +152,27 @@ pub extern "C" fn js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIn
     }
 }
 
+/// Negate a BigInt (two's complement: flip all bits and add 1)
+#[no_mangle]
+pub extern "C" fn js_bigint_neg(a: *const BigIntHeader) -> *mut BigIntHeader {
+    let ptr = bigint_alloc();
+    unsafe {
+        let a_limbs = (*a).limbs;
+        let mut result = ZERO_LIMBS;
+        let mut carry = 1u64;
+
+        for i in 0..BIGINT_LIMBS {
+            let flipped = !a_limbs[i];
+            let sum = (flipped as u128) + (carry as u128);
+            result[i] = sum as u64;
+            carry = (sum >> 64) as u64;
+        }
+
+        (*ptr).limbs = result;
+        ptr
+    }
+}
+
 /// Add two BigInts
 #[no_mangle]
 pub extern "C" fn js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
@@ -231,7 +252,44 @@ pub extern "C" fn js_bigint_mul(a: *const BigIntHeader, b: *const BigIntHeader) 
     }
 }
 
-/// Divide two BigInts (a / b)
+/// Unsigned binary long division on magnitude limbs
+fn unsigned_div_limbs(a: &[u64; BIGINT_LIMBS], b: &[u64; BIGINT_LIMBS]) -> ([u64; BIGINT_LIMBS], [u64; BIGINT_LIMBS]) {
+    let mut quotient = ZERO_LIMBS;
+    let mut remainder = ZERO_LIMBS;
+
+    for i in (0..BIGINT_BITS).rev() {
+        // Shift remainder left by 1
+        let mut carry = 0u64;
+        for limb in remainder.iter_mut() {
+            let new_carry = *limb >> 63;
+            *limb = (*limb << 1) | carry;
+            carry = new_carry;
+        }
+
+        // Set LSB of remainder from dividend
+        let limb_idx = i / 64;
+        let bit_idx = i % 64;
+        remainder[0] |= (a[limb_idx] >> bit_idx) & 1;
+
+        // If remainder >= divisor, subtract and set quotient bit
+        // Use unsigned comparison for magnitude comparison
+        let mut ge = true;
+        for j in (0..BIGINT_LIMBS).rev() {
+            if remainder[j] > b[j] { break; }
+            if remainder[j] < b[j] { ge = false; break; }
+        }
+        if ge {
+            subtract_limbs(&mut remainder, b);
+            let q_limb_idx = i / 64;
+            let q_bit_idx = i % 64;
+            quotient[q_limb_idx] |= 1u64 << q_bit_idx;
+        }
+    }
+
+    (quotient, remainder)
+}
+
+/// Divide two BigInts (a / b) — truncates toward zero like JavaScript
 #[no_mangle]
 pub extern "C" fn js_bigint_div(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
     let ptr = bigint_alloc();
@@ -245,39 +303,26 @@ pub extern "C" fn js_bigint_div(a: *const BigIntHeader, b: *const BigIntHeader) 
             panic!("Division by zero");
         }
 
-        // Simple binary division
-        let mut quotient = ZERO_LIMBS;
-        let mut remainder = ZERO_LIMBS;
+        let a_neg = is_negative(&a_limbs);
+        let b_neg = is_negative(&b_limbs);
 
-        for i in (0..BIGINT_BITS).rev() {
-            // Shift remainder left by 1
-            let mut carry = 0u64;
-            for limb in remainder.iter_mut() {
-                let new_carry = *limb >> 63;
-                *limb = (*limb << 1) | carry;
-                carry = new_carry;
-            }
+        // Get magnitudes
+        let abs_a = if a_neg { negate_limbs(&a_limbs) } else { a_limbs };
+        let abs_b = if b_neg { negate_limbs(&b_limbs) } else { b_limbs };
 
-            // Set LSB of remainder from dividend
-            let limb_idx = i / 64;
-            let bit_idx = i % 64;
-            remainder[0] |= (a_limbs[limb_idx] >> bit_idx) & 1;
+        let (quotient, _) = unsigned_div_limbs(&abs_a, &abs_b);
 
-            // If remainder >= divisor, subtract and set quotient bit
-            if compare_limbs(&remainder, &b_limbs) >= 0 {
-                subtract_limbs(&mut remainder, &b_limbs);
-                let q_limb_idx = i / 64;
-                let q_bit_idx = i % 64;
-                quotient[q_limb_idx] |= 1u64 << q_bit_idx;
-            }
-        }
-
-        (*ptr).limbs = quotient;
+        // Result is negative if signs differ
+        (*ptr).limbs = if a_neg != b_neg && quotient != ZERO_LIMBS {
+            negate_limbs(&quotient)
+        } else {
+            quotient
+        };
         ptr
     }
 }
 
-/// Modulo of two BigInts (a % b)
+/// Modulo of two BigInts (a % b) — result has sign of dividend (like JavaScript)
 #[no_mangle]
 pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
     let ptr = bigint_alloc();
@@ -291,30 +336,21 @@ pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) 
             panic!("Division by zero");
         }
 
-        // Simple binary division, return remainder
-        let mut remainder = ZERO_LIMBS;
+        let a_neg = is_negative(&a_limbs);
+        let b_neg = is_negative(&b_limbs);
 
-        for i in (0..BIGINT_BITS).rev() {
-            // Shift remainder left by 1
-            let mut carry = 0u64;
-            for limb in remainder.iter_mut() {
-                let new_carry = *limb >> 63;
-                *limb = (*limb << 1) | carry;
-                carry = new_carry;
-            }
+        // Get magnitudes
+        let abs_a = if a_neg { negate_limbs(&a_limbs) } else { a_limbs };
+        let abs_b = if b_neg { negate_limbs(&b_limbs) } else { b_limbs };
 
-            // Set LSB of remainder from dividend
-            let limb_idx = i / 64;
-            let bit_idx = i % 64;
-            remainder[0] |= (a_limbs[limb_idx] >> bit_idx) & 1;
+        let (_, remainder) = unsigned_div_limbs(&abs_a, &abs_b);
 
-            // If remainder >= divisor, subtract
-            if compare_limbs(&remainder, &b_limbs) >= 0 {
-                subtract_limbs(&mut remainder, &b_limbs);
-            }
-        }
-
-        (*ptr).limbs = remainder;
+        // Remainder has sign of dividend
+        (*ptr).limbs = if a_neg && remainder != ZERO_LIMBS {
+            negate_limbs(&remainder)
+        } else {
+            remainder
+        };
         ptr
     }
 }
@@ -540,25 +576,52 @@ pub extern "C" fn js_bigint_to_f64(a: *const BigIntHeader) -> f64 {
             return 0.0;
         }
         let limbs = (*a).limbs;
+        let neg = is_negative(&limbs);
+        let abs_limbs = if neg { negate_limbs(&limbs) } else { limbs };
         let mut result = 0.0f64;
         let mut multiplier = 1.0f64;
-        for limb in limbs.iter() {
+        for limb in abs_limbs.iter() {
             result += (*limb as f64) * multiplier;
             multiplier *= 18446744073709551616.0; // 2^64
         }
-        result
+        if neg { -result } else { result }
     }
 }
 
 /// Helper to convert limbs to decimal string
+/// Check if a bigint value is negative (high bit of highest limb is set = two's complement negative)
+fn is_negative(limbs: &[u64; BIGINT_LIMBS]) -> bool {
+    (limbs[BIGINT_LIMBS - 1] >> 63) == 1
+}
+
+/// Negate limbs in place (two's complement: flip all bits and add 1)
+fn negate_limbs(limbs: &[u64; BIGINT_LIMBS]) -> [u64; BIGINT_LIMBS] {
+    let mut result = ZERO_LIMBS;
+    let mut carry = 1u64;
+    for i in 0..BIGINT_LIMBS {
+        let flipped = !limbs[i];
+        let sum = (flipped as u128) + (carry as u128);
+        result[i] = sum as u64;
+        carry = (sum >> 64) as u64;
+    }
+    result
+}
+
 fn limbs_to_decimal_string(limbs: &[u64; BIGINT_LIMBS]) -> String {
     let mut digits = Vec::new();
-    let mut temp = *limbs;
 
     // Check if zero
-    if temp == ZERO_LIMBS {
+    if *limbs == ZERO_LIMBS {
         return "0".to_string();
     }
+
+    // Check if negative (two's complement)
+    let negative = is_negative(limbs);
+    let mut temp = if negative {
+        negate_limbs(limbs)
+    } else {
+        *limbs
+    };
 
     while temp != ZERO_LIMBS {
         let mut remainder = 0u128;
@@ -571,7 +634,12 @@ fn limbs_to_decimal_string(limbs: &[u64; BIGINT_LIMBS]) -> String {
     }
 
     digits.reverse();
-    digits.into_iter().collect()
+    let s: String = digits.into_iter().collect();
+    if negative {
+        format!("-{}", s)
+    } else {
+        s
+    }
 }
 
 /// Convert BigInt to string
@@ -613,6 +681,18 @@ pub extern "C" fn js_bigint_warn(a: *const BigIntHeader) {
 // Helper functions
 
 fn compare_limbs(a: &[u64; BIGINT_LIMBS], b: &[u64; BIGINT_LIMBS]) -> i32 {
+    let a_neg = is_negative(a);
+    let b_neg = is_negative(b);
+
+    // Different signs: negative < positive
+    if a_neg && !b_neg {
+        return -1;
+    }
+    if !a_neg && b_neg {
+        return 1;
+    }
+
+    // Same sign: unsigned comparison (works for both positive and negative in two's complement)
     for i in (0..BIGINT_LIMBS).rev() {
         if a[i] > b[i] {
             return 1;

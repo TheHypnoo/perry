@@ -255,7 +255,9 @@ pub extern "C" fn js_object_alloc_with_shape(
     packed_keys_len: u32,
 ) -> *mut ObjectHeader {
     let header_size = std::mem::size_of::<ObjectHeader>();
-    let fields_size = (field_count as usize) * 8;
+    // Allocate extra field slots for dynamic property growth (plain objects may get new fields)
+    let alloc_field_count = std::cmp::max(field_count as usize, 8);
+    let fields_size = alloc_field_count * 8;
     let total_size = header_size + fields_size;
     let obj_ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;
 
@@ -263,7 +265,15 @@ pub extern "C" fn js_object_alloc_with_shape(
         (*obj_ptr).object_type = crate::error::OBJECT_TYPE_REGULAR;
         (*obj_ptr).class_id = 0;
         (*obj_ptr).parent_class_id = 0;
+        // field_count tracks the logical number of fields; extra allocated slots
+        // are available for dynamic property growth via js_object_set_field_by_name
         (*obj_ptr).field_count = field_count;
+
+        // Initialize all allocated field slots to undefined (including extra padding)
+        let fields_ptr = (obj_ptr as *mut u8).add(header_size) as *mut JSValue;
+        for i in 0..alloc_field_count {
+            ptr::write(fields_ptr.add(i), JSValue::undefined());
+        }
     }
 
     let keys_arr = SHAPE_CACHE.with(|cache| {
@@ -583,18 +593,11 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
     unsafe {
         let keys = (*obj).keys_array;
 
-        // Debug for field assignment
-        let key_str = {
-            let len = (*key).length;
-            let data = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize))
-        };
-
         // If no keys array exists, create one
         if keys.is_null() {
             // Create a new keys array with the key
             let new_keys = crate::array::js_array_alloc(4);
-            crate::array::js_array_push(new_keys, JSValue::string_ptr(key as *mut _));
+            let new_keys = crate::array::js_array_push(new_keys, JSValue::string_ptr(key as *mut _));
             (*obj).keys_array = new_keys;
 
             // Reallocate fields to hold at least one value
@@ -619,8 +622,10 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         }
 
         // Key not found - add it to the object
-        // First, add the key to the keys array
-        crate::array::js_array_push(keys, JSValue::string_ptr(key as *mut _));
+        // First, add the key to the keys array (may reallocate)
+        let new_keys = crate::array::js_array_push(keys, JSValue::string_ptr(key as *mut _));
+        // Update the object's keys_array pointer in case js_array_push reallocated
+        (*obj).keys_array = new_keys;
 
         // Set the field at the new index
         let new_index = key_count as u32;

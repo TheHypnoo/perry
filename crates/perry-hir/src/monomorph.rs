@@ -1090,6 +1090,10 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
             array: Box::new(substitute_expr(array, substitutions)),
             callback: Box::new(substitute_expr(callback, substitutions)),
         },
+        Expr::ArraySort { array, comparator } => Expr::ArraySort {
+            array: Box::new(substitute_expr(array, substitutions)),
+            comparator: Box::new(substitute_expr(comparator, substitutions)),
+        },
         Expr::ArrayReduce { array, callback, initial } => Expr::ArrayReduce {
             array: Box::new(substitute_expr(array, substitutions)),
             callback: Box::new(substitute_expr(callback, substitutions)),

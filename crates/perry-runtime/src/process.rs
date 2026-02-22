@@ -5,6 +5,8 @@ use crate::value::JSValue;
 
 /// Exit the process with the given exit code
 /// process.exit(code?: number) -> never
+/// Uses libc::_exit() to bypass cleanup handlers that can cause SIGILL
+/// during async event loop drain and V8 isolate destruction.
 #[no_mangle]
 pub extern "C" fn js_process_exit(code: f64) {
     let exit_code = if code.is_nan() || code.is_infinite() {
@@ -12,7 +14,11 @@ pub extern "C" fn js_process_exit(code: f64) {
     } else {
         code as i32
     };
-    std::process::exit(exit_code);
+    // Use _exit() instead of std::process::exit() to avoid SIGILL during cleanup.
+    // std::process::exit() runs atexit handlers and C++ destructors which can trigger
+    // illegal instructions when exception handler state (jmp_buf), GC roots, or
+    // V8 isolate state is invalid.
+    unsafe { libc::_exit(exit_code); }
 }
 
 /// Get an environment variable by name (takes JS string pointer)

@@ -907,7 +907,7 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
             } else if property_name_len > 0 {
                 std::slice::from_raw_parts(property_name_ptr as *const u8, property_name_len)
             } else {
-                std::ffi::CStr::from_ptr(property_name_ptr).to_bytes()
+                std::ffi::CStr::from_ptr(property_name_ptr as *const std::ffi::c_char).to_bytes()
             };
 
             // Handle string properties
@@ -946,7 +946,7 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
         std::slice::from_raw_parts(property_name_ptr as *const u8, property_name_len)
     } else {
         // Null-terminated C string
-        std::ffi::CStr::from_ptr(property_name_ptr).to_bytes()
+        std::ffi::CStr::from_ptr(property_name_ptr as *const std::ffi::c_char).to_bytes()
     };
 
     let property_name = match std::str::from_utf8(name_slice) {

@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use clap::Args;
 use perry_hir::{Module as HirModule, ModuleKind};
 use perry_transform::inline_functions;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,7 +38,7 @@ pub struct CompileArgs {
     #[arg(long)]
     pub enable_js_runtime: bool,
 
-    /// Target platform: ios-simulator, ios (default: native host)
+    /// Target platform: ios-simulator, ios, android (default: native host)
     #[arg(long)]
     pub target: Option<String>,
 }
@@ -58,11 +58,11 @@ pub struct JsModule {
 #[derive(Debug)]
 pub struct CompilationContext {
     /// Native TypeScript modules to compile
-    pub native_modules: HashMap<PathBuf, HirModule>,
+    pub native_modules: BTreeMap<PathBuf, HirModule>,
     /// JavaScript modules to interpret via V8
-    pub js_modules: HashMap<String, JsModule>,
+    pub js_modules: BTreeMap<String, JsModule>,
     /// Mapping from import specifiers to resolved paths
-    pub import_map: HashMap<String, PathBuf>,
+    pub import_map: BTreeMap<String, PathBuf>,
     /// Whether JS runtime is needed
     pub needs_js_runtime: bool,
     /// Whether perry/ui module is imported (needs UI library linking)
@@ -74,9 +74,9 @@ pub struct CompilationContext {
 impl CompilationContext {
     pub fn new(project_root: PathBuf) -> Self {
         Self {
-            native_modules: HashMap::new(),
-            js_modules: HashMap::new(),
-            import_map: HashMap::new(),
+            native_modules: BTreeMap::new(),
+            js_modules: BTreeMap::new(),
+            import_map: BTreeMap::new(),
             needs_js_runtime: false,
             needs_ui: false,
             project_root,
@@ -89,6 +89,7 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
     match target {
         Some("ios-simulator") => Some("aarch64-apple-ios-sim"),
         Some("ios") => Some("aarch64-apple-ios"),
+        Some("android") => Some("aarch64-linux-android"),
         _ => None,
     }
 }
@@ -97,21 +98,22 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
 fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
-    // For cross-compilation targets, search target-specific directories first
+    // For cross-compilation targets, ONLY search target-specific directories
+    // to avoid linking host-platform libraries into the wrong target
     if let Some(triple) = rust_target_triple(target) {
         candidates.push(PathBuf::from(format!("target/{}/release/{}", triple, name)));
         candidates.push(PathBuf::from(format!("target/{}/debug/{}", triple, name)));
-    }
-
-    // Always search host directories
-    candidates.push(PathBuf::from(format!("target/release/{}", name)));
-    candidates.push(PathBuf::from(format!("target/debug/{}", name)));
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join(name));
+    } else {
+        // Host build: search host directories
+        candidates.push(PathBuf::from(format!("target/release/{}", name)));
+        candidates.push(PathBuf::from(format!("target/debug/{}", name)));
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidates.push(dir.join(name));
+            }
         }
+        candidates.push(PathBuf::from(format!("/usr/local/lib/{}", name)));
     }
-    candidates.push(PathBuf::from(format!("/usr/local/lib/{}", name)));
 
     for path in &candidates {
         if path.exists() {
@@ -151,6 +153,7 @@ fn find_jsruntime_library(target: Option<&str>) -> Option<PathBuf> {
 fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
     let lib_name = match target {
         Some("ios-simulator") | Some("ios") => "libperry_ui_ios.a",
+        Some("android") => "libperry_ui_android.a",
         _ => "libperry_ui_macos.a",
     };
     find_library(lib_name, target)
@@ -753,7 +756,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     }
 
     // Build map of exported native instances from all modules
-    let mut exported_instances: HashMap<(String, String), perry_hir::ExportedNativeInstance> = HashMap::new();
+    let mut exported_instances: BTreeMap<(String, String), perry_hir::ExportedNativeInstance> = BTreeMap::new();
     for (path, hir_module) in &ctx.native_modules {
         let path_str = path.to_string_lossy().to_string();
         for (export_name, native_module, native_class) in &hir_module.exported_native_instances {
@@ -768,7 +771,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     }
 
     // Build map of exported functions that return native instances
-    let mut exported_func_return_instances: HashMap<(String, String), perry_hir::ExportedNativeInstance> = HashMap::new();
+    let mut exported_func_return_instances: BTreeMap<(String, String), perry_hir::ExportedNativeInstance> = BTreeMap::new();
     for (path, hir_module) in &ctx.native_modules {
         let path_str = path.to_string_lossy().to_string();
         for (func_name, native_module, native_class) in &hir_module.exported_func_return_native_instances {
@@ -948,7 +951,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     // Build a map of all exported enums from all modules (owned data, no borrows)
     // Key: (resolved_path, enum_name) -> Vec<(member_name, EnumValue)>
-    let mut exported_enums: HashMap<(String, String), Vec<(String, perry_hir::EnumValue)>> = HashMap::new();
+    let mut exported_enums: BTreeMap<(String, String), Vec<(String, perry_hir::EnumValue)>> = BTreeMap::new();
     for (path, hir_module) in &ctx.native_modules {
         let path_str = path.to_string_lossy().to_string();
         for en in &hir_module.enums {
@@ -1004,9 +1007,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // (exported_classes holds references into ctx.native_modules, so we need to do
     // the mutable fixup pass first)
     {
-        let mut module_enums: HashMap<PathBuf, HashMap<String, Vec<(String, perry_hir::EnumValue)>>> = HashMap::new();
+        let mut module_enums: BTreeMap<PathBuf, BTreeMap<String, Vec<(String, perry_hir::EnumValue)>>> = BTreeMap::new();
         for (path, hir_module) in &ctx.native_modules {
-            let mut imported_enums_for_module: HashMap<String, Vec<(String, perry_hir::EnumValue)>> = HashMap::new();
+            let mut imported_enums_for_module: BTreeMap<String, Vec<(String, perry_hir::EnumValue)>> = BTreeMap::new();
             for import in &hir_module.imports {
                 if import.module_kind != perry_hir::ModuleKind::NativeCompiled { continue; }
                 let resolved_path = match &import.resolved_path {
@@ -1038,7 +1041,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     // Build a map of all exported classes from all modules
     // Key: (resolved_path, class_name) -> Class reference
-    let mut exported_classes: HashMap<(String, String), &perry_hir::Class> = HashMap::new();
+    let mut exported_classes: BTreeMap<(String, String), &perry_hir::Class> = BTreeMap::new();
     for (path, hir_module) in &ctx.native_modules {
         let path_str = path.to_string_lossy().to_string();
         for class in &hir_module.classes {
@@ -1049,9 +1052,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     }
 
     // Build a map of all exported functions with their param counts from all modules
-    let mut exported_func_param_counts: HashMap<(String, String), usize> = HashMap::new();
+    let mut exported_func_param_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
     // Build a map of all exported functions with their return types from all modules
-    let mut exported_func_return_types: HashMap<(String, String), perry_types::Type> = HashMap::new();
+    let mut exported_func_return_types: BTreeMap<(String, String), perry_types::Type> = BTreeMap::new();
     for (path, hir_module) in &ctx.native_modules {
         let path_str = path.to_string_lossy().to_string();
         for func in &hir_module.functions {
@@ -1077,10 +1080,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     // Build a map of all exports from all modules: module_path -> HashMap<export_name, origin_module_path>
     // This is used for namespace imports (`import * as X from './module'`) to resolve all exports
-    let mut all_module_exports: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut all_module_exports: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (path, hir_module) in &ctx.native_modules {
         let path_str = path.to_string_lossy().to_string();
-        let exports = all_module_exports.entry(path_str.clone()).or_insert_with(HashMap::new);
+        let exports = all_module_exports.entry(path_str.clone()).or_insert_with(BTreeMap::new);
         // Exported functions
         for func in &hir_module.functions {
             if func.is_exported {
@@ -1158,7 +1161,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
         if new_export_entries.is_empty() { break; }
         for (module_path, name, origin) in new_export_entries {
-            all_module_exports.entry(module_path).or_insert_with(HashMap::new).insert(name, origin);
+            all_module_exports.entry(module_path).or_insert_with(BTreeMap::new).insert(name, origin);
         }
     }
 
@@ -1568,10 +1571,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     }
 
     let is_ios = matches!(target.as_deref(), Some("ios-simulator") | Some("ios"));
+    let is_android = matches!(target.as_deref(), Some("android"));
 
     let runtime_lib = find_runtime_library(target.as_deref())?;
     let stdlib_lib = find_stdlib_library(target.as_deref());
-    let jsruntime_lib = if !is_ios && (ctx.needs_js_runtime || args.enable_js_runtime) {
+    let jsruntime_lib = if !is_ios && !is_android && (ctx.needs_js_runtime || args.enable_js_runtime) {
         match find_jsruntime_library(target.as_deref()) {
             Some(lib) => {
                 match format {
@@ -1593,7 +1597,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         None
     };
 
-    // For iOS targets, use xcrun to find the right SDK and clang
+    // For cross-compilation targets, use the appropriate toolchain
     let mut cmd = if is_ios {
         let sdk = if target.as_deref() == Some("ios-simulator") { "iphonesimulator" } else { "iphoneos" };
         let clang = String::from_utf8(
@@ -1612,6 +1616,23 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         c.arg("-target").arg(triple)
          .arg("-isysroot").arg(sysroot);
         c
+    } else if is_android {
+        // Use Android NDK clang to produce a shared library (.so)
+        let ndk_home = std::env::var("ANDROID_NDK_HOME").map_err(|_| {
+            anyhow!("ANDROID_NDK_HOME not set. Set it to your NDK path, e.g. $HOME/Library/Android/sdk/ndk/28.0.12433566")
+        })?;
+        let clang = format!(
+            "{}/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android24-clang",
+            ndk_home
+        );
+        if !PathBuf::from(&clang).exists() {
+            return Err(anyhow!("Android NDK clang not found at: {}", clang));
+        }
+        let mut c = Command::new(clang);
+        c.arg("-shared")
+         .arg("-fPIC")
+         .arg("-target").arg("aarch64-linux-android24");
+        c
     } else {
         Command::new("cc")
     };
@@ -1623,23 +1644,40 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // Link libraries - avoid duplicates by linking only one library with runtime symbols.
     // jsruntime now includes stdlib, which includes runtime.
     // So we only need to link ONE of: jsruntime, stdlib, or runtime.
-    if let Some(ref jsruntime) = jsruntime_lib {
-        cmd.arg(jsruntime);
-    } else if let Some(ref stdlib) = stdlib_lib {
-        cmd.arg(stdlib);
-    } else {
-        cmd.arg(&runtime_lib);
+    // When UI lib is also linked, it bundles its own copy of perry-runtime.
+    // For Android (ELF), ld.lld errors on duplicate symbols, so skip the standalone
+    // runtime when the UI library will provide it.
+    let skip_runtime = is_android && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
+    if !skip_runtime {
+        if let Some(ref jsruntime) = jsruntime_lib {
+            cmd.arg(jsruntime);
+        } else if let Some(ref stdlib) = stdlib_lib {
+            cmd.arg(stdlib);
+        } else {
+            cmd.arg(&runtime_lib);
+        }
     }
 
     cmd.arg("-o")
         .arg(&exe_path)
         .arg("-lc");
 
+
     if is_ios {
         // iOS frameworks
         cmd.arg("-framework").arg("UIKit")
            .arg("-framework").arg("Foundation")
-           .arg("-framework").arg("CoreGraphics");
+           .arg("-framework").arg("CoreGraphics")
+           .arg("-framework").arg("Security")
+           .arg("-framework").arg("CoreFoundation")
+           .arg("-framework").arg("SystemConfiguration")
+           .arg("-liconv")
+           .arg("-lresolv");
+    } else if is_android {
+        // Android system libraries
+        cmd.arg("-lm")
+           .arg("-ldl")
+           .arg("-llog");
     } else {
         // On macOS, we need additional frameworks for the runtime (sysinfo, etc.) and V8
         #[cfg(target_os = "macos")]
@@ -1647,7 +1685,6 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             cmd.arg("-framework").arg("Security")
                .arg("-framework").arg("CoreFoundation")
                .arg("-framework").arg("SystemConfiguration")
-               .arg("-framework").arg("IOKit")
                .arg("-liconv")
                .arg("-lresolv");
 
@@ -1681,6 +1718,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
             if is_ios {
                 // UIKit already linked above
+            } else if is_android {
+                // Android UI uses JNI - no additional system libs needed
             } else {
                 #[cfg(target_os = "macos")]
                 {
@@ -1693,11 +1732,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 OutputFormat::Json => {}
             }
         } else {
-            let lib_name = if is_ios { "libperry_ui_ios.a" } else { "libperry_ui_macos.a" };
-            let build_cmd = if is_ios {
-                "cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim"
+            let (lib_name, build_cmd) = if is_ios {
+                ("libperry_ui_ios.a", "cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim")
+            } else if is_android {
+                ("libperry_ui_android.a", "cargo build --release -p perry-ui-android --target aarch64-linux-android")
             } else {
-                "cargo build --release -p perry-ui-macos"
+                ("libperry_ui_macos.a", "cargo build --release -p perry-ui-macos")
             };
             return Err(anyhow!(
                 "perry/ui imported but {} not found. Build with: {}", lib_name, build_cmd
