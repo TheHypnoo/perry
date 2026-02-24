@@ -10,7 +10,7 @@ description = "V8 JavaScript runtime for npm module support in Perry"
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-perry-runtime = { path = "../perry-runtime" }
+perry-runtime = { path = "../perry-runtime", features = ["stdlib"] }
 perry-stdlib = { path = "../perry-stdlib" }
 perry-types.workspace = true
 
