@@ -865,6 +865,12 @@ pub unsafe extern "C" fn js_native_call_method(
             // No dispatcher registered, return undefined
             return f64::from_bits(0x7FF8_0000_0000_0001);
         }
+
+        // Check if this is a native module namespace object (e.g., fs, os, path)
+        let obj = jsval.as_pointer::<ObjectHeader>();
+        if (*obj).class_id == NATIVE_MODULE_CLASS_ID {
+            return dispatch_native_module_method(obj, method_name, args_ptr, args_len);
+        }
     }
 
     // Handle common method calls
@@ -969,6 +975,87 @@ pub unsafe extern "C" fn js_native_call_method(
     f64::from_bits(JSValue::undefined().bits())
 }
 
+/// Dispatch a method call on a native module namespace object.
+/// Extracts the module name from the object and dispatches to the appropriate
+/// runtime function based on (module_name, method_name).
+unsafe fn dispatch_native_module_method(
+    obj: *const ObjectHeader,
+    method_name: &str,
+    args_ptr: *const f64,
+    args_len: usize,
+) -> f64 {
+    // Extract the module name from field 0 of the namespace object
+    let module_field = js_object_get_field(obj as *mut _, 0);
+    let module_name = if module_field.is_string() {
+        let str_ptr = module_field.as_pointer::<crate::StringHeader>();
+        let len = (*str_ptr).length as usize;
+        let data = (str_ptr as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+        std::str::from_utf8(std::slice::from_raw_parts(data, len)).unwrap_or("")
+    } else {
+        ""
+    };
+
+    // Helper: get arg N as f64
+    let arg = |n: usize| -> f64 {
+        if n < args_len && !args_ptr.is_null() { *args_ptr.add(n) } else { f64::from_bits(JSValue::undefined().bits()) }
+    };
+
+    // Helper: extract raw string pointer from a NaN-boxed f64 value
+    let arg_str_ptr = |n: usize| -> *const crate::StringHeader {
+        let v = arg(n);
+        let jsv = JSValue::from_bits(v.to_bits());
+        if jsv.is_string() {
+            jsv.as_pointer::<crate::StringHeader>()
+        } else {
+            std::ptr::null()
+        }
+    };
+
+    // Helper: convert i32 boolean to f64
+    let bool_to_f64 = |v: i32| -> f64 { v as f64 };
+
+    // Helper: convert *mut StringHeader to NaN-boxed string f64
+    let str_to_f64 = |ptr: *mut crate::StringHeader| -> f64 {
+        f64::from_bits(JSValue::string_ptr(ptr).bits())
+    };
+
+    match (module_name, method_name) {
+        // ── fs module (args are NaN-boxed f64, booleans return as i32→f64) ──
+        ("fs", "existsSync") => bool_to_f64(crate::fs::js_fs_exists_sync(arg(0))),
+        ("fs", "readFileSync") => str_to_f64(crate::fs::js_fs_read_file_sync(arg(0))),
+        ("fs", "writeFileSync") => bool_to_f64(crate::fs::js_fs_write_file_sync(arg(0), arg(1))),
+        ("fs", "appendFileSync") => bool_to_f64(crate::fs::js_fs_append_file_sync(arg(0), arg(1))),
+        ("fs", "mkdirSync") => bool_to_f64(crate::fs::js_fs_mkdir_sync(arg(0))),
+        ("fs", "unlinkSync") => bool_to_f64(crate::fs::js_fs_unlink_sync(arg(0))),
+
+        // ── os module (no args, return string or f64) ──
+        ("os", "tmpdir") => str_to_f64(crate::os::js_os_tmpdir()),
+        ("os", "homedir") => str_to_f64(crate::os::js_os_homedir()),
+        ("os", "platform") => str_to_f64(crate::os::js_os_platform()),
+        ("os", "arch") => str_to_f64(crate::os::js_os_arch()),
+        ("os", "hostname") => str_to_f64(crate::os::js_os_hostname()),
+        ("os", "type") => str_to_f64(crate::os::js_os_type()),
+        ("os", "release") => str_to_f64(crate::os::js_os_release()),
+        ("os", "eol") => str_to_f64(crate::os::js_os_eol()),
+        ("os", "totalmem") => crate::os::js_os_totalmem(),
+        ("os", "freemem") => crate::os::js_os_freemem(),
+        ("os", "uptime") => crate::os::js_os_uptime(),
+
+        // ── path module (args are NaN-boxed strings → extract raw StringHeader ptr) ──
+        ("path", "dirname") => str_to_f64(crate::path::js_path_dirname(arg_str_ptr(0))),
+        ("path", "basename") => str_to_f64(crate::path::js_path_basename(arg_str_ptr(0))),
+        ("path", "extname") => str_to_f64(crate::path::js_path_extname(arg_str_ptr(0))),
+        ("path", "resolve") => str_to_f64(crate::path::js_path_resolve(arg_str_ptr(0))),
+        ("path", "join") => str_to_f64(crate::path::js_path_join(arg_str_ptr(0), arg_str_ptr(1))),
+        ("path", "isAbsolute") => bool_to_f64(crate::path::js_path_is_absolute(arg_str_ptr(0))),
+
+        _ => {
+            // Method not found on native module — return undefined
+            f64::from_bits(JSValue::undefined().bits())
+        }
+    }
+}
+
 /// Special class ID for native module namespace objects
 /// This is used to identify objects that represent native module namespaces
 pub const NATIVE_MODULE_CLASS_ID: u32 = 0xFFFFFFFE;
@@ -1003,6 +1090,40 @@ pub extern "C" fn js_create_native_module_namespace(module_name_ptr: *const u8, 
 
     // Return as NaN-boxed pointer
     crate::value::js_nanbox_pointer(obj as i64)
+}
+
+/// Create a bound method closure for a native module method.
+/// When called, the closure dispatches to js_native_call_method with the
+/// captured namespace object and method name.
+/// Returns the closure as a NaN-boxed f64 pointer.
+#[no_mangle]
+pub extern "C" fn js_native_module_bind_method(
+    namespace_obj: f64,
+    method_name_ptr: *const u8,
+    method_name_len: usize,
+) -> f64 {
+    // Heap-allocate a copy of the method name so it outlives the caller's stack frame.
+    // The caller passes a pointer to stack-allocated bytes which become invalid after return.
+    let heap_name = unsafe {
+        let layout = std::alloc::Layout::from_size_align(method_name_len, 1).unwrap();
+        let ptr = std::alloc::alloc(layout);
+        std::ptr::copy_nonoverlapping(method_name_ptr, ptr, method_name_len);
+        ptr
+    };
+
+    // Allocate a closure with 3 captures:
+    //   [0] = namespace_obj (f64)
+    //   [1] = method_name_ptr (i64) — heap-allocated copy
+    //   [2] = method_name_len (i64)
+    let closure = crate::closure::js_closure_alloc(
+        crate::closure::BOUND_METHOD_FUNC_PTR,
+        3,
+    );
+    crate::closure::js_closure_set_capture_f64(closure, 0, namespace_obj);
+    crate::closure::js_closure_set_capture_ptr(closure, 1, heap_name as i64);
+    crate::closure::js_closure_set_capture_ptr(closure, 2, method_name_len as i64);
+
+    crate::value::js_nanbox_pointer(closure as i64)
 }
 
 #[cfg(test)]

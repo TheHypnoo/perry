@@ -3509,6 +3509,21 @@ impl Compiler {
             self.extern_funcs.insert("js_create_native_module_namespace".to_string(), func_id);
         }
 
+        // Declare js_native_module_bind_method(namespace_obj: f64, method_name_ptr: i64, method_name_len: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // namespace_obj (NaN-boxed)
+            sig.params.push(AbiParam::new(types::I64)); // method_name_ptr
+            sig.params.push(AbiParam::new(types::I64)); // method_name_len
+            sig.returns.push(AbiParam::new(types::F64)); // NaN-boxed closure
+            let func_id = self.module.declare_function(
+                "js_native_module_bind_method",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_native_module_bind_method".to_string(), func_id);
+        }
+
         // Declare js_instanceof(value: f64, class_id: i32) -> f64 (boolean as 1.0/0.0)
         {
             let mut sig = self.module.make_signature();
@@ -30028,16 +30043,35 @@ fn compile_expr(
                 }
             }
 
-            // Special handling for NativeModuleRef (namespace imports: import * as X from './module')
-            // Resolve property access directly to the export global via tl_scoped_export_name
+            // NativeModuleRef property access (e.g., fs.lstatSync, os.tmpdir):
+            // Create a bound method closure at runtime via js_native_module_bind_method.
+            // This allows `const fn = fs.lstatSync; fn("/tmp")` to work correctly.
             if let Expr::NativeModuleRef(_module_name) = object.as_ref() {
-                let global_name = tl_scoped_export_name(property);
-                let data_id = module.declare_data(&global_name, Linkage::Import, true, false)
-                    .map_err(|e| anyhow!("Failed to import namespace property {}: {}", property, e))?;
-                let global_val = module.declare_data_in_func(data_id, builder.func);
-                let ptr = builder.ins().global_value(types::I64, global_val);
-                let obj_val = builder.ins().load(types::F64, MemFlags::new(), ptr, 0);
-                return Ok(obj_val);
+                // Compile NativeModuleRef to get the namespace object (f64)
+                let ns_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                let ns_f64 = ensure_f64(builder, ns_val);
+
+                // Create stack slot for property name bytes
+                let prop_bytes = property.as_bytes();
+                let prop_len = prop_bytes.len();
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    prop_len.max(1) as u32,
+                    0,
+                ));
+                for (i, &byte) in prop_bytes.iter().enumerate() {
+                    let byte_val = builder.ins().iconst(types::I8, byte as i64);
+                    builder.ins().stack_store(byte_val, slot, i as i32);
+                }
+                let slot_addr = builder.ins().stack_addr(types::I64, slot, 0);
+                let len_val = builder.ins().iconst(types::I64, prop_len as i64);
+
+                // Call js_native_module_bind_method(namespace_f64, name_ptr, name_len) -> f64
+                let bind_func = extern_funcs.get("js_native_module_bind_method")
+                    .ok_or_else(|| anyhow!("js_native_module_bind_method not declared"))?;
+                let bind_ref = module.declare_func_in_func(*bind_func, builder.func);
+                let call = builder.ins().call(bind_ref, &[ns_f64, slot_addr, len_val]);
+                return Ok(builder.inst_results(call)[0]);
             }
 
             // Special handling for ExternFuncRef (imported values from another module)

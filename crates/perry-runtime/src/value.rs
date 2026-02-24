@@ -21,7 +21,7 @@
 const TAG_MARKER: u64 = 0x7FFC_0000_0000_0000;
 
 /// Special singleton values
-const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+pub(crate) const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
 const TAG_NULL: u64 = 0x7FFC_0000_0000_0002;
 const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
 const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
@@ -956,6 +956,17 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
 
     // Check the object type tag (first u32 field of both ObjectHeader and ErrorHeader)
     let object_type = *(ptr as *const u32);
+
+    // Handle native module namespace objects (e.g., `const fn = fs.lstatSync`)
+    // Create a bound method closure so the method reference can be called later
+    let obj_header = ptr as *const crate::object::ObjectHeader;
+    if (*obj_header).class_id == crate::object::NATIVE_MODULE_CLASS_ID {
+        return crate::object::js_native_module_bind_method(
+            obj_value,
+            property_name.as_ptr(),
+            property_name.len(),
+        );
+    }
 
     // Handle Error objects specially
     if object_type == crate::error::OBJECT_TYPE_ERROR {
