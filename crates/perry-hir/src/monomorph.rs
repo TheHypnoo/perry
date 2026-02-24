@@ -1047,6 +1047,7 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
         Expr::PathBasename(path) => Expr::PathBasename(Box::new(substitute_expr(path, substitutions))),
         Expr::PathExtname(path) => Expr::PathExtname(Box::new(substitute_expr(path, substitutions))),
         Expr::PathResolve(path) => Expr::PathResolve(Box::new(substitute_expr(path, substitutions))),
+        Expr::PathIsAbsolute(path) => Expr::PathIsAbsolute(Box::new(substitute_expr(path, substitutions))),
 
         // Array methods
         Expr::ArrayPush { array_id, value } => Expr::ArrayPush {
@@ -1810,7 +1811,7 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
             collect_instantiations_in_expr(a, ctx, module);
             collect_instantiations_in_expr(b, ctx, module);
         }
-        Expr::PathDirname(p) | Expr::PathBasename(p) | Expr::PathExtname(p) | Expr::PathResolve(p) => {
+        Expr::PathDirname(p) | Expr::PathBasename(p) | Expr::PathExtname(p) | Expr::PathResolve(p) | Expr::PathIsAbsolute(p) => {
             collect_instantiations_in_expr(p, ctx, module);
         }
         Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } => {
@@ -2221,7 +2222,7 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
             update_call_sites_in_expr(a, ctx, lookup);
             update_call_sites_in_expr(b, ctx, lookup);
         }
-        Expr::PathDirname(p) | Expr::PathBasename(p) | Expr::PathExtname(p) | Expr::PathResolve(p) => {
+        Expr::PathDirname(p) | Expr::PathBasename(p) | Expr::PathExtname(p) | Expr::PathResolve(p) | Expr::PathIsAbsolute(p) => {
             update_call_sites_in_expr(p, ctx, lookup);
         }
         Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } => {
@@ -2771,6 +2772,7 @@ mod tests {
             return_type: Type::TypeVar("T".to_string()),
             body: vec![Stmt::Return(Some(Expr::LocalGet(0)))],
             is_async: false,
+            is_generator: false,
             is_exported: true,
             captures: vec![],
             decorators: vec![],
@@ -2825,6 +2827,7 @@ mod tests {
             return_type: Type::TypeVar("T".to_string()),
             body: vec![Stmt::Return(Some(Expr::LocalGet(0)))],
             is_async: false,
+            is_generator: false,
             is_exported: true,
             captures: vec![],
             decorators: vec![],
@@ -2879,6 +2882,7 @@ mod tests {
             return_type: Type::TypeVar("T".to_string()),
             body: vec![Stmt::Return(Some(Expr::LocalGet(0)))],
             is_async: false,
+            is_generator: false,
             is_exported: true,
             captures: vec![],
             decorators: vec![],
@@ -2946,6 +2950,7 @@ mod tests {
             return_type: Type::TypeVar("T".to_string()),
             body: vec![Stmt::Return(Some(Expr::LocalGet(0)))],
             is_async: false,
+            is_generator: false,
             is_exported: true,
             captures: vec![],
             decorators: vec![],

@@ -659,7 +659,7 @@ fn transform_expr(
             transform_expr(a, js_imports, extern_func_to_js, local_name_to_js, tracker);
             transform_expr(b, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
-        Expr::PathDirname(e) | Expr::PathBasename(e) | Expr::PathExtname(e) | Expr::PathResolve(e) => {
+        Expr::PathDirname(e) | Expr::PathBasename(e) | Expr::PathExtname(e) | Expr::PathResolve(e) | Expr::PathIsAbsolute(e) => {
             transform_expr(e, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
         Expr::JsonParse(e) | Expr::JsonStringify(e) => {

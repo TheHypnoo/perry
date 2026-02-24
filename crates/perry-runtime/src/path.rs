@@ -89,6 +89,18 @@ pub extern "C" fn js_path_extname(path_ptr: *const StringHeader) -> *mut StringH
     }
 }
 
+/// Check if path is absolute
+#[no_mangle]
+pub extern "C" fn js_path_is_absolute(path_ptr: *const StringHeader) -> i32 {
+    unsafe {
+        let path_str = match string_from_header(path_ptr) {
+            Some(s) => s,
+            None => return 0,
+        };
+        if Path::new(&path_str).is_absolute() { 1 } else { 0 }
+    }
+}
+
 /// Resolve path to absolute path
 #[no_mangle]
 pub extern "C" fn js_path_resolve(path_ptr: *const StringHeader) -> *mut StringHeader {

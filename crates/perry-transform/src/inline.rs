@@ -939,7 +939,7 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
             substitute_locals(b, param_map, next_local_id);
         }
         Expr::PathDirname(p) | Expr::PathBasename(p) | Expr::PathExtname(p) |
-        Expr::PathResolve(p) | Expr::FileURLToPath(p) => {
+        Expr::PathResolve(p) | Expr::PathIsAbsolute(p) | Expr::FileURLToPath(p) => {
             substitute_locals(p, param_map, next_local_id);
         }
         // Math operations

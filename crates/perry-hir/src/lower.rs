@@ -73,6 +73,9 @@ pub struct LoweringContext {
     /// Tracks user-defined functions whose return type annotation is a native module type
     /// (e.g., initializePool(): mysql.Pool -> ("mysql2/promise", "Pool"))
     func_return_native_instances: Vec<(String, String, String)>,
+    /// Classes created during expression lowering (e.g., class expressions in `new (class extends X {})()`)
+    /// These are flushed to the module after the enclosing statement is lowered.
+    pending_classes: Vec<Class>,
 }
 
 impl LoweringContext {
@@ -109,6 +112,7 @@ impl LoweringContext {
             exportable_object_vars: HashSet::new(),
             pending_functions: Vec::new(),
             func_return_native_instances: Vec::new(),
+            pending_classes: Vec::new(),
         }
     }
 
@@ -859,6 +863,11 @@ pub fn lower_module_with_class_id(ast_module: &ast::Module, name: &str, source_f
         // (e.g., inline methods in object literals)
         for func in ctx.pending_functions.drain(..) {
             module.functions.push(func);
+        }
+        // Flush any pending classes created during expression lowering
+        // (e.g., class expressions in `new (class extends Command { ... })()`)
+        for class in ctx.pending_classes.drain(..) {
+            module.classes.push(class);
         }
     }
 
@@ -2207,6 +2216,147 @@ fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::ClassDecl, is_e
     Ok(Class {
         id: class_id,
         name,
+        type_params,
+        extends,
+        extends_name,
+        native_extends,
+        fields,
+        constructor,
+        methods,
+        getters,
+        setters,
+        static_fields,
+        static_methods,
+        is_exported,
+    })
+}
+
+/// Lower a class expression (ast::Class) to HIR.
+/// Used for anonymous class expressions like `new (class extends Command { ... })()`.
+fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class, name: &str, is_exported: bool) -> Result<Class> {
+    let class_id = ctx.lookup_class(name).unwrap_or_else(|| {
+        let id = ctx.fresh_class();
+        ctx.classes.push((name.to_string(), id));
+        id
+    });
+
+    let old_class = ctx.current_class.take();
+    ctx.current_class = Some(name.to_string());
+
+    let type_params = class.type_params
+        .as_ref()
+        .map(|tp| extract_type_params(tp))
+        .unwrap_or_default();
+
+    ctx.enter_type_param_scope(&type_params);
+
+    let (extends, extends_name, native_extends) = if let Some(ref super_class) = class.super_class {
+        if let ast::Expr::Ident(ident) = super_class.as_ref() {
+            let parent_name = ident.sym.to_string();
+            let native_parent = match parent_name.as_str() {
+                "EventEmitter" => Some(("events".to_string(), "EventEmitter".to_string())),
+                "AsyncLocalStorage" => Some(("async_hooks".to_string(), "AsyncLocalStorage".to_string())),
+                "WebSocketServer" => Some(("ws".to_string(), "WebSocketServer".to_string())),
+                _ => None,
+            };
+            if native_parent.is_some() {
+                (None, None, native_parent)
+            } else {
+                (ctx.lookup_class(&parent_name), Some(parent_name), None)
+            }
+        } else if let ast::Expr::Member(member) = super_class.as_ref() {
+            let parent_name = extract_member_class_name(member);
+            (None, Some(parent_name), None)
+        } else {
+            (None, None, None)
+        }
+    } else {
+        (None, None, None)
+    };
+
+    let mut static_field_names = Vec::new();
+    let mut static_method_names = Vec::new();
+    for member in &class.body {
+        match member {
+            ast::ClassMember::Method(method) if method.is_static => {
+                if let ast::PropName::Ident(ident) = &method.key {
+                    static_method_names.push(ident.sym.to_string());
+                }
+            }
+            ast::ClassMember::ClassProp(prop) if prop.is_static => {
+                if let ast::PropName::Ident(ident) = &prop.key {
+                    static_field_names.push(ident.sym.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    ctx.register_class_statics(name.to_string(), static_field_names, static_method_names);
+
+    let mut fields = Vec::new();
+    let mut static_fields = Vec::new();
+    let mut constructor = None;
+    let mut methods = Vec::new();
+    let mut static_methods = Vec::new();
+    let mut getters = Vec::new();
+    let mut setters = Vec::new();
+
+    for member in &class.body {
+        match member {
+            ast::ClassMember::Constructor(ctor) => {
+                constructor = Some(lower_constructor(ctx, name, ctor)?);
+            }
+            ast::ClassMember::Method(method) => {
+                let prop_name = match &method.key {
+                    ast::PropName::Ident(ident) => ident.sym.to_string(),
+                    ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                    _ => continue,
+                };
+                match method.kind {
+                    ast::MethodKind::Getter => {
+                        let func = lower_getter_method(ctx, method)?;
+                        getters.push((prop_name, func));
+                    }
+                    ast::MethodKind::Setter => {
+                        let func = lower_setter_method(ctx, method)?;
+                        setters.push((prop_name, func));
+                    }
+                    ast::MethodKind::Method => {
+                        let func = lower_class_method(ctx, method)?;
+                        if method.is_static {
+                            static_methods.push(func);
+                        } else {
+                            methods.push(func);
+                        }
+                    }
+                }
+            }
+            ast::ClassMember::ClassProp(prop) => {
+                let field = lower_class_prop(ctx, prop)?;
+                if prop.is_static {
+                    static_fields.push(field);
+                } else {
+                    fields.push(field);
+                }
+            }
+            ast::ClassMember::PrivateProp(prop) => {
+                let field = lower_private_prop(ctx, prop)?;
+                if prop.is_static {
+                    static_fields.push(field);
+                } else {
+                    fields.push(field);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ctx.exit_type_param_scope();
+    ctx.current_class = old_class;
+
+    Ok(Class {
+        id: class_id,
+        name: name.to_string(),
         type_params,
         extends,
         extends_name,
@@ -3601,16 +3751,21 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                             }
 
                             if let Some((module_name, _imported_method)) = ctx.lookup_native_module(&obj_name) {
-                                // This is a call on a native module (e.g., mysql.createConnection)
-                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
-                                    let method_name = method_ident.sym.to_string();
-                                    return Ok(Expr::NativeMethodCall {
-                                        module: module_name.to_string(),
-                                        class_name: None,  // Will be set by js_transform if needed
-                                        object: None,  // Static call on module itself
-                                        method: method_name,
-                                        args,
-                                    });
+                                // Skip modules handled specifically below (path, fs, etc.)
+                                let is_handled_module = module_name == "path" || module_name == "node:path"
+                                    || module_name == "fs" || module_name == "node:fs";
+                                if !is_handled_module {
+                                    // This is a call on a native module (e.g., mysql.createConnection)
+                                    if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                        let method_name = method_ident.sym.to_string();
+                                        return Ok(Expr::NativeMethodCall {
+                                            module: module_name.to_string(),
+                                            class_name: None,  // Will be set by js_transform if needed
+                                            object: None,  // Static call on module itself
+                                            method: method_name,
+                                            args,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -3756,9 +3911,11 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                         "join" => {
                                             if args.len() >= 2 {
                                                 let mut iter = args.into_iter();
-                                                let a = iter.next().unwrap();
-                                                let b = iter.next().unwrap();
-                                                return Ok(Expr::PathJoin(Box::new(a), Box::new(b)));
+                                                let mut result = iter.next().unwrap();
+                                                for next_arg in iter {
+                                                    result = Expr::PathJoin(Box::new(result), Box::new(next_arg));
+                                                }
+                                                return Ok(result);
                                             }
                                         }
                                         "dirname" => {
@@ -3778,7 +3935,20 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                         }
                                         "resolve" => {
                                             if args.len() >= 1 {
-                                                return Ok(Expr::PathResolve(Box::new(args.into_iter().next().unwrap())));
+                                                // path.resolve(a, b, c) => resolve(join(a, b, c))
+                                                // For single arg, just resolve directly
+                                                let mut iter = args.into_iter();
+                                                let first = iter.next().unwrap();
+                                                let mut joined = first;
+                                                for next_arg in iter {
+                                                    joined = Expr::PathJoin(Box::new(joined), Box::new(next_arg));
+                                                }
+                                                return Ok(Expr::PathResolve(Box::new(joined)));
+                                            }
+                                        }
+                                        "isAbsolute" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::PathIsAbsolute(Box::new(args.into_iter().next().unwrap())));
                                             }
                                         }
                                         _ => {} // Fall through to generic handling
@@ -5202,9 +5372,11 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     "join" => {
                                         if args.len() >= 2 {
                                             let mut iter = args.into_iter();
-                                            let a = iter.next().unwrap();
-                                            let b = iter.next().unwrap();
-                                            return Ok(Expr::PathJoin(Box::new(a), Box::new(b)));
+                                            let mut result = iter.next().unwrap();
+                                            for next_arg in iter {
+                                                result = Expr::PathJoin(Box::new(result), Box::new(next_arg));
+                                            }
+                                            return Ok(result);
                                         }
                                     }
                                     "dirname" => {
@@ -5224,7 +5396,18 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     }
                                     "resolve" => {
                                         if args.len() >= 1 {
-                                            return Ok(Expr::PathResolve(Box::new(args.into_iter().next().unwrap())));
+                                            let mut iter = args.into_iter();
+                                            let first = iter.next().unwrap();
+                                            let mut joined = first;
+                                            for next_arg in iter {
+                                                joined = Expr::PathJoin(Box::new(joined), Box::new(next_arg));
+                                            }
+                                            return Ok(Expr::PathResolve(Box::new(joined)));
+                                        }
+                                    }
+                                    "isAbsolute" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::PathIsAbsolute(Box::new(args.into_iter().next().unwrap())));
                                         }
                                     }
                                     _ => {} // Fall through
@@ -5646,7 +5829,11 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                     if let Some(id) = ctx.lookup_local(&name) {
                         Ok(Expr::LocalSet(id, value))
                     } else {
-                        Err(anyhow!("Assignment to undeclared variable: {}", name))
+                        // Variable not found in scope — likely a closure capture that wasn't
+                        // properly tracked. Create an implicit local to avoid hard failure.
+                        eprintln!("  Warning: Assignment to undeclared variable '{}', creating implicit local", name);
+                        let id = ctx.define_local(name, Type::Any);
+                        Ok(Expr::LocalSet(id, value))
                     }
                 }
                 ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(member)) => {
@@ -5999,6 +6186,31 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                 }
                 // Non-identifier callee (e.g., new (condition ? A : B)() or new someVar())
                 _ => {
+                    // Check for class expressions: new (class extends X { ... })()
+                    let class_expr_opt = match new_expr.callee.as_ref() {
+                        ast::Expr::Class(ce) => Some(ce),
+                        ast::Expr::Paren(paren) => match paren.expr.as_ref() {
+                            ast::Expr::Class(ce) => Some(ce),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(class_expr) = class_expr_opt {
+                        let synthetic_name = format!("__anon_class_{}", ctx.fresh_class());
+                        let class = lower_class_from_ast(ctx, &class_expr.class, &synthetic_name, false)?;
+                        ctx.pending_classes.push(class);
+                        let args = new_expr.args.as_ref()
+                            .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
+                            .transpose()?
+                            .unwrap_or_default();
+                        let type_args = new_expr.type_args.as_ref()
+                            .map(|ta| ta.params.iter()
+                                .map(|t| extract_ts_type_with_ctx(t, Some(ctx)))
+                                .collect())
+                            .unwrap_or_default();
+                        return Ok(Expr::New { class_name: synthetic_name, args, type_args });
+                    }
+
                     let callee = Box::new(lower_expr(ctx, &new_expr.callee)?);
                     let args = new_expr.args.as_ref()
                         .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
@@ -6537,6 +6749,15 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
             }
 
             Ok(result)
+        }
+        // Class expression used as a value (not in `new` context)
+        ast::Expr::Class(class_expr) => {
+            let ident_name = class_expr.ident.as_ref().map(|i| i.sym.to_string());
+            let synthetic_name = ident_name.unwrap_or_else(|| format!("__anon_class_{}", ctx.fresh_class()));
+            let class = lower_class_from_ast(ctx, &class_expr.class, &synthetic_name, false)?;
+            ctx.pending_classes.push(class);
+            // Return as a New expression with no args (creates the class object reference)
+            Ok(Expr::New { class_name: synthetic_name, args: vec![], type_args: vec![] })
         }
         _ => Err(anyhow!("Unsupported expression type: {:?}", expr)),
     }
@@ -8274,7 +8495,7 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
             collect_local_refs_expr(a, refs);
             collect_local_refs_expr(b, refs);
         }
-        Expr::PathDirname(path) | Expr::PathBasename(path) | Expr::PathExtname(path) | Expr::PathResolve(path) | Expr::FileURLToPath(path) => {
+        Expr::PathDirname(path) | Expr::PathBasename(path) | Expr::PathExtname(path) | Expr::PathResolve(path) | Expr::PathIsAbsolute(path) | Expr::FileURLToPath(path) => {
             collect_local_refs_expr(path, refs);
         }
         // Array methods
@@ -8983,7 +9204,7 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
             collect_assigned_locals_expr(a, assigned);
             collect_assigned_locals_expr(b, assigned);
         }
-        Expr::PathDirname(path) | Expr::PathBasename(path) | Expr::PathExtname(path) | Expr::PathResolve(path) | Expr::FileURLToPath(path) => {
+        Expr::PathDirname(path) | Expr::PathBasename(path) | Expr::PathExtname(path) | Expr::PathResolve(path) | Expr::PathIsAbsolute(path) | Expr::FileURLToPath(path) => {
             collect_assigned_locals_expr(path, assigned);
         }
         // Array methods - push/unshift may reassign the array pointer

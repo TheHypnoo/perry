@@ -708,6 +708,7 @@ pub enum Expr {
     PathBasename(Box<Expr>),             // path.basename(path) -> string
     PathExtname(Box<Expr>),              // path.extname(path) -> string
     PathResolve(Box<Expr>),              // path.resolve(path) -> string
+    PathIsAbsolute(Box<Expr>),           // path.isAbsolute(path) -> boolean
 
     // URL operations
     FileURLToPath(Box<Expr>),            // url.fileURLToPath(url) -> string

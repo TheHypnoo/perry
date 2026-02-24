@@ -398,11 +398,12 @@ fn linearize_body(
                         },
                         then_branch: vec![
                             // Loop ended - jump past the loop
-                            // We'll use a special state number that we'll fill in later
                             Stmt::Expr(Expr::LocalSet(
                                 state_id,
                                 Box::new(Expr::Number(0.0)), // placeholder, fixed below
                             )),
+                            // Continue the while(true) so the Goto exit doesn't overwrite state
+                            Stmt::Continue,
                         ],
                         else_branch: None,
                     }]
@@ -479,6 +480,7 @@ fn linearize_body(
                                 state_id,
                                 Box::new(Expr::Number(0.0)), // placeholder
                             )),
+                            Stmt::Continue,
                         ],
                         else_branch: None,
                     }],

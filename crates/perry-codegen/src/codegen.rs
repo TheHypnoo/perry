@@ -4898,6 +4898,19 @@ impl Compiler {
             self.extern_funcs.insert("js_path_resolve".to_string(), func_id);
         }
 
+        // js_path_is_absolute(path: *const StringHeader) -> i32 (boolean)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // path string pointer
+            sig.returns.push(AbiParam::new(types::I32)); // boolean result
+            let func_id = self.module.declare_function(
+                "js_path_is_absolute",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_path_is_absolute".to_string(), func_id);
+        }
+
         // BigInt runtime functions
         // js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIntHeader
         {
@@ -12654,7 +12667,7 @@ impl Compiler {
                 self.collect_closures_from_expr(a, closures, enclosing_class);
                 self.collect_closures_from_expr(b, closures, enclosing_class);
             }
-            Expr::PathDirname(path) | Expr::PathBasename(path) | Expr::PathExtname(path) | Expr::PathResolve(path) | Expr::FileURLToPath(path) => {
+            Expr::PathDirname(path) | Expr::PathBasename(path) | Expr::PathExtname(path) | Expr::PathResolve(path) | Expr::PathIsAbsolute(path) | Expr::FileURLToPath(path) => {
                 self.collect_closures_from_expr(path, closures, enclosing_class);
             }
             // JSON operations
@@ -19114,6 +19127,24 @@ fn compile_expr(
             let result_ptr = builder.inst_results(call)[0];
 
             Ok(inline_nanbox_string(builder, result_ptr))
+        }
+        Expr::PathIsAbsolute(path_expr) => {
+            let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
+            let path_ptr = get_raw_string_ptr(builder, path_val);
+
+            let func = extern_funcs.get("js_path_is_absolute")
+                .ok_or_else(|| anyhow!("js_path_is_absolute not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[path_ptr]);
+            let result_i32 = builder.inst_results(call)[0];
+
+            // Convert i32 boolean to NaN-boxed boolean
+            const TAG_TRUE_VAL: u64 = 0x7FFC_0000_0000_0004;
+            const TAG_FALSE_VAL: u64 = 0x7FFC_0000_0000_0003;
+            let true_bits = builder.ins().iconst(types::I64, TAG_TRUE_VAL as i64);
+            let false_bits = builder.ins().iconst(types::I64, TAG_FALSE_VAL as i64);
+            let result = builder.ins().select(result_i32, true_bits, false_bits);
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
         }
         Expr::FileURLToPath(url_expr) => {
             // fileURLToPath takes a NaN-boxed string (f64) and returns a NaN-boxed string (f64)
