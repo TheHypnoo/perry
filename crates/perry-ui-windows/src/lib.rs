@@ -219,6 +219,7 @@ pub extern "C" fn perry_ui_progressview_set_value(handle: i64, value: f64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_add_child(parent_handle: i64, child_handle: i64) {
     widgets::add_child(parent_handle, child_handle);
+    app::request_layout();
 }
 
 /// Add a child at a specific index.
@@ -305,6 +306,13 @@ pub extern "C" fn perry_ui_state_bind_textfield(state_handle: i64, textfield_han
 #[no_mangle]
 pub extern "C" fn perry_ui_for_each_init(container_handle: i64, state_handle: i64, render_closure: f64) {
     state::for_each_init(container_handle, state_handle, render_closure);
+}
+
+/// Remove all children from a container widget.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_clear_children(handle: i64) {
+    widgets::clear_children(handle);
+    app::request_layout();
 }
 
 // =============================================================================
@@ -783,4 +791,11 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
     system::notification_send(title_ptr as *const u8, body_ptr as *const u8);
+}
+
+/// Add a child widget at a specific index.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_add_child_at(parent_handle: i64, child_handle: i64, index: f64) {
+    widgets::add_child_at(parent_handle, child_handle, index as i64);
+    app::request_layout();
 }
