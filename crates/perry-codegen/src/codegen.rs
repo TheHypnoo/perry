@@ -504,6 +504,8 @@ struct ClassMeta {
     static_method_ids: BTreeMap<String, cranelift_module::FuncId>,
     /// Static field global IDs: field name -> (data_id, has_init)
     static_field_ids: BTreeMap<String, cranelift_module::DataId>,
+    /// Method parameter counts: method name -> param count (for vtable registration)
+    method_param_counts: BTreeMap<String, usize>,
     /// Method return types: method name -> return type (for determining if method returns string)
     method_return_types: BTreeMap<String, perry_types::Type>,
     /// Static method return types: method name -> return type (for singleton pattern getInstance() etc.)
@@ -946,6 +948,7 @@ impl Compiler {
             field_types,
             constructor_id: None,
             method_ids: BTreeMap::new(),
+            method_param_counts: BTreeMap::new(),
             getter_ids: BTreeMap::new(),
             setter_ids: BTreeMap::new(),
             static_method_ids: BTreeMap::new(),
@@ -987,6 +990,7 @@ impl Compiler {
 
             if let Some(meta) = self.classes.get_mut(&class.name) {
                 meta.method_ids.insert(method.name.clone(), func_id);
+                meta.method_param_counts.insert(method.name.clone(), method.params.len());
             }
         }
 
@@ -1876,6 +1880,7 @@ impl Compiler {
             field_types,
             constructor_id: None,
             method_ids: BTreeMap::new(),
+            method_param_counts: BTreeMap::new(),
             getter_ids: BTreeMap::new(),
             setter_ids: BTreeMap::new(),
             static_method_ids: BTreeMap::new(),
@@ -2031,6 +2036,7 @@ impl Compiler {
 
             if let Some(meta) = self.classes.get_mut(&class.name) {
                 meta.method_ids.insert(method.name.clone(), func_id);
+                meta.method_param_counts.insert(method.name.clone(), method.params.len());
             }
         }
         Ok(())
@@ -4969,6 +4975,32 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_fs_unlink_sync".to_string(), func_id);
+        }
+
+        // js_fs_readdir_sync(path_value: f64) -> f64 (NaN-boxed array pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed path string
+            sig.returns.push(AbiParam::new(types::F64)); // NaN-boxed array pointer
+            let func_id = self.module.declare_function(
+                "js_fs_readdir_sync",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_fs_readdir_sync".to_string(), func_id);
+        }
+
+        // js_fs_is_directory(path_value: f64) -> i32
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed path string
+            sig.returns.push(AbiParam::new(types::I32)); // 1 if dir, 0 if not
+            let func_id = self.module.declare_function(
+                "js_fs_is_directory",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_fs_is_directory".to_string(), func_id);
         }
 
         // Path runtime functions
@@ -10682,6 +10714,18 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_text_set_selectable".to_string(), func_id);
         }
 
+        // perry_ui_button_set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_button_set_text_color", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_button_set_text_color".to_string(), func_id);
+        }
+
         // perry_ui_button_set_bordered(handle: i64, bordered: f64)
         {
             let mut sig = self.module.make_signature();
@@ -10689,6 +10733,24 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::F64)); // bordered (0 or 1)
             let func_id = self.module.declare_function("perry_ui_button_set_bordered", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_button_set_bordered".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_width(handle: i64, width: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_widget_set_width", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_width".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_hugging(handle: i64, priority: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_widget_set_hugging", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_hugging".to_string(), func_id);
         }
 
         // perry_ui_button_set_title(handle: i64, title_ptr: i64)
@@ -10807,6 +10869,15 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::F64)); // index
             let func_id = self.module.declare_function("perry_ui_widget_add_child_at", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_widget_add_child_at".to_string(), func_id);
+        }
+
+        // perry_ui_embed_nsview(nsview_ptr: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // nsview_ptr
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_embed_nsview", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_embed_nsview".to_string(), func_id);
         }
 
         // ============================================
@@ -11141,6 +11212,15 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::F64));
             let func_id = self.module.declare_function("perry_ui_widget_set_on_double_click", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_widget_set_on_double_click".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_on_click(handle: i64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_widget_set_on_click", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_on_click".to_string(), func_id);
         }
 
         // perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_ms: f64)
@@ -11704,6 +11784,31 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::F64)); // NaN-boxed return value
             let func_id = self.module.declare_function("js_native_call_method", Linkage::Import, &sig)?;
             self.extern_funcs.insert("js_native_call_method".to_string(), func_id);
+        }
+
+        // js_register_class_method(class_id: i64, name_ptr: i64, name_len: i64, func_ptr: i64, param_count: i64) -> void
+        // Register a class method in the vtable for runtime dispatch
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // class_id
+            sig.params.push(AbiParam::new(types::I64)); // name_ptr
+            sig.params.push(AbiParam::new(types::I64)); // name_len
+            sig.params.push(AbiParam::new(types::I64)); // func_ptr
+            sig.params.push(AbiParam::new(types::I64)); // param_count
+            let func_id = self.module.declare_function("js_register_class_method", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_register_class_method".to_string(), func_id);
+        }
+
+        // js_register_class_getter(class_id: i64, name_ptr: i64, name_len: i64, func_ptr: i64) -> void
+        // Register a class getter in the vtable for runtime dispatch
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // class_id
+            sig.params.push(AbiParam::new(types::I64)); // name_ptr
+            sig.params.push(AbiParam::new(types::I64)); // name_len
+            sig.params.push(AbiParam::new(types::I64)); // func_ptr
+            let func_id = self.module.declare_function("js_register_class_getter", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_register_class_getter".to_string(), func_id);
         }
 
         // js_native_call_value(func_value: f64, args_ptr: i64, args_len: i64) -> f64
@@ -14726,6 +14831,26 @@ impl Compiler {
             None
         };
 
+        // Pre-collect vtable registration info for all classes (methods + getters).
+        // Must be done before the FunctionBuilder block since self.classes can't be
+        // borrowed while self.ctx.func is mutably borrowed.
+        struct VTableRegInfo {
+            class_id: u32,
+            methods: Vec<(String, cranelift_module::FuncId, usize)>, // (name, func_id, param_count)
+            getters: Vec<(String, cranelift_module::FuncId)>,        // (name, func_id)
+        }
+        let vtable_reg_info: Vec<VTableRegInfo> = self.classes.iter()
+            .map(|(_, meta)| VTableRegInfo {
+                class_id: meta.id,
+                methods: meta.method_ids.iter()
+                    .map(|(n, &fid)| (n.clone(), fid, *meta.method_param_counts.get(n).unwrap_or(&0)))
+                    .collect(),
+                getters: meta.getter_ids.iter()
+                    .map(|(n, &fid)| (n.clone(), fid))
+                    .collect(),
+            })
+            .collect();
+
         // Use fresh FunctionBuilderContext to avoid variable ID conflicts
         // The shared self.func_ctx accumulates variable declarations across functions
         let mut init_func_ctx = FunctionBuilderContext::new();
@@ -14875,6 +15000,69 @@ impl Compiler {
                 let global_val = self.module.declare_data_in_func(data_id, builder.func);
                 let ptr = builder.ins().global_value(types::I64, global_val);
                 builder.ins().store(MemFlags::new(), val, ptr, 0);
+            }
+
+            // Emit vtable registration calls for every class method and getter.
+            // Using func_addr creates linker roots that prevent dead_strip from
+            // removing methods that are only reached via dynamic dispatch.
+            {
+                let register_method_id = *self.extern_funcs.get("js_register_class_method").unwrap();
+                let register_method_ref = self.module.declare_func_in_func(register_method_id, builder.func);
+
+                for info in &vtable_reg_info {
+                    let class_id_val = builder.ins().iconst(types::I64, info.class_id as i64);
+
+                    for (method_name, method_func_id, param_count) in &info.methods {
+                        // Embed method name as static data
+                        let name_bytes = method_name.as_bytes();
+                        let data_id = self.module.declare_anonymous_data(false, false)?;
+                        let mut desc = cranelift_module::DataDescription::new();
+                        desc.define(name_bytes.to_vec().into_boxed_slice());
+                        self.module.define_data(data_id, &desc)?;
+                        let gv = self.module.declare_data_in_func(data_id, builder.func);
+                        let name_ptr = builder.ins().global_value(types::I64, gv);
+                        let name_len = builder.ins().iconst(types::I64, name_bytes.len() as i64);
+
+                        // Get function address — this also creates a linker root
+                        let func_ref = self.module.declare_func_in_func(*method_func_id, builder.func);
+                        let func_ptr = builder.ins().func_addr(types::I64, func_ref);
+
+                        let pc_val = builder.ins().iconst(types::I64, *param_count as i64);
+
+                        builder.ins().call(register_method_ref, &[
+                            class_id_val, name_ptr, name_len, func_ptr, pc_val,
+                        ]);
+                    }
+                }
+            }
+
+            {
+                let register_getter_id = *self.extern_funcs.get("js_register_class_getter").unwrap();
+                let register_getter_ref = self.module.declare_func_in_func(register_getter_id, builder.func);
+
+                for info in &vtable_reg_info {
+                    let class_id_val = builder.ins().iconst(types::I64, info.class_id as i64);
+
+                    for (getter_name, getter_func_id) in &info.getters {
+                        // Embed getter name as static data
+                        let name_bytes = getter_name.as_bytes();
+                        let data_id = self.module.declare_anonymous_data(false, false)?;
+                        let mut desc = cranelift_module::DataDescription::new();
+                        desc.define(name_bytes.to_vec().into_boxed_slice());
+                        self.module.define_data(data_id, &desc)?;
+                        let gv = self.module.declare_data_in_func(data_id, builder.func);
+                        let name_ptr = builder.ins().global_value(types::I64, gv);
+                        let name_len = builder.ins().iconst(types::I64, name_bytes.len() as i64);
+
+                        // Get function address
+                        let func_ref = self.module.declare_func_in_func(*getter_func_id, builder.func);
+                        let func_ptr = builder.ins().func_addr(types::I64, func_ref);
+
+                        builder.ins().call(register_getter_ref, &[
+                            class_id_val, name_ptr, name_len, func_ptr,
+                        ]);
+                    }
+                }
             }
 
             let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
@@ -26808,6 +26996,165 @@ fn compile_expr(
                         }
                     }
 
+                    // Handle Map/Set method calls on class fields (this.field.method())
+                    if let Expr::PropertyGet { object: inner_obj, property: field_name } = object.as_ref() {
+                        if let Expr::This = inner_obj.as_ref() {
+                            if let Some(ctx) = this_ctx {
+                                if let Some(field_type) = ctx.class_meta.field_types.get(field_name) {
+                                    let is_map = matches!(field_type, perry_types::Type::Generic { base, .. } if base == "Map");
+                                    let is_set = matches!(field_type, perry_types::Type::Generic { base, .. } if base == "Set");
+                                    if is_map || is_set {
+                                        if let Some(&field_idx) = ctx.class_meta.field_indices.get(field_name) {
+                                            let this_ptr = builder.use_var(ctx.this_var);
+                                            let field_offset = 24 + (field_idx as i32) * 8;
+                                            let field_val = builder.ins().load(types::F64, MemFlags::new(), this_ptr, field_offset);
+                                            let ptr = ensure_i64(builder, field_val);
+
+                                            if is_map {
+                                                match property.as_str() {
+                                                    "set" => {
+                                                        if arg_vals.len() >= 2 {
+                                                            let key = ensure_f64(builder, arg_vals[0]);
+                                                            let value = ensure_f64(builder, arg_vals[1]);
+                                                            let set_func = extern_funcs.get("js_map_set")
+                                                                .ok_or_else(|| anyhow!("js_map_set not declared"))?;
+                                                            let func_ref = module.declare_func_in_func(*set_func, builder.func);
+                                                            let call = builder.ins().call(func_ref, &[ptr, key, value]);
+                                                            let result_ptr = builder.inst_results(call)[0];
+                                                            return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
+                                                        }
+                                                    }
+                                                    "get" => {
+                                                        if !arg_vals.is_empty() {
+                                                            let key = ensure_f64(builder, arg_vals[0]);
+                                                            let get_func = extern_funcs.get("js_map_get")
+                                                                .ok_or_else(|| anyhow!("js_map_get not declared"))?;
+                                                            let func_ref = module.declare_func_in_func(*get_func, builder.func);
+                                                            let call = builder.ins().call(func_ref, &[ptr, key]);
+                                                            return Ok(builder.inst_results(call)[0]);
+                                                        }
+                                                    }
+                                                    "has" => {
+                                                        if !arg_vals.is_empty() {
+                                                            let key = ensure_f64(builder, arg_vals[0]);
+                                                            let has_func = extern_funcs.get("js_map_has")
+                                                                .ok_or_else(|| anyhow!("js_map_has not declared"))?;
+                                                            let func_ref = module.declare_func_in_func(*has_func, builder.func);
+                                                            let call = builder.ins().call(func_ref, &[ptr, key]);
+                                                            let result_i32 = builder.inst_results(call)[0];
+                                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                                        }
+                                                    }
+                                                    "delete" => {
+                                                        if !arg_vals.is_empty() {
+                                                            let key = ensure_f64(builder, arg_vals[0]);
+                                                            let delete_func = extern_funcs.get("js_map_delete")
+                                                                .ok_or_else(|| anyhow!("js_map_delete not declared"))?;
+                                                            let func_ref = module.declare_func_in_func(*delete_func, builder.func);
+                                                            let call = builder.ins().call(func_ref, &[ptr, key]);
+                                                            let result_i32 = builder.inst_results(call)[0];
+                                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                                        }
+                                                    }
+                                                    "clear" => {
+                                                        let clear_func = extern_funcs.get("js_map_clear")
+                                                            .ok_or_else(|| anyhow!("js_map_clear not declared"))?;
+                                                        let func_ref = module.declare_func_in_func(*clear_func, builder.func);
+                                                        builder.ins().call(func_ref, &[ptr]);
+                                                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                                                    }
+                                                    "entries" => {
+                                                        let entries_func = extern_funcs.get("js_map_entries")
+                                                            .ok_or_else(|| anyhow!("js_map_entries not declared"))?;
+                                                        let func_ref = module.declare_func_in_func(*entries_func, builder.func);
+                                                        let call = builder.ins().call(func_ref, &[ptr]);
+                                                        let result_ptr = builder.inst_results(call)[0];
+                                                        return Ok(inline_nanbox_pointer(builder, result_ptr));
+                                                    }
+                                                    "keys" => {
+                                                        let keys_func = extern_funcs.get("js_map_keys")
+                                                            .ok_or_else(|| anyhow!("js_map_keys not declared"))?;
+                                                        let func_ref = module.declare_func_in_func(*keys_func, builder.func);
+                                                        let call = builder.ins().call(func_ref, &[ptr]);
+                                                        let result_ptr = builder.inst_results(call)[0];
+                                                        return Ok(inline_nanbox_pointer(builder, result_ptr));
+                                                    }
+                                                    "values" => {
+                                                        let values_func = extern_funcs.get("js_map_values")
+                                                            .ok_or_else(|| anyhow!("js_map_values not declared"))?;
+                                                        let func_ref = module.declare_func_in_func(*values_func, builder.func);
+                                                        let call = builder.ins().call(func_ref, &[ptr]);
+                                                        let result_ptr = builder.inst_results(call)[0];
+                                                        return Ok(inline_nanbox_pointer(builder, result_ptr));
+                                                    }
+                                                    "forEach" => {
+                                                        if !arg_vals.is_empty() {
+                                                            let callback = ensure_f64(builder, arg_vals[0]);
+                                                            let foreach_func = extern_funcs.get("js_map_foreach")
+                                                                .ok_or_else(|| anyhow!("js_map_foreach not declared"))?;
+                                                            let func_ref = module.declare_func_in_func(*foreach_func, builder.func);
+                                                            builder.ins().call(func_ref, &[ptr, callback]);
+                                                            const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                                            return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                                                        }
+                                                    }
+                                                    _ => {}
+                                                }
+                                            } else {
+                                                // Set methods
+                                                match property.as_str() {
+                                                    "add" => {
+                                                        if !arg_vals.is_empty() {
+                                                            let value = ensure_f64(builder, arg_vals[0]);
+                                                            let add_func = extern_funcs.get("js_set_add")
+                                                                .ok_or_else(|| anyhow!("js_set_add not declared"))?;
+                                                            let func_ref = module.declare_func_in_func(*add_func, builder.func);
+                                                            let call = builder.ins().call(func_ref, &[ptr, value]);
+                                                            let result_ptr = builder.inst_results(call)[0];
+                                                            return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
+                                                        }
+                                                    }
+                                                    "has" => {
+                                                        if !arg_vals.is_empty() {
+                                                            let value = ensure_f64(builder, arg_vals[0]);
+                                                            let has_func = extern_funcs.get("js_set_has")
+                                                                .ok_or_else(|| anyhow!("js_set_has not declared"))?;
+                                                            let func_ref = module.declare_func_in_func(*has_func, builder.func);
+                                                            let call = builder.ins().call(func_ref, &[ptr, value]);
+                                                            let result_i32 = builder.inst_results(call)[0];
+                                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                                        }
+                                                    }
+                                                    "delete" => {
+                                                        if !arg_vals.is_empty() {
+                                                            let value = ensure_f64(builder, arg_vals[0]);
+                                                            let delete_func = extern_funcs.get("js_set_delete")
+                                                                .ok_or_else(|| anyhow!("js_set_delete not declared"))?;
+                                                            let func_ref = module.declare_func_in_func(*delete_func, builder.func);
+                                                            let call = builder.ins().call(func_ref, &[ptr, value]);
+                                                            let result_i32 = builder.inst_results(call)[0];
+                                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                                        }
+                                                    }
+                                                    "clear" => {
+                                                        let clear_func = extern_funcs.get("js_set_clear")
+                                                            .ok_or_else(|| anyhow!("js_set_clear not declared"))?;
+                                                        let func_ref = module.declare_func_in_func(*clear_func, builder.func);
+                                                        builder.ins().call(func_ref, &[ptr]);
+                                                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Handle toString on bigint field access (e.g., this.reserve1.toString())
                     if property == "toString" {
                         if let Expr::PropertyGet { object: inner_obj, property: field_name } = object.as_ref() {
@@ -30294,6 +30641,35 @@ fn compile_expr(
                 }
             }
 
+            // Handle .size on Map/Set class fields (this.field.size)
+            if property == "size" {
+                if let Expr::PropertyGet { object: inner_obj, property: field_name } = object.as_ref() {
+                    if let Expr::This = inner_obj.as_ref() {
+                        if let Some(ctx) = this_ctx {
+                            if let Some(field_type) = ctx.class_meta.field_types.get(field_name) {
+                                let is_map_field = matches!(field_type, perry_types::Type::Generic { base, .. } if base == "Map");
+                                let is_set_field = matches!(field_type, perry_types::Type::Generic { base, .. } if base == "Set");
+                                if is_map_field || is_set_field {
+                                    if let Some(&field_idx) = ctx.class_meta.field_indices.get(field_name) {
+                                        let this_ptr = builder.use_var(ctx.this_var);
+                                        let field_offset = 24 + (field_idx as i32) * 8;
+                                        let field_val = builder.ins().load(types::F64, MemFlags::new(), this_ptr, field_offset);
+                                        let ptr = ensure_i64(builder, field_val);
+                                        let func_name = if is_map_field { "js_map_size" } else { "js_set_size" };
+                                        let size_func = extern_funcs.get(func_name)
+                                            .ok_or_else(|| anyhow!("{} not declared", func_name))?;
+                                        let func_ref = module.declare_func_in_func(*size_func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[ptr]);
+                                        let size_i32 = builder.inst_results(call)[0];
+                                        return Ok(builder.ins().fcvt_from_sint(types::F64, size_i32));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Handle this.field access (in constructor/method context)
             if let Some(ctx) = this_ctx {
                 if matches!(object.as_ref(), Expr::This) {
@@ -32580,7 +32956,7 @@ fn compile_expr(
                     // ============================================================
                     // Phase A: Handle-extracting widget mutation functions
                     // ============================================================
-                    "textSetString" | "buttonSetTitle" | "textfieldSetString" => {
+                    "textSetString" | "buttonSetTitle" | "textfieldSetString" | "textSetFontFamily" => {
                         // (handle, text) — extract handle via js_nanbox_get_pointer, text via js_get_string_pointer_unified
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -32600,6 +32976,7 @@ fn compile_expr(
                             "textSetString" => "perry_ui_text_set_string",
                             "buttonSetTitle" => "perry_ui_button_set_title",
                             "textfieldSetString" => "perry_ui_textfield_set_string",
+                            "textSetFontFamily" => "perry_ui_text_set_font_family",
                             _ => unreachable!(),
                         };
                         let func = extern_funcs.get(ffi_name)
@@ -32609,8 +32986,26 @@ fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
+                    "widgetSetOnClick" => {
+                        // (handle, callback) — extract handle as i64, pass callback as f64
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+                        let callback = ensure_f64(builder, arg_vals[1]);
+
+                        let func = extern_funcs.get("perry_ui_widget_set_on_click")
+                            .ok_or_else(|| anyhow!("perry_ui_widget_set_on_click not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, callback]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
                     "widgetSetHidden" | "textSetFontSize" | "textSetSelectable" |
-                    "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" => {
+                    "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" |
+                    "widgetSetWidth" | "widgetSetHugging" => {
                         // (handle, ...) — extract handle, pass remaining args as f64
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -32626,6 +33021,8 @@ fn compile_expr(
                             "buttonSetBordered" => "perry_ui_button_set_bordered",
                             "textfieldFocus" => "perry_ui_textfield_focus",
                             "widgetClearChildren" => "perry_ui_widget_clear_children",
+                            "widgetSetWidth" => "perry_ui_widget_set_width",
+                            "widgetSetHugging" => "perry_ui_widget_set_hugging",
                             _ => unreachable!(),
                         };
 
@@ -32650,7 +33047,7 @@ fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "textSetColor" => {
+                    "textSetColor" | "buttonSetTextColor" => {
                         // (handle, r, g, b, a) — extract handle, pass 4 f64 args
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -32664,8 +33061,13 @@ fn compile_expr(
                         let b = ensure_f64(builder, arg_vals[3]);
                         let a = ensure_f64(builder, arg_vals[4]);
 
-                        let func = extern_funcs.get("perry_ui_text_set_color")
-                            .ok_or_else(|| anyhow!("perry_ui_text_set_color not declared"))?;
+                        let ffi_name = if method == "buttonSetTextColor" {
+                            "perry_ui_button_set_text_color"
+                        } else {
+                            "perry_ui_text_set_color"
+                        };
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
                         let func_ref = module.declare_func_in_func(*func, builder.func);
                         builder.ins().call(func_ref, &[handle, r, g, b, a]);
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
@@ -32961,6 +33363,23 @@ fn compile_expr(
                         builder.ins().call(func_ref, &[parent, child]);
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "embedNSView" => {
+                        // (nsview_ptr) — takes an i64 NSView pointer, returns widget handle
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+
+                        let ptr_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[ptr_f64]);
+                        let nsview_ptr = builder.inst_results(ptr_call)[0];
+
+                        let func = extern_funcs.get("perry_ui_embed_nsview")
+                            .ok_or_else(|| anyhow!("perry_ui_embed_nsview not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        let call = builder.ins().call(func_ref, &[nsview_ptr]);
+                        let result_handle = builder.inst_results(call)[0];
+                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_handle));
                     }
                     "widgetAddChildAt" => {
                         // (parent, child, index) — extract 2 handles, pass index as f64
@@ -33279,6 +33698,8 @@ fn compile_expr(
 
                 // ws module functions
                 ("ws", false, "connect") => "js_ws_connect",
+                ("ws", false, "sendToClient") => "js_ws_send",
+                ("ws", false, "closeClient") => "js_ws_close",
                 ("ws", true, "send") => "js_ws_send",
                 ("ws", true, "close") => "js_ws_close",
                 ("ws", true, "isOpen") => "js_ws_is_open",
@@ -33697,6 +34118,8 @@ fn compile_expr(
                 ("fs", false, "appendFileSync") => "js_fs_append_file_sync",
                 ("fs", false, "mkdirSync") => "js_fs_mkdir_sync",
                 ("fs", false, "unlinkSync") => "js_fs_unlink_sync",
+                ("fs", false, "readdirSync") => "js_fs_readdir_sync",
+                ("fs", false, "isDirectory") => "js_fs_is_directory",
 
                 // ========================================================================
                 // Node.js built-in: path
@@ -33751,6 +34174,7 @@ fn compile_expr(
                 ("perry/ui", true, "setControlSize") => "perry_ui_widget_set_control_size",
                 ("perry/ui", true, "setOnHover") => "perry_ui_widget_set_on_hover",
                 ("perry/ui", true, "setOnDoubleClick") => "perry_ui_widget_set_on_double_click",
+                ("perry/ui", true, "setOnClick") => "perry_ui_widget_set_on_click",
                 ("perry/ui", true, "animateOpacity") => "perry_ui_widget_animate_opacity",
                 ("perry/ui", true, "animatePosition") => "perry_ui_widget_animate_position",
                 ("perry/ui", true, "setFontFamily") => "perry_ui_text_set_font_family",
@@ -34584,7 +35008,7 @@ fn compile_expr(
                         "value" | "pop" | "getSelected" => {
                             // No additional args - just the handle
                         }
-                        "onChange" | "setOnHover" | "setOnDoubleClick" => {
+                        "onChange" | "setOnHover" | "setOnDoubleClick" | "setOnClick" => {
                             // Callback arg (f64 NaN-boxed closure)
                             if !arg_vals.is_empty() {
                                 call_args.push(ensure_f64(builder, arg_vals[0]));
@@ -34884,6 +35308,36 @@ fn compile_expr(
                                 builder.inst_results(call)[0]
                             }).collect()
                         }
+                        "sendToClient" => {
+                            // sendToClient(clientHandle, data) - clientHandle is a regular f64 number (ws_id), data is NaN-boxed string
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                // Client handle: regular f64 number, convert to i64
+                                let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                                let handle_i64 = builder.ins().fcvt_to_sint_sat(types::I64, handle_f64);
+                                args.push(handle_i64);
+                            }
+                            if arg_vals.len() >= 2 {
+                                // Data: NaN-boxed string, extract string pointer
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let msg_f64 = ensure_f64(builder, arg_vals[1]);
+                                let msg_call = builder.ins().call(get_str_ref, &[msg_f64]);
+                                args.push(builder.inst_results(msg_call)[0]);
+                            }
+                            args
+                        }
+                        "closeClient" => {
+                            // closeClient(clientHandle) - clientHandle is a regular f64 number (ws_id)
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                                let handle_i64 = builder.ins().fcvt_to_sint_sat(types::I64, handle_f64);
+                                args.push(handle_i64);
+                            }
+                            args
+                        }
                         _ => arg_vals.clone()
                     }
                 } else if native_module == "ethers" {
@@ -35016,7 +35470,7 @@ fn compile_expr(
                 } else if native_module == "fs" {
                     // fs module functions - all path arguments are NaN-boxed strings (f64)
                     match method.as_str() {
-                        "existsSync" | "mkdirSync" | "unlinkSync" => {
+                        "existsSync" | "mkdirSync" | "unlinkSync" | "readdirSync" | "isDirectory" => {
                             // Single path argument - ensure f64 (NaN-boxed)
                             arg_vals.iter().map(|&val| {
                                 let t = builder.func.dfg.value_type(val);
@@ -35416,11 +35870,14 @@ fn compile_expr(
                 } else if native_module == "lru-cache" && (method == "get" || method == "has" || method == "size" || method == "peek") {
                     // LRUCache methods that return f64 directly
                     Ok(result)
-                } else if native_module == "fs" && (method == "existsSync" || method == "mkdirSync" || method == "unlinkSync" || method == "writeFileSync") {
+                } else if native_module == "fs" && (method == "existsSync" || method == "mkdirSync" || method == "unlinkSync" || method == "writeFileSync" || method == "isDirectory") {
                     // fs functions return i32 boolean - convert to f64
                     // result is already i32, extend to i64 then convert to f64
                     let extended = builder.ins().uextend(types::I64, result);
                     Ok(builder.ins().fcvt_from_uint(types::F64, extended))
+                } else if native_module == "fs" && method == "readdirSync" {
+                    // readdirSync returns f64 directly (NaN-boxed array pointer from Rust)
+                    Ok(result)
                 } else if native_module == "fs" && method == "readFileSync" {
                     // readFileSync returns string pointer - NaN-box with STRING_TAG
                     let nanbox_func = extern_funcs.get("js_nanbox_string")
@@ -35524,7 +35981,7 @@ fn compile_expr(
                         // Void methods
                         "set" | "setValue" | "setSize" | "setTint" | "addItem" |
                         "setSelected" | "push" | "pop" | "setEnabled" | "setTooltip" |
-                        "setControlSize" | "setOnHover" | "setOnDoubleClick" |
+                        "setControlSize" | "setOnHover" | "setOnDoubleClick" | "setOnClick" |
                         "animateOpacity" | "animatePosition" | "onChange" | "setFontFamily" |
                         "present" | "dismiss" | "addToolbarItem" | "attachToolbar" |
                         "setBody" | "show" | "closeWindow" | "updateCount" | "bindTextField" => {
