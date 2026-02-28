@@ -1,20 +1,24 @@
 use objc2::rc::Retained;
+use objc2::{msg_send};
 use objc2_app_kit::{NSStackView, NSView, NSUserInterfaceLayoutOrientation, NSLayoutAttribute, NSStackViewGravity};
 use objc2_foundation::MainThreadMarker;
 
-/// Create an NSStackView with vertical orientation.
+/// Set distribution to Fill (0) so children fill the available space.
+fn set_fill_distribution(stack: &NSStackView) {
+    unsafe {
+        let _: () = msg_send![stack, setDistribution: 0i64];
+    }
+}
+
+/// Create an NSStackView with vertical orientation (no default edge insets).
 pub fn create(spacing: f64) -> i64 {
     let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
     let stack = NSStackView::new(mtm);
     stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
     stack.setSpacing(spacing);
-    stack.setAlignment(NSLayoutAttribute::CenterX);
-    // Edge insets for padding
-    unsafe {
-        stack.setEdgeInsets(objc2_foundation::NSEdgeInsets {
-            top: 20.0, left: 20.0, bottom: 20.0, right: 20.0,
-        });
-    }
+    // Width alignment: children stretch to fill the full cross-axis width
+    stack.setAlignment(NSLayoutAttribute::Leading);
+    set_fill_distribution(&stack);
     let view: Retained<NSView> = unsafe { Retained::cast_unchecked(stack) };
     super::register_widget(view)
 }
@@ -25,7 +29,8 @@ pub fn create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right:
     let stack = NSStackView::new(mtm);
     stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
     stack.setSpacing(spacing);
-    stack.setAlignment(NSLayoutAttribute::CenterX);
+    stack.setAlignment(NSLayoutAttribute::Leading);
+    set_fill_distribution(&stack);
     unsafe {
         stack.setEdgeInsets(objc2_foundation::NSEdgeInsets {
             top, left, bottom, right,

@@ -40,9 +40,15 @@ pub extern "C" fn js_fs_read_file_sync(path_value: f64) -> *mut StringHeader {
         match fs::read_to_string(path_str) {
             Ok(content) => {
                 let bytes = content.as_bytes();
-                js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+                let result = js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
+                eprintln!("[readFileSync] path={:?} content_len={} result_ptr={:p} ptr_as_i64={:#x}",
+                    path_str, bytes.len(), result, result as i64);
+                result
             }
-            Err(_) => std::ptr::null_mut(),
+            Err(e) => {
+                eprintln!("[readFileSync] path={:?} ERROR: {}", path_str, e);
+                std::ptr::null_mut()
+            }
         }
     }
 }
@@ -176,6 +182,87 @@ pub extern "C" fn js_fs_mkdir_sync(path_value: f64) -> i32 {
             Ok(_) => 1,
             Err(_) => 0,
         }
+    }
+}
+
+/// Read directory entries synchronously and return as a JS array of strings.
+/// Returns an empty array on error.
+/// Accepts NaN-boxed string path.
+#[no_mangle]
+pub extern "C" fn js_fs_readdir_sync(path_value: f64) -> f64 {
+    use crate::array::{js_array_alloc, js_array_push_f64};
+    use crate::string::js_string_from_bytes;
+    use crate::value::js_nanbox_string;
+
+    unsafe {
+        let path_ptr = extract_string_ptr(path_value);
+        if path_ptr.is_null() {
+            let arr = js_array_alloc(0);
+            return std::mem::transmute::<i64, f64>(arr as i64);
+        }
+
+        let len = (*path_ptr).length as usize;
+        let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        let path_bytes = std::slice::from_raw_parts(data_ptr, len);
+
+        let path_str = match std::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                let arr = js_array_alloc(0);
+                return std::mem::transmute::<i64, f64>(arr as i64);
+            }
+        };
+
+        match fs::read_dir(path_str) {
+            Ok(entries) => {
+                let mut names: Vec<String> = Vec::new();
+                for entry in entries {
+                    if let Ok(e) = entry {
+                        if let Some(name) = e.file_name().to_str() {
+                            names.push(name.to_string());
+                        }
+                    }
+                }
+                names.sort();
+
+                let mut arr = js_array_alloc(names.len() as u32);
+                for name in &names {
+                    let bytes = name.as_bytes();
+                    let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
+                    let str_f64 = js_nanbox_string(str_ptr as i64);
+                    arr = js_array_push_f64(arr, str_f64);
+                }
+                std::mem::transmute::<i64, f64>(arr as i64)
+            }
+            Err(_) => {
+                let arr = js_array_alloc(0);
+                std::mem::transmute::<i64, f64>(arr as i64)
+            }
+        }
+    }
+}
+
+/// Check if a path is a directory.
+/// Returns 1 if directory, 0 if not (or error).
+/// Accepts NaN-boxed string path.
+#[no_mangle]
+pub extern "C" fn js_fs_is_directory(path_value: f64) -> i32 {
+    unsafe {
+        let path_ptr = extract_string_ptr(path_value);
+        if path_ptr.is_null() {
+            return 0;
+        }
+
+        let len = (*path_ptr).length as usize;
+        let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        let path_bytes = std::slice::from_raw_parts(data_ptr, len);
+
+        let path_str = match std::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+
+        if Path::new(path_str).is_dir() { 1 } else { 0 }
     }
 }
 

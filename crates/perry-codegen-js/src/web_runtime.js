@@ -736,6 +736,76 @@ function perry_ui_lazyvstack_update(h, count) {
     }
 }
 
+// --- Table (DOM <table> implementation) ---
+function perry_ui_table_create(rowCount, colCount, renderFn) {
+    const scroll = document.createElement("div");
+    scroll.style.overflow = "auto"; scroll.style.flex = "1";
+    const tbl = document.createElement("table");
+    tbl.style.borderCollapse = "collapse"; tbl.style.width = "100%";
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    for (let c = 0; c < colCount; c++) {
+        const th = document.createElement("th");
+        th.style.borderBottom = "1px solid #ccc"; th.style.padding = "4px 8px";
+        headerRow.appendChild(th);
+    }
+    thead.appendChild(headerRow);
+    const tbody = document.createElement("tbody");
+    tbl.appendChild(thead); tbl.appendChild(tbody);
+    scroll.appendChild(tbl);
+    scroll._tbl = tbl; scroll._thead = thead; scroll._tbody = tbody;
+    scroll._colCount = colCount; scroll._renderFn = renderFn;
+    scroll._selectedRow = -1; scroll._onRowSelect = null;
+    function buildRows(rc) {
+        tbody.innerHTML = "";
+        for (let r = 0; r < rc; r++) {
+            const tr = document.createElement("tr");
+            (function(row) {
+                tr.onclick = function() {
+                    scroll._selectedRow = row;
+                    if (typeof scroll._onRowSelect === "function") scroll._onRowSelect(row);
+                };
+            })(r);
+            for (let c = 0; c < colCount; c++) {
+                const td = document.createElement("td");
+                td.style.padding = "4px 8px"; td.style.borderBottom = "1px solid #eee";
+                if (typeof renderFn === "function") renderFn(r, c);
+                tr.appendChild(td);
+            }
+            tbody.appendChild(tr);
+        }
+    }
+    buildRows(rowCount);
+    scroll._buildRows = buildRows;
+    return wrapWidget(allocHandle(scroll));
+}
+function perry_ui_table_set_column_header(h, col, title) {
+    const el = getHandle(h);
+    if (el && el._thead) {
+        const ths = el._thead.querySelectorAll("th");
+        if (ths[col]) ths[col].textContent = title || "";
+    }
+}
+function perry_ui_table_set_column_width(h, col, width) {
+    const el = getHandle(h);
+    if (el && el._thead) {
+        const ths = el._thead.querySelectorAll("th");
+        if (ths[col]) ths[col].style.width = width + "px";
+    }
+}
+function perry_ui_table_update_row_count(h, count) {
+    const el = getHandle(h);
+    if (el && el._buildRows) el._buildRows(count);
+}
+function perry_ui_table_set_on_row_select(h, cb) {
+    const el = getHandle(h);
+    if (el) el._onRowSelect = cb;
+}
+function perry_ui_table_get_selected_row(h) {
+    const el = getHandle(h);
+    return el ? el._selectedRow : -1;
+}
+
 // --- Text Operations ---
 function perry_ui_text_set_string(h, text) {
     const el = getHandle(h);
@@ -1132,6 +1202,12 @@ window.__perry = {
     perry_ui_canvas_create,
     perry_ui_lazyvstack_create,
     perry_ui_lazyvstack_update,
+    perry_ui_table_create,
+    perry_ui_table_set_column_header,
+    perry_ui_table_set_column_width,
+    perry_ui_table_update_row_count,
+    perry_ui_table_set_on_row_select,
+    perry_ui_table_get_selected_row,
     // Child management
     perry_ui_widget_add_child,
     perry_ui_widget_add_child_at,

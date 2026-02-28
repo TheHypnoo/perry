@@ -32,6 +32,13 @@ pub extern "C" fn perry_ui_app_run(app_handle: i64) {
     app::app_run(app_handle);
 }
 
+/// Register an external NSView (from a native library) as a Perry widget.
+/// Returns widget handle usable with widgetAddChild, widgetSetWidth, etc.
+#[no_mangle]
+pub extern "C" fn perry_ui_embed_nsview(nsview_ptr: i64) -> i64 {
+    widgets::register_external_nsview(nsview_ptr)
+}
+
 /// Create a Text label. text_ptr = raw string pointer. Returns widget handle.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_create(text_ptr: i64) -> i64 {
@@ -254,6 +261,24 @@ pub extern "C" fn perry_ui_text_set_font_weight(handle: i64, size: f64, weight: 
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_selectable(handle: i64, selectable: f64) {
     widgets::text::set_selectable(handle, selectable != 0.0);
+}
+
+/// Set the text color of a Button.
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::button::set_text_color(handle, r, g, b, a);
+}
+
+/// Set a fixed width constraint on a widget.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_width(handle: i64, width: f64) {
+    widgets::set_width(handle, width);
+}
+
+/// Set the content hugging priority on a widget (both axes).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_hugging(handle: i64, priority: f64) {
+    widgets::set_hugging_priority(handle, priority);
 }
 
 /// Set whether a Button has a border.
@@ -577,6 +602,12 @@ pub extern "C" fn perry_ui_widget_set_on_hover(handle: i64, callback: f64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_on_double_click(handle: i64, callback: f64) {
     widgets::set_on_double_click(handle, callback);
+}
+
+/// Set a single-click handler for any widget.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_on_click(handle: i64, callback: f64) {
+    widgets::set_on_click(handle, callback);
 }
 
 /// Animate the opacity of a widget.
@@ -952,4 +983,45 @@ pub extern "C" fn perry_ui_lazyvstack_create(count: f64, render_closure: f64) ->
 #[no_mangle]
 pub extern "C" fn perry_ui_lazyvstack_update(handle: i64, count: i64) {
     widgets::lazyvstack::update_count(handle, count);
+}
+
+// =============================================================================
+// Table (NSTableView)
+// =============================================================================
+
+/// Create a Table with row_count rows, col_count columns, and a render closure.
+/// row_count and col_count arrive as f64 (JS numbers) — cast to i64 internally.
+#[no_mangle]
+pub extern "C" fn perry_ui_table_create(row_count: f64, col_count: f64, render: f64) -> i64 {
+    widgets::table::create(row_count as i64, col_count as i64, render)
+}
+
+/// Set the header title of column col (0-based). title_ptr is a StringHeader pointer.
+#[no_mangle]
+pub extern "C" fn perry_ui_table_set_column_header(handle: i64, col: i64, title_ptr: i64) {
+    widgets::table::set_column_header(handle, col, title_ptr as *const u8)
+}
+
+/// Set the width of column col (0-based).
+#[no_mangle]
+pub extern "C" fn perry_ui_table_set_column_width(handle: i64, col: i64, width: f64) {
+    widgets::table::set_column_width(handle, col, width)
+}
+
+/// Update the total row count and reload the table view.
+#[no_mangle]
+pub extern "C" fn perry_ui_table_update_row_count(handle: i64, count: i64) {
+    widgets::table::update_row_count(handle, count)
+}
+
+/// Register a selection callback (row: number) => void.
+#[no_mangle]
+pub extern "C" fn perry_ui_table_set_on_row_select(handle: i64, callback: f64) {
+    widgets::table::set_on_row_select(handle, callback)
+}
+
+/// Return the index of the currently selected row, or -1 if none.
+#[no_mangle]
+pub extern "C" fn perry_ui_table_get_selected_row(handle: i64) -> i64 {
+    widgets::table::get_selected_row(handle)
 }

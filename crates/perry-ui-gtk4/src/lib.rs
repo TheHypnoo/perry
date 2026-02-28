@@ -198,6 +198,20 @@ pub extern "C" fn perry_ui_lazyvstack_update(handle: i64, count: i64) {
     widgets::lazyvstack::update(handle, count);
 }
 
+// Table (stub — not yet implemented on GTK4)
+#[no_mangle]
+pub extern "C" fn perry_ui_table_create(_row_count: f64, _col_count: f64, _render: f64) -> i64 { 0 }
+#[no_mangle]
+pub extern "C" fn perry_ui_table_set_column_header(_handle: i64, _col: i64, _title_ptr: i64) {}
+#[no_mangle]
+pub extern "C" fn perry_ui_table_set_column_width(_handle: i64, _col: i64, _width: f64) {}
+#[no_mangle]
+pub extern "C" fn perry_ui_table_update_row_count(_handle: i64, _count: i64) {}
+#[no_mangle]
+pub extern "C" fn perry_ui_table_set_on_row_select(_handle: i64, _callback: f64) {}
+#[no_mangle]
+pub extern "C" fn perry_ui_table_get_selected_row(_handle: i64) -> i64 { -1 }
+
 /// Create a ProgressView.
 #[no_mangle]
 pub extern "C" fn perry_ui_progressview_create() -> i64 {

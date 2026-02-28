@@ -580,11 +580,12 @@ export function existsSync() { return false; }
 export function mkdirSync() {}
 export function readdirSync() { return []; }
 export function statSync() { throw new Error('fs.statSync not supported'); }
+export function isDirectory() { return 0; }
 export const promises = {
     readFile: async () => { throw new Error('fs.promises.readFile not supported'); },
     writeFile: async () => { throw new Error('fs.promises.writeFile not supported'); },
 };
-export default { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, promises };
+export default { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, isDirectory, promises };
 "#.to_string(),
         "path" => r#"
 // Stub implementation for Node.js 'path' module

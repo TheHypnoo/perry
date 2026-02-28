@@ -105,11 +105,34 @@ pub fn app_set_body(app_handle: i64, root_handle: i64) {
             apps[idx]._root_widget = Some(root_handle);
 
             if let Some(view) = widgets::get_widget(root_handle) {
-                // Use autoresizing mask (the default) so the window
-                // automatically sizes the content view to fill its bounds.
-                // NOTE: we intentionally do NOT disable autoresizing here —
-                // setContentView already manages the frame for us.
                 apps[idx].window.setContentView(Some(&view));
+
+                // Pin the body view to the window's contentLayoutGuide using Auto Layout.
+                // contentLayoutGuide accounts for the title bar, so content starts below it.
+                unsafe {
+                    let _: () = objc2::msg_send![&*view, setTranslatesAutoresizingMaskIntoConstraints: false];
+                    let window = &apps[idx].window;
+                    let guide: Retained<AnyObject> = msg_send![window, contentLayoutGuide];
+                    let guide_top: Retained<AnyObject> = msg_send![&*guide, topAnchor];
+                    let guide_bottom: Retained<AnyObject> = msg_send![&*guide, bottomAnchor];
+                    let guide_leading: Retained<AnyObject> = msg_send![&*guide, leadingAnchor];
+                    let guide_trailing: Retained<AnyObject> = msg_send![&*guide, trailingAnchor];
+
+                    let top_anchor = view.topAnchor();
+                    let bottom_anchor = view.bottomAnchor();
+                    let leading_anchor = view.leadingAnchor();
+                    let trailing_anchor = view.trailingAnchor();
+
+                    let c_top: Retained<AnyObject> = msg_send![&*top_anchor, constraintEqualToAnchor: &*guide_top];
+                    let c_bottom: Retained<AnyObject> = msg_send![&*bottom_anchor, constraintEqualToAnchor: &*guide_bottom];
+                    let c_leading: Retained<AnyObject> = msg_send![&*leading_anchor, constraintEqualToAnchor: &*guide_leading];
+                    let c_trailing: Retained<AnyObject> = msg_send![&*trailing_anchor, constraintEqualToAnchor: &*guide_trailing];
+
+                    let _: () = msg_send![&*c_top, setActive: true];
+                    let _: () = msg_send![&*c_bottom, setActive: true];
+                    let _: () = msg_send![&*c_leading, setActive: true];
+                    let _: () = msg_send![&*c_trailing, setActive: true];
+                }
             }
         }
     });

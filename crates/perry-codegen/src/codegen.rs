@@ -11431,6 +11431,59 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_lazyvstack_update".to_string(), func_id);
         }
 
+        // perry_ui_table_create(row_count: f64, col_count: f64, render: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // row_count (JS number)
+            sig.params.push(AbiParam::new(types::F64)); // col_count (JS number)
+            sig.params.push(AbiParam::new(types::F64)); // render closure
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_table_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_table_create".to_string(), func_id);
+        }
+        // perry_ui_table_set_column_header(handle: i64, col: i64, title_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::I64)); // col
+            sig.params.push(AbiParam::new(types::I64)); // title_ptr (StringHeader*)
+            let func_id = self.module.declare_function("perry_ui_table_set_column_header", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_table_set_column_header".to_string(), func_id);
+        }
+        // perry_ui_table_set_column_width(handle: i64, col: i64, width: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::I64)); // col
+            sig.params.push(AbiParam::new(types::F64)); // width
+            let func_id = self.module.declare_function("perry_ui_table_set_column_width", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_table_set_column_width".to_string(), func_id);
+        }
+        // perry_ui_table_update_row_count(handle: i64, count: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::I64)); // count
+            let func_id = self.module.declare_function("perry_ui_table_update_row_count", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_table_update_row_count".to_string(), func_id);
+        }
+        // perry_ui_table_set_on_row_select(handle: i64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::F64)); // callback closure
+            let func_id = self.module.declare_function("perry_ui_table_set_on_row_select", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_table_set_on_row_select".to_string(), func_id);
+        }
+        // perry_ui_table_get_selected_row(handle: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_table_get_selected_row", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_table_get_selected_row".to_string(), func_id);
+        }
+
         // ============================================
         // Perry System APIs (perry/system module)
         // ============================================
@@ -34172,6 +34225,7 @@ fn compile_expr(
                 ("perry/ui", false, "Sheet") => "perry_ui_sheet_create",
                 ("perry/ui", false, "Toolbar") => "perry_ui_toolbar_create",
                 ("perry/ui", false, "LazyVStack") => "perry_ui_lazyvstack_create",
+                ("perry/ui", false, "Table") => "perry_ui_table_create",
                 // Widget instance methods
                 ("perry/ui", true, "setValue") => "perry_ui_progressview_set_value",
                 ("perry/ui", true, "setSize") => "perry_ui_image_set_size",
@@ -34198,6 +34252,11 @@ fn compile_expr(
                 ("perry/ui", true, "show") => "perry_ui_window_show",
                 ("perry/ui", true, "closeWindow") => "perry_ui_window_close",
                 ("perry/ui", true, "updateCount") => "perry_ui_lazyvstack_update",
+                ("perry/ui", true, "setColumnHeader") => "perry_ui_table_set_column_header",
+                ("perry/ui", true, "setColumnWidth") => "perry_ui_table_set_column_width",
+                ("perry/ui", true, "updateRowCount") => "perry_ui_table_update_row_count",
+                ("perry/ui", true, "setOnRowSelect") => "perry_ui_table_set_on_row_select",
+                ("perry/ui", true, "getSelectedRow") => "perry_ui_table_get_selected_row",
                 ("perry/ui", true, "bindTextField") => "perry_ui_state_bind_textfield",
 
                 // ========================================================================
@@ -35017,7 +35076,7 @@ fn compile_expr(
                                 call_args.push(ensure_f64(builder, arg_vals[0]));
                             }
                         }
-                        "value" | "pop" | "getSelected" => {
+                        "value" | "pop" | "getSelected" | "getSelectedRow" => {
                             // No additional args - just the handle
                         }
                         "onChange" | "setOnHover" | "setOnDoubleClick" | "setOnClick" => {
@@ -35114,6 +35173,37 @@ fn compile_expr(
                             // LazyVStack.updateCount(count) - i64
                             if !arg_vals.is_empty() {
                                 call_args.push(ensure_i64(builder, arg_vals[0]));
+                            }
+                        }
+                        "setColumnHeader" => {
+                            // Table.setColumnHeader(col, title) - col:i64, title:string ptr
+                            if arg_vals.len() >= 2 {
+                                call_args.push(ensure_i64(builder, arg_vals[0])); // col
+                                let str_f64 = ensure_f64(builder, arg_vals[1]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let str_call = builder.ins().call(get_str_ref, &[str_f64]);
+                                call_args.push(builder.inst_results(str_call)[0]);
+                            }
+                        }
+                        "setColumnWidth" => {
+                            // Table.setColumnWidth(col, width) - col:i64, width:f64
+                            if arg_vals.len() >= 2 {
+                                call_args.push(ensure_i64(builder, arg_vals[0])); // col
+                                call_args.push(ensure_f64(builder, arg_vals[1])); // width
+                            }
+                        }
+                        "updateRowCount" => {
+                            // Table.updateRowCount(count) - i64
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_i64(builder, arg_vals[0]));
+                            }
+                        }
+                        "setOnRowSelect" => {
+                            // Table.setOnRowSelect(callback) - f64 closure
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_f64(builder, arg_vals[0]));
                             }
                         }
                         "push" => {
@@ -35996,12 +36086,13 @@ fn compile_expr(
                         "setControlSize" | "setOnHover" | "setOnDoubleClick" | "setOnClick" |
                         "animateOpacity" | "animatePosition" | "onChange" | "setFontFamily" |
                         "present" | "dismiss" | "addToolbarItem" | "attachToolbar" |
-                        "setBody" | "show" | "closeWindow" | "updateCount" | "bindTextField" => {
+                        "setBody" | "show" | "closeWindow" | "updateCount" | "bindTextField" |
+                        "setColumnHeader" | "setColumnWidth" | "updateRowCount" | "setOnRowSelect" => {
                             const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                             Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
                         }
-                        // getSelected returns i64 - convert to f64
-                        "getSelected" => {
+                        // getSelected / getSelectedRow return i64 - convert to f64
+                        "getSelected" | "getSelectedRow" => {
                             Ok(builder.ins().fcvt_from_sint(types::F64, result))
                         }
                         // Widget constructors and State.create return i64 handles - NaN-box with POINTER_TAG

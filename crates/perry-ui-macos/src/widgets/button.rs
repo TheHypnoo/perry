@@ -1,5 +1,5 @@
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, Sel};
+use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass};
 use objc2_app_kit::{NSButton, NSView};
 use objc2_foundation::{NSObject, NSString, MainThreadMarker};
@@ -113,6 +113,45 @@ pub fn set_bordered(handle: i64, bordered: bool) {
         unsafe {
             let btn: &NSButton = &*(Retained::as_ptr(&view) as *const NSButton);
             btn.setBordered(bordered);
+        }
+    }
+}
+
+/// Set the text color of a button using NSAttributedString.
+pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let btn: &NSButton = &*(Retained::as_ptr(&view) as *const NSButton);
+
+            // Create NSColor
+            let color: Retained<AnyObject> = msg_send![
+                AnyClass::get(c"NSColor").unwrap(),
+                colorWithRed: r as objc2_core_foundation::CGFloat,
+                green: g as objc2_core_foundation::CGFloat,
+                blue: b as objc2_core_foundation::CGFloat,
+                alpha: a as objc2_core_foundation::CGFloat
+            ];
+
+            // Build attributes dictionary with NSForegroundColorAttributeName
+            let key = NSString::from_str("NSColor");
+            let attrs: Retained<AnyObject> = msg_send![
+                AnyClass::get(c"NSDictionary").unwrap(),
+                dictionaryWithObject: &*color,
+                forKey: &*key
+            ];
+
+            // Create attributed string with the button's current title
+            let title = btn.title();
+            let ns_title: *const AnyObject = Retained::as_ptr(&title) as *const AnyObject;
+            let cls = AnyClass::get(c"NSAttributedString").unwrap();
+            let alloc: *mut AnyObject = msg_send![cls, alloc];
+            let attr_str: *mut AnyObject = msg_send![
+                alloc,
+                initWithString: ns_title,
+                attributes: &*attrs
+            ];
+
+            let _: () = msg_send![btn, setAttributedTitle: attr_str];
         }
     }
 }

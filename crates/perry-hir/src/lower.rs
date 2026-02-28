@@ -368,9 +368,10 @@ impl LoweringContext {
     }
 
     fn lookup_native_instance(&self, name: &str) -> Option<(&str, &str)> {
-        self.native_instances.iter()
+        let result = self.native_instances.iter()
             .find(|(n, _, _)| n == name)
-            .map(|(_, module, class)| (module.as_str(), class.as_str()))
+            .map(|(_, module, class)| (module.as_str(), class.as_str()));
+        result
     }
 
     fn lookup_func_return_native_instance(&self, func_name: &str) -> Option<(&str, &str)> {
@@ -1124,7 +1125,7 @@ fn lower_module_decl(
                                             if module_name == "perry/ui" {
                                                 match method_name {
                                                     "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
-                                                    | "NavigationStack" | "Picker" => {
+                                                    | "NavigationStack" | "Picker" | "Table" => {
                                                         ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
                                                     }
                                                     _ => {}
@@ -2020,11 +2021,18 @@ fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) -> Result<Fun
         });
     }
 
-    // Register parameters with PluginApi type as native instances
+    // Register parameters with known native types as native instances
     for param in &params {
         if let Type::Named(type_name) = &param.ty {
-            if type_name == "PluginApi" {
-                ctx.register_native_instance(param.name.clone(), "perry/plugin".to_string(), "PluginApi".to_string());
+            let native_info = match type_name.as_str() {
+                "PluginApi" => Some(("perry/plugin", "PluginApi")),
+                "WebSocket" | "WebSocketServer" => Some(("ws", type_name.as_str())),
+                "Redis" => Some(("ioredis", "Redis")),
+                "EventEmitter" => Some(("events", "EventEmitter")),
+                _ => None,
+            };
+            if let Some((module, class)) = native_info {
+                ctx.register_native_instance(param.name.clone(), module.to_string(), class.to_string());
             }
         }
     }
@@ -4799,7 +4807,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                             if args.len() >= 1 {
                                                 // For now, fall through to generic Call handling
                                                 // We'll compile this in codegen using inline property access
-                                                eprintln!("[HIR-LOWER] Found property-based push: object.{}.push()", property_name);
+                                                // property-based push: object.{property}.push()
                                             }
                                         }
                                         _ => {}
@@ -6311,6 +6319,22 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                 // Track destructuring patterns to generate extraction statements
                 if is_destructuring_pattern(param) {
                     destructuring_params.push((param_id, param.clone()));
+                }
+            }
+
+            // Register arrow function parameters with known native types as native instances
+            for param in &params {
+                if let Type::Named(type_name) = &param.ty {
+                    let native_info = match type_name.as_str() {
+                        "PluginApi" => Some(("perry/plugin", "PluginApi")),
+                        "WebSocket" | "WebSocketServer" => Some(("ws", type_name.as_str())),
+                        "Redis" => Some(("ioredis", "Redis")),
+                        "EventEmitter" => Some(("events", "EventEmitter")),
+                        _ => None,
+                    };
+                    if let Some((module, class)) = native_info {
+                        ctx.register_native_instance(param.name.clone(), module.to_string(), class.to_string());
+                    }
                 }
             }
 
@@ -7967,7 +7991,7 @@ fn lower_var_decl_with_destructuring(
                                 if module_name == "perry/ui" {
                                     match method_name {
                                         "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
-                                        | "NavigationStack" | "Picker" => {
+                                        | "NavigationStack" | "Picker" | "Table" => {
                                             ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
                                         }
                                         _ => {}

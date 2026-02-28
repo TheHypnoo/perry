@@ -107,6 +107,12 @@ pub const FEATURES: &[Feature] = &[
     Feature { name: "perry_ui_zstack_create",        category: WidgetCreation, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
     Feature { name: "perry_ui_lazyvstack_create",    category: WidgetCreation, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
     Feature { name: "perry_ui_lazyvstack_update",    category: WidgetCreation, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_table_create",         category: WidgetCreation, macos: S, ios: U, android: U, gtk4: U, windows: U, web: S, web_name: None },
+    Feature { name: "perry_ui_table_set_column_header", category: WidgetCreation, macos: S, ios: U, android: U, gtk4: U, windows: U, web: S, web_name: None },
+    Feature { name: "perry_ui_table_set_column_width",  category: WidgetCreation, macos: S, ios: U, android: U, gtk4: U, windows: U, web: S, web_name: None },
+    Feature { name: "perry_ui_table_update_row_count",  category: WidgetCreation, macos: S, ios: U, android: U, gtk4: U, windows: U, web: S, web_name: None },
+    Feature { name: "perry_ui_table_set_on_row_select", category: WidgetCreation, macos: S, ios: U, android: U, gtk4: U, windows: U, web: S, web_name: None },
+    Feature { name: "perry_ui_table_get_selected_row",  category: WidgetCreation, macos: S, ios: U, android: U, gtk4: U, windows: U, web: S, web_name: None },
 
     // ── Child Management ─────────────────────────────────────────────────
     Feature { name: "perry_ui_widget_add_child",    category: ChildManagement, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },

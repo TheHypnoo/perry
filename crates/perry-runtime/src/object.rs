@@ -77,6 +77,28 @@ thread_local! {
 /// Global class registry mapping class_id -> parent_class_id for inheritance chain lookups
 static CLASS_REGISTRY: RwLock<Option<HashMap<u32, u32>>> = RwLock::new(None);
 
+// ============================================================================
+// Class method vtable registry — enables runtime dispatch for interface-typed
+// and dynamically-typed method calls.  Each class registers its methods and
+// getters at startup; js_native_call_method / js_dynamic_object_get_property
+// look up the vtable by the object's class_id when static dispatch isn't possible.
+// ============================================================================
+
+/// Entry in the class method vtable
+pub struct VTableMethodEntry {
+    pub func_ptr: usize,
+    pub param_count: u32,
+}
+
+/// Per-class vtable with methods and getters
+pub struct ClassVTable {
+    pub methods: HashMap<String, VTableMethodEntry>,
+    pub getters: HashMap<String, usize>, // getter func_ptr (signature: fn(i64) -> f64)
+}
+
+/// Global vtable registry: class_id -> vtable
+pub static CLASS_VTABLE_REGISTRY: RwLock<Option<HashMap<u32, ClassVTable>>> = RwLock::new(None);
+
 /// Function pointer type for dispatching method calls on handle-based objects.
 /// Handle-based objects use small integer IDs (1, 2, 3...) instead of real heap pointers.
 /// This is registered by perry-stdlib to dispatch to Fastify, ioredis, etc.
@@ -109,6 +131,129 @@ pub unsafe extern "C" fn js_register_handle_method_dispatch(f: HandleMethodDispa
 #[no_mangle]
 pub unsafe extern "C" fn js_register_handle_property_dispatch(f: HandlePropertyDispatchFn) {
     HANDLE_PROPERTY_DISPATCH = Some(f);
+}
+
+/// Register a class method in the vtable registry.
+/// Called at startup from the init function for every class method/getter.
+#[no_mangle]
+pub unsafe extern "C" fn js_register_class_method(
+    class_id: i64,
+    name_ptr: *const u8,
+    name_len: i64,
+    func_ptr: i64,
+    param_count: i64,
+) {
+    let name = if name_ptr.is_null() || name_len <= 0 {
+        return;
+    } else {
+        match std::str::from_utf8(std::slice::from_raw_parts(name_ptr, name_len as usize)) {
+            Ok(s) => s.to_string(),
+            Err(_) => return,
+        }
+    };
+    let mut registry = CLASS_VTABLE_REGISTRY.write().unwrap();
+    if registry.is_none() {
+        *registry = Some(HashMap::new());
+    }
+    let reg = registry.as_mut().unwrap();
+    let vtable = reg.entry(class_id as u32).or_insert_with(|| ClassVTable {
+        methods: HashMap::new(),
+        getters: HashMap::new(),
+    });
+    vtable.methods.insert(name, VTableMethodEntry {
+        func_ptr: func_ptr as usize,
+        param_count: param_count as u32,
+    });
+}
+
+/// Register a class getter in the vtable registry.
+#[no_mangle]
+pub unsafe extern "C" fn js_register_class_getter(
+    class_id: i64,
+    name_ptr: *const u8,
+    name_len: i64,
+    func_ptr: i64,
+) {
+    let name = if name_ptr.is_null() || name_len <= 0 {
+        return;
+    } else {
+        match std::str::from_utf8(std::slice::from_raw_parts(name_ptr, name_len as usize)) {
+            Ok(s) => s.to_string(),
+            Err(_) => return,
+        }
+    };
+    let mut registry = CLASS_VTABLE_REGISTRY.write().unwrap();
+    if registry.is_none() {
+        *registry = Some(HashMap::new());
+    }
+    let reg = registry.as_mut().unwrap();
+    let vtable = reg.entry(class_id as u32).or_insert_with(|| ClassVTable {
+        methods: HashMap::new(),
+        getters: HashMap::new(),
+    });
+    vtable.getters.insert(name, func_ptr as usize);
+}
+
+/// Call a vtable method with the correct arity.
+/// All method params are f64, `this` is i64.
+unsafe fn call_vtable_method(
+    func_ptr: usize,
+    this: i64,
+    args_ptr: *const f64,
+    args_len: usize,
+    param_count: u32,
+) -> f64 {
+    #[inline(always)]
+    unsafe fn arg_or_nan(args_ptr: *const f64, args_len: usize, idx: usize) -> f64 {
+        if idx < args_len { *args_ptr.add(idx) } else { f64::NAN }
+    }
+
+    match param_count {
+        0 => {
+            let f: extern "C" fn(i64) -> f64 = std::mem::transmute(func_ptr);
+            f(this)
+        }
+        1 => {
+            let f: extern "C" fn(i64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this, arg_or_nan(args_ptr, args_len, 0))
+        }
+        2 => {
+            let f: extern "C" fn(i64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1))
+        }
+        3 => {
+            let f: extern "C" fn(i64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2))
+        }
+        4 => {
+            let f: extern "C" fn(i64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3))
+        }
+        5 => {
+            let f: extern "C" fn(i64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4))
+        }
+        6 => {
+            let f: extern "C" fn(i64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5))
+        }
+        7 => {
+            let f: extern "C" fn(i64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5), arg_or_nan(args_ptr, args_len, 6))
+        }
+        8 => {
+            let f: extern "C" fn(i64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5), arg_or_nan(args_ptr, args_len, 6), arg_or_nan(args_ptr, args_len, 7))
+        }
+        9 => {
+            let f: extern "C" fn(i64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5), arg_or_nan(args_ptr, args_len, 6), arg_or_nan(args_ptr, args_len, 7), arg_or_nan(args_ptr, args_len, 8))
+        }
+        _ => {
+            let f: extern "C" fn(i64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5), arg_or_nan(args_ptr, args_len, 6), arg_or_nan(args_ptr, args_len, 7), arg_or_nan(args_ptr, args_len, 8), arg_or_nan(args_ptr, args_len, 9))
+        }
+    }
 }
 
 /// Register a class with its parent class ID in the global registry
@@ -1037,6 +1182,24 @@ pub unsafe extern "C" fn js_native_call_method(
                 }
             }
         }
+
+        // Vtable lookup: check if this class has a registered method in the vtable
+        let class_id = (*obj).class_id;
+        if class_id != 0 {
+            if let Ok(registry) = CLASS_VTABLE_REGISTRY.read() {
+                if let Some(ref reg) = *registry {
+                    if let Some(vtable) = reg.get(&class_id) {
+                        if let Some(entry) = vtable.methods.get(method_name) {
+                            let this_i64 = jsval.as_pointer::<u8>() as i64;
+                            return call_vtable_method(
+                                entry.func_ptr, this_i64,
+                                args_ptr, args_len, entry.param_count,
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Method not found — return a safe "null object" pointer instead of undefined.
@@ -1099,6 +1262,8 @@ unsafe fn dispatch_native_module_method(
         ("fs", "appendFileSync") => bool_to_f64(crate::fs::js_fs_append_file_sync(arg(0), arg(1))),
         ("fs", "mkdirSync") => bool_to_f64(crate::fs::js_fs_mkdir_sync(arg(0))),
         ("fs", "unlinkSync") => bool_to_f64(crate::fs::js_fs_unlink_sync(arg(0))),
+        ("fs", "readdirSync") => crate::fs::js_fs_readdir_sync(arg(0)),
+        ("fs", "isDirectory") => bool_to_f64(crate::fs::js_fs_is_directory(arg(0))),
 
         // ── os module (no args, return string or f64) ──
         ("os", "tmpdir") => str_to_f64(crate::os::js_os_tmpdir()),

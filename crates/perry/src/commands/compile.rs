@@ -85,6 +85,8 @@ pub struct CompilationContext {
     pub project_root: PathBuf,
     /// External native libraries discovered from package dependencies
     pub native_libraries: Vec<NativeLibraryManifest>,
+    /// Package aliases: maps npm package name → replacement package name (from perry.packageAliases)
+    pub package_aliases: HashMap<String, String>,
 }
 
 impl CompilationContext {
@@ -99,6 +101,7 @@ impl CompilationContext {
             needs_stdlib: false,
             project_root,
             native_libraries: Vec::new(),
+            package_aliases: HashMap::new(),
         }
     }
 }
@@ -928,6 +931,12 @@ fn collect_modules(
 
     // Process imports and update their resolved paths and module kinds
     for import in &mut hir_module.imports {
+        // Apply package alias (e.g., @parse/node-apn → perry-push from perry.packageAliases)
+        if let Some(alias) = ctx.package_aliases.get(import.source.as_str()).cloned() {
+            import.source = alias;
+            import.is_native = perry_hir::is_native_module(&import.source);
+        }
+
         if import.is_native {
             import.module_kind = ModuleKind::NativeRust;
             if import.source == "perry/ui" {
@@ -948,11 +957,13 @@ fn collect_modules(
 
             match kind {
                 ModuleKind::NativeCompiled => {
-                    // Check if this is from a node_modules package with perry.nativeLibrary
-                    if resolved_path.to_string_lossy().contains("node_modules") {
-                        let module_name = &import.source;
+                    // Collect native library manifest (FFI functions, build config)
+                    // Only for package imports (not relative imports within the same package)
+                    let module_name = &import.source;
+                    if !module_name.starts_with('.') && !module_name.starts_with('/') {
                         if !ctx.native_libraries.iter().any(|nl| nl.module == *module_name) {
-                            // Walk up to find the package directory
+                            // Walk up to find the package directory with perry.nativeLibrary
+                            // Works for both node_modules packages and symlinked local packages
                             let mut pkg_dir = resolved_path.parent();
                             while let Some(dir) = pkg_dir {
                                 if dir.join("package.json").exists() && has_perry_native_library(dir) {
@@ -963,9 +974,6 @@ fn collect_modules(
                                         }
                                         ctx.native_libraries.push(manifest);
                                     }
-                                    break;
-                                }
-                                if dir.file_name().map(|n| n == "node_modules").unwrap_or(false) {
                                     break;
                                 }
                                 pkg_dir = dir.parent();
@@ -1206,7 +1214,45 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from("."));
 
-    let mut ctx = CompilationContext::new(project_root);
+    let mut ctx = CompilationContext::new(project_root.clone());
+
+    // Read perry.packageAliases from the project's package.json (if present)
+    // This allows mapping npm package imports to native Perry packages at compile time.
+    // Example: { "@parse/node-apn": "perry-push", "@prisma/client": "perry-prisma" }
+    // Walk up from project_root (which is the parent of the entry file) to find package.json.
+    let pkg_json_path = {
+        let mut dir = project_root.clone();
+        let mut found = None;
+        loop {
+            let candidate = dir.join("package.json");
+            if candidate.exists() {
+                found = Some(candidate);
+                break;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        found
+    };
+    if let Some(pkg_json_path) = pkg_json_path {
+        if let Ok(content) = fs::read_to_string(&pkg_json_path) {
+            if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(aliases) = pkg.get("perry").and_then(|p| p.get("packageAliases")).and_then(|a| a.as_object()) {
+                    for (from, to) in aliases {
+                        if let Some(to_str) = to.as_str() {
+                            match format {
+                                OutputFormat::Text => println!("  Package alias: {} → {}", from, to_str),
+                                OutputFormat::Json => {}
+                            }
+                            ctx.package_aliases.insert(from.clone(), to_str.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let mut visited = HashSet::new();
     let mut next_class_id: perry_hir::ClassId = 1; // Start at 1, 0 is reserved for "no parent"
     let skip_transforms = args.target.as_deref() == Some("web");
@@ -2430,27 +2476,32 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         cmd.arg(obj_path);
     }
 
-    // Dead code stripping — remove unused functions from the linked binary
+    // Dead code stripping — safe because compile_init() emits func_addr
+    // calls for every class method/getter during vtable registration. These
+    // serve as linker roots that keep dynamically-dispatched methods alive.
     if !is_windows {
         if is_android || is_linux {
-            // ELF targets
             cmd.arg("-Wl,--gc-sections");
         } else {
-            // macOS / iOS (Mach-O targets)
             cmd.arg("-Wl,-dead_strip");
         }
     }
 
-    // Link libraries - avoid duplicates by linking only one library with runtime symbols.
-    // jsruntime now includes stdlib, which includes runtime.
-    // So we only need to link ONE of: jsruntime, stdlib, or runtime.
+    // Link libraries - jsruntime bundles V8 + stdlib; runtime provides base FFI symbols.
+    // Note: libperry_jsruntime.a omits some runtime symbols (js_register_class_method,
+    // js_register_class_getter, etc.) due to Rust DCE on rlib dependencies. We always
+    // link libperry_runtime.a as a fallback to fill these gaps. On macOS/Linux/ELF the
+    // linker uses first-definition-wins for archives, so no duplicate symbol errors arise.
     // When UI lib is also linked, it bundles its own copy of perry-runtime.
-    // For Android (ELF) and Windows (MSVC), the linker errors on duplicate symbols,
-    // so skip the standalone runtime when the UI library will provide it.
+    // For Android (ELF) and Windows (MSVC), skip the extra runtime when UI provides it.
     let skip_runtime = (is_android || is_windows) && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
     if !skip_runtime {
         if let Some(ref jsruntime) = jsruntime_lib {
             cmd.arg(jsruntime);
+            // Also link runtime to supply symbols DCE'd from jsruntime (e.g. js_register_class_method)
+            if !is_android && !is_windows {
+                cmd.arg(&runtime_lib);
+            }
         } else if ctx.needs_stdlib {
             if let Some(ref stdlib) = stdlib_lib {
                 cmd.arg(stdlib);

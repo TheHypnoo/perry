@@ -169,7 +169,8 @@ pub extern "C" fn js_stdlib_process_pending() -> i32 {
         extern "C" {
             fn js_ws_process_pending() -> i32;
         }
-        count += unsafe { js_ws_process_pending() };
+        let ws_count = unsafe { js_ws_process_pending() };
+        count += ws_count;
     }
 
     // Process pending worker_threads messages (stdin reader)

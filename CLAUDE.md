@@ -135,6 +135,15 @@ Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI funct
 
 ## Recent Changes
 
+### v0.2.163
+- Table widget: NSTableView-backed `Table(rowCount, colCount, renderFn)` with column headers, widths, row selection
+- `setColumnHeader(col, title)`, `setColumnWidth(col, width)`, `updateRowCount(count)`, `setOnRowSelect(cb)`, `getSelectedRow()` instance methods
+- macOS: full NSTableView + NSScrollView implementation with delegate (numberOfRows, viewForColumn, selectionDidChange)
+- Web: DOM `<table>` implementation with header cells, click-to-select, same API
+- iOS/Android/GTK4/Windows: stubs returning 0/-1 (pending native implementation)
+- HIR: "Table" registered as native instance type; codegen: 6 extern declarations + dispatch + arg handling
+- Fix pre-existing duplicate `perry_ui_widget_clear_children` / `perry_ui_widget_add_child_at` in perry-ui-windows
+
 ### v0.2.162
 - Web platform full feature parity: 60 new JS functions (67→127/127, 100%), all 6 platforms now fully covered
 - Web: app lifecycle (timer, activate/terminate), multi-window (floating divs), state wrappers, lazy VStack, sheets, toolbar, context menus

@@ -20,11 +20,13 @@ pub mod alert;
 pub mod sheet;
 pub mod toolbar;
 pub mod lazyvstack;
+pub mod table;
 
 use objc2::rc::Retained;
-use objc2::runtime::AnyClass;
+use objc2::runtime::{AnyClass, AnyObject, Sel};
+use objc2::{define_class, msg_send, AnyThread, DefinedClass};
 use objc2_app_kit::{NSView, NSStackView};
-use objc2_foundation::NSObjectProtocol;
+use objc2_foundation::{NSObject, NSObjectProtocol};
 use std::cell::RefCell;
 
 thread_local! {
@@ -39,6 +41,22 @@ pub fn register_widget(view: Retained<NSView>) -> i64 {
         widgets.push(view);
         widgets.len() as i64
     })
+}
+
+/// Register an external NSView (e.g. from a native library) into the widget system.
+/// The raw pointer is retained and assigned a handle usable with widgetAddChild etc.
+pub fn register_external_nsview(nsview_ptr: i64) -> i64 {
+    if nsview_ptr == 0 {
+        eprintln!("register_external_nsview: null pointer passed, returning 0");
+        return 0;
+    }
+    match unsafe { Retained::retain(nsview_ptr as *mut NSView) } {
+        Some(nsview) => register_widget(nsview),
+        None => {
+            eprintln!("register_external_nsview: failed to retain NSView at {:#x}", nsview_ptr);
+            0
+        }
+    }
 }
 
 /// Retrieve the NSView for a given handle.
@@ -123,7 +141,6 @@ pub fn add_child(parent_handle: i64, child_handle: i64) {
 // Widget Styling (Background, Gradient, Corner Radius)
 // =============================================================================
 
-use objc2::runtime::AnyObject;
 use std::ffi::c_void;
 
 type CGFloat = f64;
@@ -249,11 +266,38 @@ pub fn set_corner_radius(handle: i64, radius: f64) {
     }
 }
 
+/// Set a fixed width constraint on a widget.
+pub fn set_width(handle: i64, width: f64) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            let width_anchor: Retained<AnyObject> = msg_send![&*view, widthAnchor];
+            let constraint: Retained<AnyObject> = msg_send![
+                &*width_anchor, constraintEqualToConstant: width
+            ];
+            let _: () = msg_send![&*constraint, setActive: true];
+        }
+    }
+}
+
+/// Set the content hugging priority for horizontal orientation.
+/// Low values (1-250) mean the view is willing to stretch.
+/// High values (750-1000) mean the view resists stretching.
+pub fn set_hugging_priority(handle: i64, priority: f64) {
+    if let Some(view) = get_widget(handle) {
+        use objc2_app_kit::NSLayoutConstraintOrientation;
+        view.setContentHuggingPriority_forOrientation(
+            priority as f32, NSLayoutConstraintOrientation::Horizontal);
+        view.setContentHuggingPriority_forOrientation(
+            priority as f32, NSLayoutConstraintOrientation::Vertical);
+    }
+}
+
 // =============================================================================
 // Cross-cutting: Enabled, Hover, DoubleClick, Animations, Tooltip, ControlSize
 // =============================================================================
 
 extern "C" {
+    fn js_closure_call0(closure: *const u8) -> f64;
     fn js_closure_call1(closure: *const u8, arg: f64) -> f64;
     fn js_nanbox_get_pointer(value: f64) -> i64;
 }
@@ -331,6 +375,7 @@ use std::collections::HashMap;
 thread_local! {
     static HOVER_CALLBACKS: RefCell<HashMap<i64, f64>> = RefCell::new(HashMap::new());
     static DOUBLE_CLICK_CALLBACKS: RefCell<HashMap<i64, f64>> = RefCell::new(HashMap::new());
+    static CLICK_CALLBACKS: RefCell<HashMap<usize, f64>> = RefCell::new(HashMap::new());
 }
 
 /// Set an on-hover callback for a widget (mouse enter/exit).
@@ -367,6 +412,77 @@ pub fn set_on_double_click(handle: i64, callback: f64) {
             let recognizer: *mut AnyObject = objc2::msg_send![recognizer, init];
             let _: () = objc2::msg_send![recognizer, setNumberOfClicksRequired: 2i64];
             let _: () = objc2::msg_send![&*view, addGestureRecognizer: recognizer];
+        }
+    }
+}
+
+// =============================================================================
+// Single-click handler for any widget
+// =============================================================================
+
+/// Internal state for click gesture target
+pub struct PerryClickTargetIvars {
+    callback_key: std::cell::Cell<usize>,
+}
+
+objc2::define_class!(
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[name = "PerryClickTarget"]
+    #[ivars = PerryClickTargetIvars]
+    pub struct PerryClickTarget;
+
+    impl PerryClickTarget {
+        #[unsafe(method(handleClick:))]
+        fn handle_click(&self, _sender: &AnyObject) {
+            let key = self.ivars().callback_key.get();
+            let closure_f64 = CLICK_CALLBACKS.with(|cbs| {
+                cbs.borrow().get(&key).copied()
+            });
+            if let Some(closure_f64) = closure_f64 {
+                let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                unsafe {
+                    js_closure_call0(closure_ptr as *const u8);
+                }
+            }
+        }
+    }
+);
+
+impl PerryClickTarget {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryClickTargetIvars {
+            callback_key: std::cell::Cell::new(0),
+        });
+        unsafe { objc2::msg_send![super(this), init] }
+    }
+}
+
+/// Set a single-click handler for any widget.
+pub fn set_on_click(handle: i64, callback: f64) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            // Create target object for the gesture recognizer
+            let target = PerryClickTarget::new();
+            let target_addr = Retained::as_ptr(&target) as usize;
+            target.ivars().callback_key.set(target_addr);
+
+            // Store callback keyed by target address
+            CLICK_CALLBACKS.with(|cbs| {
+                cbs.borrow_mut().insert(target_addr, callback);
+            });
+
+            // Create NSClickGestureRecognizer with target-action
+            let sel = objc2::runtime::Sel::register(c"handleClick:");
+            let gr_cls = AnyClass::get(c"NSClickGestureRecognizer").unwrap();
+            let recognizer: *mut AnyObject = objc2::msg_send![gr_cls, alloc];
+            let recognizer: *mut AnyObject = objc2::msg_send![
+                recognizer, initWithTarget: &*target, action: sel
+            ];
+            let _: () = objc2::msg_send![recognizer, setNumberOfClicksRequired: 1i64];
+            let _: () = objc2::msg_send![&*view, addGestureRecognizer: recognizer];
+
+            // Leak target to keep it alive
+            std::mem::forget(target);
         }
     }
 }

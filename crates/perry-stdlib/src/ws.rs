@@ -3,7 +3,7 @@
 //! Native implementation of the 'ws' npm package using tokio-tungstenite.
 //! Provides WebSocket client and server functionality.
 
-use perry_runtime::{js_string_from_bytes, JSValue, StringHeader, ClosureHeader, js_closure_call0, js_closure_call1};
+use perry_runtime::{js_string_from_bytes, JSValue, StringHeader, ClosureHeader, js_closure_call0, js_closure_call1, js_closure_call2};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -21,6 +21,8 @@ lazy_static::lazy_static! {
     static ref WS_CLIENT_LISTENERS: Mutex<HashMap<usize, WsClientListeners>> = Mutex::new(HashMap::new());
     /// Pending WebSocket events to be processed on the main thread
     static ref WS_PENDING_EVENTS: Mutex<Vec<PendingWsEvent>> = Mutex::new(Vec::new());
+    /// Map from client ws_id to parent server handle (for server-connected clients)
+    static ref WS_CLIENT_PARENT_SERVER: Mutex<HashMap<usize, Handle>> = Mutex::new(HashMap::new());
 }
 
 struct WsConnection {
@@ -367,7 +369,10 @@ pub unsafe extern "C" fn js_ws_on(
 ) -> i64 {
     let event_name = match string_from_header(event_name_ptr) {
         Some(name) => name,
-        None => return handle,
+        None => {
+            eprintln!("[ws_on] Failed to extract event name from handle={}", handle);
+            return handle;
+        }
     };
 
     if callback_ptr == 0 {
@@ -443,7 +448,6 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
         client_ids: Vec::new(),
         shutdown_tx: Some(shutdown_tx),
     });
-
     // Spawn the accept loop
     let handle_id = server_handle;
     spawn(async move {
@@ -497,10 +501,11 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
                                         listeners: HashMap::new(),
                                     });
 
-                                    // Track client on server
+                                    // Track client on server and record parent relationship
                                     if let Some(server) = get_handle_mut::<WsServerHandle>(handle_id) {
                                         server.client_ids.push(ws_id);
                                     }
+                                    WS_CLIENT_PARENT_SERVER.lock().unwrap().insert(ws_id, handle_id);
 
                                     // Queue 'connection' event
                                     WS_PENDING_EVENTS.lock().unwrap().push(
@@ -529,43 +534,22 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
                                     });
 
                                     // Spawn incoming message handler
+                                    // For server-connected clients, always queue as events
+                                    // (server-level 'message' listener handles dispatch)
                                     let ws_id_recv = ws_id;
                                     tokio::spawn(async move {
                                         while let Some(msg_result) = read.next().await {
                                             match msg_result {
                                                 Ok(Message::Text(text)) => {
-                                                    let has_listeners = WS_CLIENT_LISTENERS.lock().unwrap()
-                                                        .get(&ws_id_recv)
-                                                        .map(|l| l.listeners.get("message").map(|v| !v.is_empty()).unwrap_or(false))
-                                                        .unwrap_or(false);
-
-                                                    if has_listeners {
-                                                        WS_PENDING_EVENTS.lock().unwrap().push(
-                                                            PendingWsEvent::Message(ws_id_recv, text)
-                                                        );
-                                                    } else {
-                                                        if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
-                                                            conn.messages.push(text);
-                                                        }
-                                                    }
+                                                    WS_PENDING_EVENTS.lock().unwrap().push(
+                                                        PendingWsEvent::Message(ws_id_recv, text)
+                                                    );
                                                 }
                                                 Ok(Message::Binary(data)) => {
-                                                    // Convert binary to string representation for now
                                                     let text = String::from_utf8_lossy(&data).to_string();
-                                                    let has_listeners = WS_CLIENT_LISTENERS.lock().unwrap()
-                                                        .get(&ws_id_recv)
-                                                        .map(|l| l.listeners.get("message").map(|v| !v.is_empty()).unwrap_or(false))
-                                                        .unwrap_or(false);
-
-                                                    if has_listeners {
-                                                        WS_PENDING_EVENTS.lock().unwrap().push(
-                                                            PendingWsEvent::Message(ws_id_recv, text)
-                                                        );
-                                                    } else {
-                                                        if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
-                                                            conn.messages.push(text);
-                                                        }
-                                                    }
+                                                    WS_PENDING_EVENTS.lock().unwrap().push(
+                                                        PendingWsEvent::Message(ws_id_recv, text)
+                                                    );
                                                 }
                                                 Ok(Message::Close(frame)) => {
                                                     let (code, reason) = frame
@@ -665,10 +649,8 @@ pub unsafe extern "C" fn js_ws_process_pending() -> i32 {
                     .and_then(|s| s.listeners.get("connection").cloned())
                     .unwrap_or_default();
 
-                // NaN-box the client handle with POINTER_TAG so it's recognized as an object
-                let client_handle_f64 = f64::from_bits(
-                    0x7FFD_0000_0000_0000u64 | (client_ws_id as u64 & 0x0000_FFFF_FFFF_FFFF)
-                );
+                // Pass ws_id as a regular f64 number (not NaN-boxed) so === comparison works
+                let client_handle_f64 = client_ws_id as f64;
 
                 for cb in listeners {
                     if cb != 0 {
@@ -692,10 +674,28 @@ pub unsafe extern "C" fn js_ws_process_pending() -> i32 {
                     0x7FFF_0000_0000_0000u64 | (msg_str as u64 & 0x0000_FFFF_FFFF_FFFF)
                 );
 
-                for cb in listeners {
-                    if cb != 0 {
-                        let closure = cb as *const ClosureHeader;
-                        js_closure_call1(closure, msg_f64);
+                if !listeners.is_empty() {
+                    for cb in listeners {
+                        if cb != 0 {
+                            let closure = cb as *const ClosureHeader;
+                            js_closure_call1(closure, msg_f64);
+                        }
+                    }
+                } else {
+                    // Fall through to parent server's 'message' listeners (ws, data)
+                    let parent = WS_CLIENT_PARENT_SERVER.lock().unwrap().get(&ws_id).copied();
+                    if let Some(server_handle) = parent {
+                        let server_listeners: Vec<i64> = get_handle_mut::<WsServerHandle>(server_handle)
+                            .and_then(|s| s.listeners.get("message").cloned())
+                            .unwrap_or_default();
+                        // Pass ws_id as regular f64 number (not NaN-boxed) so === comparison works
+                        let client_handle_f64 = ws_id as f64;
+                        for cb in server_listeners {
+                            if cb != 0 {
+                                let closure = cb as *const ClosureHeader;
+                                js_closure_call2(closure, client_handle_f64, msg_f64);
+                            }
+                        }
                     }
                 }
             }
@@ -707,12 +707,32 @@ pub unsafe extern "C" fn js_ws_process_pending() -> i32 {
                         .unwrap_or_default()
                 };
 
-                for cb in listeners {
-                    if cb != 0 {
-                        let closure = cb as *const ClosureHeader;
-                        js_closure_call0(closure);
+                if !listeners.is_empty() {
+                    for cb in listeners {
+                        if cb != 0 {
+                            let closure = cb as *const ClosureHeader;
+                            js_closure_call0(closure);
+                        }
+                    }
+                } else {
+                    // Fall through to parent server's 'close' listeners (ws)
+                    let parent = WS_CLIENT_PARENT_SERVER.lock().unwrap().get(&ws_id).copied();
+                    if let Some(server_handle) = parent {
+                        let server_listeners: Vec<i64> = get_handle_mut::<WsServerHandle>(server_handle)
+                            .and_then(|s| s.listeners.get("close").cloned())
+                            .unwrap_or_default();
+                        let client_handle_f64 = ws_id as f64;
+                        for cb in server_listeners {
+                            if cb != 0 {
+                                let closure = cb as *const ClosureHeader;
+                                js_closure_call1(closure, client_handle_f64);
+                            }
+                        }
                     }
                 }
+
+                // Clean up parent mapping
+                WS_CLIENT_PARENT_SERVER.lock().unwrap().remove(&ws_id);
             }
             PendingWsEvent::Error(ws_id, error_msg) => {
                 let listeners: Vec<i64> = {
@@ -727,10 +747,27 @@ pub unsafe extern "C" fn js_ws_process_pending() -> i32 {
                     0x7FFF_0000_0000_0000u64 | (err_str as u64 & 0x0000_FFFF_FFFF_FFFF)
                 );
 
-                for cb in listeners {
-                    if cb != 0 {
-                        let closure = cb as *const ClosureHeader;
-                        js_closure_call1(closure, err_f64);
+                if !listeners.is_empty() {
+                    for cb in listeners {
+                        if cb != 0 {
+                            let closure = cb as *const ClosureHeader;
+                            js_closure_call1(closure, err_f64);
+                        }
+                    }
+                } else {
+                    // Fall through to parent server's 'error' listeners (ws, error)
+                    let parent = WS_CLIENT_PARENT_SERVER.lock().unwrap().get(&ws_id).copied();
+                    if let Some(server_handle) = parent {
+                        let server_listeners: Vec<i64> = get_handle_mut::<WsServerHandle>(server_handle)
+                            .and_then(|s| s.listeners.get("client_error").cloned())
+                            .unwrap_or_default();
+                        let client_handle_f64 = ws_id as f64;
+                        for cb in server_listeners {
+                            if cb != 0 {
+                                let closure = cb as *const ClosureHeader;
+                                js_closure_call2(closure, client_handle_f64, err_f64);
+                            }
+                        }
                     }
                 }
             }

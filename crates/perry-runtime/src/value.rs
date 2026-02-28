@@ -360,7 +360,13 @@ pub extern "C" fn js_nanbox_pointer(ptr: i64) -> f64 {
 #[no_mangle]
 pub extern "C" fn js_nanbox_string(ptr: i64) -> f64 {
     let jsval = JSValue::string_ptr(ptr as *mut crate::string::StringHeader);
-    f64::from_bits(jsval.bits())
+    let result = f64::from_bits(jsval.bits());
+    // Debug: trace string NaN-boxing
+    if ptr > 0x1000 && (ptr as u64) < 0x10000000000 {
+        // Only log for realistic heap pointers (not constants)
+        eprintln!("[nanbox_string] ptr={:#x} bits={:#018x} f64_bits={:#018x}", ptr, jsval.bits(), result.to_bits());
+    }
+    result
 }
 
 /// Create a NaN-boxed BigInt pointer value from an i64 raw pointer.
@@ -987,6 +993,22 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
             _ => {
                 // Error objects don't have other properties
                 return f64::from_bits(TAG_UNDEFINED);
+            }
+        }
+    }
+
+    // Check vtable for a registered getter before falling back to field lookup
+    let class_id = (*obj_header).class_id;
+    if class_id != 0 {
+        if let Ok(registry) = crate::object::CLASS_VTABLE_REGISTRY.read() {
+            if let Some(ref reg) = *registry {
+                if let Some(vtable) = reg.get(&class_id) {
+                    if let Some(&getter_ptr) = vtable.getters.get(property_name) {
+                        let this_i64 = ptr as i64;
+                        let f: extern "C" fn(i64) -> f64 = std::mem::transmute(getter_ptr);
+                        return f(this_i64);
+                    }
+                }
             }
         }
     }
