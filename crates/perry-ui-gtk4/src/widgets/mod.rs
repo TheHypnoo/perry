@@ -158,7 +158,6 @@ pub fn set_tooltip(handle: i64, text_ptr: *const u8) {
 /// Set control size via CSS classes (perry-small, perry-mini, perry-large).
 pub fn set_control_size(handle: i64, size: i64) {
     if let Some(widget) = get_widget(handle) {
-        // Remove existing size classes
         widget.remove_css_class("perry-small");
         widget.remove_css_class("perry-mini");
         widget.remove_css_class("perry-large");
@@ -239,7 +238,7 @@ pub fn set_on_double_click(handle: i64, callback: f64) {
     }
     if let Some(widget) = get_widget(handle) {
         let gesture = gtk4::GestureClick::new();
-        gesture.set_button(1); // Left button
+        gesture.set_button(1);
         let cb = callback;
         gesture.connect_pressed(move |_gesture, n_press, _x, _y| {
             if n_press == 2 {

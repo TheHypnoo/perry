@@ -11565,6 +11565,14 @@ impl Compiler {
             self.extern_funcs.insert("perry_system_notification_send".to_string(), func_id);
         }
 
+        // perry_system_request_location(callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_system_request_location", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_request_location".to_string(), func_id);
+        }
+
         // ============================================
         // Perry Plugin System FFI functions
         // ============================================
