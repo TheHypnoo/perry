@@ -360,6 +360,25 @@ fn has_perry_native_library(package_dir: &Path) -> bool {
     false
 }
 
+/// Check if a package directory has `perry.nativeModule: true` in its package.json.
+///
+/// Packages that set this flag contain Perry-compatible TypeScript source code
+/// and should be compiled natively (NativeCompiled) rather than interpreted via V8.
+/// This is the mechanism used by `perry-react`, `perry-react-dom`, and similar
+/// first-party TypeScript packages that rely on `perry/ui` or other native modules.
+fn has_perry_native_module(package_dir: &Path) -> bool {
+    let package_json = package_dir.join("package.json");
+    if let Ok(content) = fs::read_to_string(&package_json) {
+        if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
+            return pkg.get("perry")
+                .and_then(|p| p.get("nativeModule"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        }
+    }
+    false
+}
+
 /// Parse a native library manifest from a package's package.json
 fn parse_native_library_manifest(
     package_dir: &Path,
@@ -739,8 +758,13 @@ fn resolve_import(
             let package_dir = node_modules.join(&package_name);
             if package_dir.is_dir() {
                 if let Some(entry) = resolve_package_entry(&package_dir, subpath.as_deref()) {
-                    // Packages with perry.nativeLibrary are compiled natively
+                    // Packages with perry.nativeLibrary are compiled natively (Rust FFI)
                     if has_perry_native_library(&package_dir) {
+                        return Some((entry.canonicalize().ok()?, ModuleKind::NativeCompiled));
+                    }
+                    // Packages with perry.nativeModule: true contain Perry-compatible
+                    // TypeScript that must be compiled natively (e.g. perry-react).
+                    if has_perry_native_module(&package_dir) {
                         return Some((entry.canonicalize().ok()?, ModuleKind::NativeCompiled));
                     }
                     // For other node_modules packages, treat as Interpreted

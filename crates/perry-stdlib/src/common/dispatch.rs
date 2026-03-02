@@ -24,7 +24,6 @@ pub unsafe extern "C" fn js_handle_method_dispatch(
         std::str::from_utf8(std::slice::from_raw_parts(method_name_ptr, method_name_len))
             .unwrap_or("")
     };
-
     let args: &[f64] = if args_len > 0 && !args_ptr.is_null() {
         std::slice::from_raw_parts(args_ptr, args_len)
     } else {
@@ -163,19 +162,18 @@ unsafe fn dispatch_fastify_context(handle: i64, method: &str, args: &[f64]) -> f
             f64::from_bits(JSValue::string_ptr(ptr).bits())
         }
         "body" => {
-            let ptr = crate::fastify::js_fastify_req_body(handle);
-            f64::from_bits(JSValue::string_ptr(ptr).bits())
+            crate::fastify::js_fastify_req_json(handle)
         }
         "json" => {
             crate::fastify::js_fastify_req_json(handle)
         }
         "params" => {
-            let ptr = crate::fastify::js_fastify_req_params(handle);
-            f64::from_bits(JSValue::string_ptr(ptr).bits())
+            crate::fastify::js_fastify_req_params_object(handle)
         }
         "headers" => {
-            let ptr = crate::fastify::js_fastify_req_headers(handle);
-            f64::from_bits(JSValue::string_ptr(ptr).bits())
+            // Returns NaN-boxed JS object (parsed from JSON), use bits directly
+            let bits = crate::fastify::js_fastify_req_headers(handle);
+            f64::from_bits(bits as u64)
         }
         _ => {
             // Unknown method - return undefined
@@ -209,28 +207,15 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
                 crate::fastify::js_fastify_req_query_object(handle)
             }
             "params" => {
-                let ptr = crate::fastify::js_fastify_req_params(handle);
-                if ptr.is_null() {
-                    f64::from_bits(0x7FFC_0000_0000_0001)
-                } else {
-                    f64::from_bits(JSValue::string_ptr(ptr).bits())
-                }
+                crate::fastify::js_fastify_req_params_object(handle)
             }
             "body" => {
-                let ptr = crate::fastify::js_fastify_req_body(handle);
-                if ptr.is_null() {
-                    f64::from_bits(0x7FFC_0000_0000_0001)
-                } else {
-                    f64::from_bits(JSValue::string_ptr(ptr).bits())
-                }
+                crate::fastify::js_fastify_req_json(handle)
             }
             "headers" => {
-                let ptr = crate::fastify::js_fastify_req_headers(handle);
-                if ptr.is_null() {
-                    f64::from_bits(0x7FFC_0000_0000_0001)
-                } else {
-                    f64::from_bits(JSValue::string_ptr(ptr).bits())
-                }
+                // Returns NaN-boxed JS object (parsed from JSON), use bits directly
+                let bits = crate::fastify::js_fastify_req_headers(handle);
+                f64::from_bits(bits as u64)
             }
             "method" => {
                 let ptr = crate::fastify::js_fastify_req_method(handle);
@@ -247,6 +232,10 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
                 } else {
                     f64::from_bits(JSValue::string_ptr(ptr).bits())
                 }
+            }
+            "user" => {
+                // Return user data set by auth middleware
+                crate::fastify::js_fastify_req_get_user_data(handle)
             }
             _ => f64::from_bits(0x7FFC_0000_0000_0001), // undefined
         };
@@ -333,8 +322,34 @@ unsafe fn dispatch_ioredis(handle: i64, method: &str, args: &[f64]) -> f64 {
             f64::from_bits(0x7FFC_0000_0000_0001) // undefined
         }
         _ => {
-            eprintln!("[dispatch_ioredis] unknown method: {}", method);
             f64::from_bits(0x7FFC_0000_0000_0001) // undefined
+        }
+    }
+}
+
+/// Dispatch property set on a handle-based object.
+/// Called from perry-runtime's js_object_set_field_by_name when it detects a handle.
+#[no_mangle]
+pub unsafe extern "C" fn js_handle_property_set_dispatch(
+    handle: i64,
+    property_name_ptr: *const u8,
+    property_name_len: usize,
+    value: f64,
+) {
+    let property_name = if property_name_ptr.is_null() || property_name_len == 0 {
+        ""
+    } else {
+        std::str::from_utf8(std::slice::from_raw_parts(property_name_ptr, property_name_len))
+            .unwrap_or("")
+    };
+
+    // Try Fastify context dispatch (request/reply properties)
+    if with_handle::<crate::fastify::FastifyContext, bool, _>(handle, |_| true).unwrap_or(false) {
+        match property_name {
+            "user" => {
+                crate::fastify::js_fastify_req_set_user_data(handle, value);
+            }
+            _ => {}
         }
     }
 }
@@ -351,7 +366,11 @@ pub unsafe extern "C" fn js_stdlib_init_dispatch() {
         fn js_register_handle_property_dispatch(
             f: unsafe extern "C" fn(i64, *const u8, usize) -> f64,
         );
+        fn js_register_handle_property_set_dispatch(
+            f: unsafe extern "C" fn(i64, *const u8, usize, f64),
+        );
     }
     js_register_handle_method_dispatch(js_handle_method_dispatch);
     js_register_handle_property_dispatch(js_handle_property_dispatch);
+    js_register_handle_property_set_dispatch(js_handle_property_set_dispatch);
 }
