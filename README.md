@@ -2,7 +2,7 @@
 
 A native TypeScript compiler written in Rust. Compiles TypeScript source code directly to native executables for macOS, iOS, Android, Windows, GTK4 (Linux), and Web — no Node.js, no Electron, no browser engine.
 
-**Current Version:** 0.2.165 | **Status:** Active Development
+**Current Version:** 0.2.167 | **Status:** Active Development
 
 ## What it does
 
@@ -179,6 +179,60 @@ These packages are natively implemented in Rust — no Node.js required:
 | **Utilities** | dotenv, uuid, nodemailer, zlib, node-cron |
 
 For SQLite and PostgreSQL with a Prisma-like API, see the [ecosystem packages](#ecosystem) below.
+
+---
+
+## Compiling npm Packages Natively
+
+Perry can compile pure TypeScript/JavaScript npm packages directly to native code instead of routing them through the V8 runtime. This is useful for pure math, crypto, and serialization packages that have no native addon or HTTP dependencies.
+
+### Configuration
+
+Add a `perry.compilePackages` array to your project's `package.json`:
+
+```json
+{
+  "perry": {
+    "compilePackages": [
+      "@noble/curves",
+      "@noble/hashes",
+      "superstruct"
+    ]
+  }
+}
+```
+
+Then compile with `--enable-js-runtime` as usual:
+
+```bash
+perry compile src/main.ts --enable-js-runtime
+```
+
+Packages in the list are compiled natively. All other npm packages continue to use the V8 runtime.
+
+### How it works
+
+1. **Source resolution** — Perry prefers TypeScript source (`src/index.ts`) over compiled JS output (`lib/index.js`) for listed packages. If no TS source exists, it compiles the JS directly.
+2. **Transitive dependency dedup** — When the same package appears in multiple nested `node_modules/` locations (e.g., `@noble/hashes` under both `@noble/curves/` and `@solana/web3.js/`), Perry compiles it only once using the first-found copy, avoiding duplicate linker symbols.
+3. **Relative imports** — Files within a compiled package that import sibling files (e.g., `import './utils.js'`) are also compiled natively, even if they're `.js` files.
+
+### Good candidates
+
+- Pure TypeScript math/crypto libraries (`@noble/curves`, `@noble/hashes`)
+- Serialization/encoding (`superstruct`, `borsh`, `bs58`)
+- Data structures with no I/O dependencies
+
+### Bad candidates (keep as V8-interpreted)
+
+- Packages using HTTP/WebSocket (`jayson`, `rpc-websockets`, `node-fetch`)
+- Packages with native addons (anything requiring `node-gyp`)
+- Packages using Node.js builtins not supported by Perry (`http`, `https`, `net`)
+
+### Limitations
+
+- Transitive dependencies must be listed explicitly — if package A depends on package B, both must be in the list for B to be compiled natively.
+- Some JavaScript patterns (CommonJS `module.exports`, complex `class` constructors) may produce compile warnings or runtime issues. Test incrementally.
+- Packages using `Uint8Array`, `DataView`, `TextEncoder`, or other Web APIs may need Perry runtime support for those types.
 
 ---
 
