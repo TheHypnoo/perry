@@ -1,7 +1,7 @@
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
+use objc2_app_kit::{NSEventModifierFlags, NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSObject, NSString};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -229,15 +229,10 @@ pub fn menubar_add_menu(bar_handle: i64, title_ptr: *const u8, menu_handle: i64)
 /// Attach a menu bar to the application, replacing the default menu bar.
 /// Stores bar as pending so app_run() can install it instead of the default.
 pub fn menubar_attach(bar_handle: i64) {
-    eprintln!("[perry/ui] menubar_attach called with handle {}", bar_handle);
     if let Some(bar) = get_menubar(bar_handle) {
-        let count: usize = unsafe { objc2::msg_send![&*bar, numberOfItems] };
-        eprintln!("[perry/ui] menubar_attach: bar has {} items, storing as pending", count);
         PENDING_USER_MENUBAR.with(|p| {
             *p.borrow_mut() = Some(bar);
         });
-    } else {
-        eprintln!("[perry/ui] menubar_attach: bar handle {} not found!", bar_handle);
     }
 }
 

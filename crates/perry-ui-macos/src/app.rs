@@ -143,13 +143,6 @@ pub fn app_set_body(app_handle: i64, root_handle: i64) {
 fn setup_menu_bar(app: &NSApplication, mtm: MainThreadMarker) {
     // Check if the user already attached a custom menu bar via menuBarAttach()
     let user_bar = crate::menu::PENDING_USER_MENUBAR.with(|p| p.borrow_mut().take());
-    let has_user_bar = user_bar.is_some();
-    if has_user_bar {
-        let count: usize = unsafe { msg_send![&*user_bar.as_ref().unwrap(), numberOfItems] };
-        eprintln!("[perry/ui] Using user menu bar ({} items)", count);
-    } else {
-        eprintln!("[perry/ui] No user menu bar, using default");
-    }
 
     unsafe {
         let menu_bar = if let Some(bar) = user_bar {
