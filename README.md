@@ -2,7 +2,7 @@
 
 A native TypeScript compiler written in Rust. Compiles TypeScript source code directly to native executables for macOS, iOS, Android, Windows, GTK4 (Linux), and Web — no Node.js, no Electron, no browser engine.
 
-**Current Version:** 0.2.167 | **Status:** Active Development
+**Current Version:** 0.2.168 | **Status:** Active Development
 
 ## What it does
 
@@ -31,6 +31,31 @@ That's it. TypeScript in, native binary out. The binary runs standalone with no 
 | binary_trees | 3ms | 8ms | **2.7x** |
 
 **Average speedup: 2.2x faster than Node.js**
+
+> Run benchmarks: `cd benchmarks/suite && ./run_benchmarks.sh`
+
+## Binary Size
+
+Perry produces small, self-contained binaries. The runtime is statically linked — no external dependencies at run time.
+
+*Measured on macOS ARM64 (Apple Silicon), binaries automatically stripped:*
+
+| Program | Binary Size |
+|---------|-------------|
+| `console.log("Hello, world!")` | **~330KB** |
+| hello world + `fs` / `path` / `process` imports | ~380KB |
+| full stdlib app (fastify, mysql2, etc.) | ~48MB |
+| with `--enable-js-runtime` (V8 embedded) | +~15MB |
+
+Perry automatically detects which parts of the runtime your program uses. Programs that don't import stdlib modules link against the smaller runtime-only library instead of the full stdlib, which keeps simple scripts under 400KB.
+
+```bash
+# Hello world — 330KB standalone native binary
+echo 'console.log("Hello, world!");' > hello.ts
+perry compile hello.ts -o hello
+ls -lh hello   # → ~330KB
+./hello        # Hello, world!
+```
 
 > Run benchmarks: `cd benchmarks/suite && ./run_benchmarks.sh`
 
@@ -244,7 +269,7 @@ Packages in the list are compiled natively. All other npm packages continue to u
 - **i32 Loop Counters** — integer registers for loop variables (no f64 round-trips)
 - **LICM** — loop-invariant code motion for nested loops
 - **Shape-Cached Objects** — 5–6x faster object allocation
-- **Automatic Binary Size Reduction** — links runtime-only when stdlib isn't needed (~300KB vs 48MB for hello world); dead code stripping and `strip` on final binary
+- **Automatic Binary Size Reduction** — links runtime-only when stdlib isn't needed (~330KB vs 48MB for hello world); dead code stripping and `strip` on final binary
 - **`__platform__` Constant** — compile-time platform tag (0=macOS, 1=iOS, 2=Android, 3=Windows, 4=Linux); Cranelift constant-folds comparisons and eliminates dead platform branches
 
 ---
@@ -435,7 +460,7 @@ perry doctor
 - **Garbage Collection** — mark-sweep GC with conservative stack scanning. Triggers on new arena block allocation (~8MB) or explicit `gc()` call. 8-byte GcHeader per allocation.
 - **Single-Threaded User Code** — async I/O runs on Tokio worker threads; callbacks dispatch on the main thread.
 - **No Runtime Type Checking** — types are erased at compile time. Use `typeof` and `instanceof` for runtime inspection.
-- **Small Binaries** — ~300KB for hello world (runtime-only); ~48MB with full stdlib. Binaries are automatically stripped.
+- **Small Binaries** — ~330KB for hello world (runtime-only); ~48MB with full stdlib. Binaries are automatically stripped. See [Binary Size](#binary-size) for a full breakdown.
 
 ---
 
