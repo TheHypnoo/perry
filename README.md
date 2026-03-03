@@ -100,7 +100,7 @@ App(
 
 ---
 
-## Cross-Platform Publishing
+## Cross-Platform Publishing (upcoming, not available yet)
 
 ```bash
 # Build for all platforms via the build server
@@ -110,7 +110,7 @@ perry publish --macos --ios --android
 perry compile src/main.ts --target web -o dist/app.html
 ```
 
-`perry publish` sends your TypeScript source to [perry-hub](https://github.com/PerryTS/perry-hub) (the cloud build server), which cross-compiles and signs for each target platform.
+`perry publish` sends your TypeScript source to perry-hub (the cloud build server), which cross-compiles and signs for each target platform.
 
 **Targets:**
 
