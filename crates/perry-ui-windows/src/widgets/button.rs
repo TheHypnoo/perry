@@ -8,7 +8,7 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::{InvalidateRect, SetTextColor, SetBkMode, TRANSPARENT, DrawTextW, DT_CENTER, DT_VCENTER, DT_SINGLELINE, FillRect, SelectObject, HGDIOBJ};
+use windows::Win32::Graphics::Gdi::{InvalidateRect, SetTextColor, SetBkMode, TRANSPARENT, DrawTextW, DT_LEFT, DT_VCENTER, DT_SINGLELINE, FillRect, SelectObject, HGDIOBJ};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -277,7 +277,7 @@ pub fn handle_draw_item(lparam: LPARAM) -> bool {
         if text_len > 0 {
             let mut buf = vec![0u16; (text_len + 1) as usize];
             GetWindowTextW(dis.hwndItem, &mut buf);
-            DrawTextW(hdc, &mut buf[..text_len as usize], &mut rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(hdc, &mut buf[..text_len as usize], &mut rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
 
         if !old_font.is_invalid() {

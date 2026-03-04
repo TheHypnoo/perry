@@ -122,19 +122,13 @@ fn get_valid_func_ptr(closure: *const ClosureHeader) -> *const u8 {
     if addr < 0x1000 || addr >= 0x0001_0000_0000_0000 {
         return std::ptr::null();
     }
-    // CRITICAL: Read type_tag with volatile. All volatile accesses are sequentially
-    // ordered with respect to each other — the optimizer cannot reorder this read
-    // with the func_ptr volatile read below.
     let type_tag = unsafe {
         std::ptr::read_volatile((closure as *const u8).add(12) as *const u32)
     };
     if type_tag != CLOSURE_MAGIC {
         return std::ptr::null();
     }
-    // compiler_fence prevents the optimizer from moving the non-volatile func_ptr
-    // load above the volatile type_tag read + CLOSURE_MAGIC check.
     std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-    // Now read func_ptr (guaranteed to happen after CLOSURE_MAGIC verified)
     let func_ptr = unsafe {
         std::ptr::read_volatile(closure as *const *const u8)
     };
@@ -142,11 +136,26 @@ fn get_valid_func_ptr(closure: *const ClosureHeader) -> *const u8 {
     if func_ptr_addr == 0 {
         return std::ptr::null();
     }
-    // Validate func_ptr is in .text section range (macOS ARM64: 0x100000000+, <4GB from base)
-    // This catches cases where a non-closure object's first 8 bytes happen to be non-zero
-    // but are a heap address (e.g., BigInt ptr, Box content) rather than a code address.
-    if func_ptr_addr < 0x100000000 || func_ptr_addr > 0x400000000 {
-        return std::ptr::null();
+    // Validate func_ptr is in .text section range
+    // macOS ARM64: 0x100000000+, <4GB from base
+    // Windows x86_64: typically 0x7FF7_xxxx_xxxx (ASLR), so we allow up to 0x8000_0000_0000
+    #[cfg(target_os = "macos")]
+    {
+        if func_ptr_addr < 0x100000000 || func_ptr_addr > 0x400000000 {
+            return std::ptr::null();
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if func_ptr_addr < 0x10000 || func_ptr_addr > 0x800000000000 {
+            return std::ptr::null();
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if func_ptr_addr < 0x100000000 || func_ptr_addr > 0x400000000 {
+            return std::ptr::null();
+        }
     }
     func_ptr
 }
