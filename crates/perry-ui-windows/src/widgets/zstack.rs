@@ -6,6 +6,8 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::HBRUSH;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
 use super::{WidgetKind, register_widget_with_layout};
@@ -60,7 +62,7 @@ pub fn create() -> i64 {
                 0, 0, 100, 100,
                 None,
                 None,
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             )
             .unwrap();

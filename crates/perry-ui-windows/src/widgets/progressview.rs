@@ -34,13 +34,13 @@ pub fn create() -> i64 {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
-                windows::core::PCWSTR(to_wide(PROGRESS_CLASSW).as_ptr()),
+                PROGRESS_CLASSW,
                 windows::core::PCWSTR(to_wide("").as_ptr()),
                 WINDOW_STYLE(PBS_MARQUEE | WS_CHILD.0 | WS_VISIBLE.0),
                 0, 0, 200, 20,
                 None,
                 HMENU(control_id as *mut _),
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             )
             .unwrap();

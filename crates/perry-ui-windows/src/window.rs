@@ -26,6 +26,16 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn window_default_wnd_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
 /// Create a new window.
 pub fn create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
     let title = str_from_header(title_ptr);
@@ -40,6 +50,7 @@ pub fn create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
     {
         use windows::Win32::Foundation::*;
         use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::Win32::Graphics::Gdi::{HBRUSH, COLOR_WINDOW, UpdateWindow};
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::core::PCWSTR;
 
@@ -49,7 +60,7 @@ pub fn create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
 
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(DefWindowProcW),
+                lpfnWndProc: Some(window_default_wnd_proc),
                 hInstance: hinstance.into(),
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
                 hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as *mut _),
@@ -67,7 +78,7 @@ pub fn create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
                 CW_USEDEFAULT, CW_USEDEFAULT,
                 width as i32, height as i32,
                 None, None,
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             ).unwrap();
 
@@ -93,7 +104,7 @@ pub fn set_body(window_handle: i64, widget_handle: i64) {
             if let Some(parent_hwnd) = w.borrow().get(&window_handle) {
                 if let Some(child_hwnd) = crate::widgets::get_hwnd(widget_handle) {
                     unsafe {
-                        let _ = SetParent(child_hwnd, Some(*parent_hwnd));
+                        let _ = SetParent(child_hwnd, *parent_hwnd);
                         let style = GetWindowLongW(child_hwnd, GWL_STYLE) as u32;
                         SetWindowLongW(child_hwnd, GWL_STYLE, (style | WS_CHILD.0) as i32);
                     }
@@ -110,6 +121,7 @@ pub fn show(window_handle: i64) {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::Win32::Graphics::Gdi::UpdateWindow;
         WINDOWS.with(|w| {
             if let Some(hwnd) = w.borrow().get(&window_handle) {
                 unsafe {

@@ -173,6 +173,80 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// On Windows, strip duplicate perry-runtime / Rust std objects from a UI staticlib.
+/// This prevents double CRT initialization when both perry-stdlib and perry-ui-windows
+/// are linked (both bundle perry-runtime and Rust std as staticlib dependencies).
+/// Returns a path to a trimmed .lib, or the original path if stripping fails.
+#[cfg(target_os = "windows")]
+fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
+    // Find llvm-ar from the Rust toolchain
+    let llvm_ar = {
+        let mut found = None;
+        if let Ok(output) = Command::new("rustc").arg("--print").arg("sysroot").output() {
+            let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let ar_path = PathBuf::from(&sysroot)
+                .join("lib").join("rustlib").join("x86_64-pc-windows-msvc").join("bin").join("llvm-ar.exe");
+            if ar_path.exists() {
+                found = Some(ar_path);
+            }
+        }
+        found.ok_or_else(|| anyhow::anyhow!("llvm-ar not found in Rust toolchain"))?
+    };
+
+    // List members of the .lib
+    let output = Command::new(&llvm_ar).arg("t").arg(lib_path).output()?;
+    let members: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+
+    // Identify members to DELETE. Only strip the Rust std library objects that contain
+    // .CRT$XCU entries (global constructors) — these cause a crash when duplicated.
+    // Keep everything else (alloc, core, perry_runtime) since they may have unique
+    // monomorphized symbols; /FORCE:MULTIPLE handles the duplicates safely.
+    let remove: Vec<&String> = members.iter().filter(|m| {
+        // std contains .CRT$XCU entries that cause double init crash
+        if m.starts_with("std-") { return true; }
+        // DLL import stubs are already provided by system import libs
+        if m.ends_with(".dll") { return true; }
+        false
+    }).collect();
+
+    if remove.is_empty() {
+        return Ok(lib_path.clone());
+    }
+
+    eprintln!("Stripping {} duplicate objects from UI lib ({} → {} objects)",
+        remove.len(), members.len(), members.len() - remove.len());
+
+    // Copy the .lib to a temp file, then use `llvm-ar d` to delete unwanted members
+    let abs_lib = std::fs::canonicalize(lib_path)?;
+    let trimmed_lib = abs_lib.with_file_name("_perry_ui_trimmed.lib");
+    std::fs::copy(&abs_lib, &trimmed_lib)?;
+
+    // Delete members in batches (command line length limits)
+    for chunk in remove.chunks(50) {
+        let mut ar_cmd = Command::new(&llvm_ar);
+        ar_cmd.arg("d").arg(&trimmed_lib);
+        for member in chunk {
+            ar_cmd.arg(member.as_str());
+        }
+        let ar_output = ar_cmd.output()?;
+        if !ar_output.status.success() {
+            let stderr = String::from_utf8_lossy(&ar_output.stderr);
+            eprintln!("Warning: llvm-ar d failed: {}", stderr);
+            // Fall back to original lib
+            let _ = std::fs::remove_file(&trimmed_lib);
+            return Ok(lib_path.clone());
+        }
+    }
+
+    // Clean up stale extraction dirs from previous approach
+    let _ = std::fs::remove_dir_all("_perry_ui_objects");
+
+    Ok(trimmed_lib)
+}
+
 /// Find MSVC link.exe by searching Visual Studio installation directories.
 /// On Windows, the PATH may contain a GNU `link` utility (e.g. from Git Bash/MSYS2)
 /// which is not the MSVC linker. This function searches for the real MSVC link.exe.
@@ -302,6 +376,14 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
             candidates.push(PathBuf::from(format!("target/release/{}", name)));
             candidates.push(PathBuf::from(format!("target/debug/{}", name)));
         }
+        // Also check the directory where the perry executable lives,
+        // since perry_runtime.lib / perry_ui_*.lib are typically built
+        // alongside the compiler itself.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidates.push(dir.join(name));
+            }
+        }
     } else {
         // Host build: search host directories
         candidates.push(PathBuf::from(format!("target/release/{}", name)));
@@ -345,12 +427,20 @@ fn find_runtime_library(target: Option<&str>) -> Result<PathBuf> {
 
 /// Find the stdlib library for linking (optional - only needed for native modules)
 fn find_stdlib_library(target: Option<&str>) -> Option<PathBuf> {
-    find_library("libperry_stdlib.a", target)
+    let lib_name = match target {
+        Some("windows") => "perry_stdlib.lib",
+        _ => "libperry_stdlib.a",
+    };
+    find_library(lib_name, target)
 }
 
 /// Find the V8 jsruntime library for linking (optional - only needed for JS module support)
 fn find_jsruntime_library(target: Option<&str>) -> Option<PathBuf> {
-    find_library("libperry_jsruntime.a", target)
+    let lib_name = match target {
+        Some("windows") => "perry_jsruntime.lib",
+        _ => "libperry_jsruntime.a",
+    };
+    find_library(lib_name, target)
 }
 
 /// Find the UI library for linking (optional - only needed when perry/ui is imported)
@@ -2523,13 +2613,34 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             if let Some(ref p) = stdlib_lib_path { all_scan_paths.push(p.clone()); }
         }
         if let Some(ref p) = jsruntime_lib_path { all_scan_paths.push(p.clone()); }
+        // Find the nm tool: use system `nm` on macOS/Linux, or `llvm-nm` from Rust toolchain on Windows
+        let nm_cmd = {
+            #[cfg(target_os = "windows")]
+            {
+                // On Windows, nm is not available. Use llvm-nm from the Rust toolchain.
+                let mut found = None;
+                if let Ok(output) = std::process::Command::new("rustc").arg("--print").arg("sysroot").output() {
+                    let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let llvm_nm = PathBuf::from(&sysroot)
+                        .join("lib").join("rustlib").join("x86_64-pc-windows-msvc").join("bin").join("llvm-nm.exe");
+                    if llvm_nm.exists() {
+                        found = Some(llvm_nm.to_string_lossy().to_string());
+                    }
+                }
+                found.unwrap_or_else(|| "nm".to_string())
+            }
+            #[cfg(not(target_os = "windows"))]
+            { "nm".to_string() }
+        };
+        // On macOS (Mach-O), nm prefixes symbols with `_`; on Windows (COFF), no prefix.
+        let strip_underscore = !cfg!(target_os = "windows");
         for scan_path in &all_scan_paths {
-            if let Ok(output) = std::process::Command::new("nm").arg("-g").arg(scan_path).output() {
+            if let Ok(output) = std::process::Command::new(&nm_cmd).arg("-g").arg(scan_path).output() {
                 for line in String::from_utf8_lossy(&output.stdout).lines() {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 2 {
                         let (st, sn) = if parts.len() == 3 { (parts[1], parts[2]) } else { (parts[0], parts[1]) };
-                        let cn = sn.strip_prefix('_').unwrap_or(sn);
+                        let cn = if strip_underscore { sn.strip_prefix('_').unwrap_or(sn) } else { sn };
                         if st == "U" {
                             // Add export/wrapper symbols to undefined list
                             if cn.starts_with("__export_") || cn.starts_with("__wrapper_") {
@@ -2759,7 +2870,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         c.arg("/SUBSYSTEM:WINDOWS")
          .arg("/ENTRY:mainCRTStartup")
          .arg("/NOLOGO")
-         .arg("/FORCE:UNRESOLVED");
+         .arg("/FORCE:MULTIPLE");
         // Set up MSVC library search paths if LIB env isn't already configured
         if std::env::var("LIB").is_err() {
             if let Some(lib_paths) = find_msvc_lib_paths() {
@@ -2792,8 +2903,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // link libperry_runtime.a as a fallback to fill these gaps. On macOS/Linux/ELF the
     // linker uses first-definition-wins for archives, so no duplicate symbol errors arise.
     // When UI lib is also linked, it bundles its own copy of perry-runtime.
-    // For Android (ELF) and Windows (MSVC), skip the extra runtime when UI provides it.
-    let skip_runtime = (is_android || is_windows) && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
+    // For Android (ELF), skip the extra runtime when UI provides it.
+    // On Windows (MSVC), always link the runtime — the UI lib's rlib dependency on
+    // perry-runtime may not include all symbols (e.g., perry_init_guard_check_and_set).
+    let skip_runtime = is_android && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
     if !skip_runtime {
         if let Some(ref jsruntime) = jsruntime_lib {
             cmd.arg(jsruntime);
@@ -2801,11 +2914,17 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             if !is_android && !is_windows {
                 cmd.arg(&runtime_lib);
             }
-        } else if ctx.needs_stdlib {
+        } else if ctx.needs_stdlib || is_windows {
+            // On Windows/MSVC, always try to link stdlib because codegen unconditionally
+            // declares all stdlib extern functions, creating import references that MSVC
+            // won't dead-strip. On macOS/Linux, the linker ignores unreferenced archives.
             if let Some(ref stdlib) = stdlib_lib {
                 cmd.arg(stdlib);
             } else {
-                eprintln!("Warning: stdlib required but libperry_stdlib.a not found, using runtime-only");
+                if ctx.needs_stdlib {
+                    eprintln!("Warning: stdlib required but {} not found, using runtime-only",
+                        if is_windows { "perry_stdlib.lib" } else { "libperry_stdlib.a" });
+                }
                 cmd.arg(&runtime_lib);
             }
         } else {
@@ -2884,7 +3003,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("userenv.lib")
            .arg("oleaut32.lib")
            .arg("propsys.lib")
-           .arg("runtimeobject.lib");
+           .arg("runtimeobject.lib")
+           .arg("iphlpapi.lib");
     } else {
         // On macOS, we need additional frameworks for the runtime (sysinfo, etc.) and V8
         #[cfg(target_os = "macos")]
@@ -2921,6 +3041,17 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // Link perry/ui library and platform frameworks if needed
     if ctx.needs_ui {
         if let Some(ui_lib) = find_ui_library(target.as_deref()) {
+            // On Windows, the UI staticlib bundles its own copies of perry-runtime and
+            // Rust std. When perry-stdlib is also linked (which bundles the same), the
+            // duplicate Rust std CRT init causes a pre-main crash. Fix: extract only the
+            // UI-specific objects from the .lib and link them individually.
+            #[cfg(target_os = "windows")]
+            let ui_lib = if is_windows {
+                strip_duplicate_objects_from_lib(&ui_lib)
+                    .unwrap_or(ui_lib)
+            } else {
+                ui_lib
+            };
             cmd.arg(&ui_lib);
 
             if is_ios {
@@ -3045,7 +3176,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
             // Add platform libraries
             for lib in &target_config.libs {
-                cmd.arg(format!("-l{}", lib));
+                if is_windows {
+                    cmd.arg(format!("{}.lib", lib));
+                } else {
+                    cmd.arg(format!("-l{}", lib));
+                }
             }
 
             // Add pkg-config libraries

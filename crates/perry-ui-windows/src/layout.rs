@@ -98,6 +98,11 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
         let ci = widgets::get_widget_info(child).unwrap();
         if matches!(ci.kind, WidgetKind::Spacer) || ci.fills_remaining {
             child_sizes.push(0); // placeholder, will be computed below
+        } else if !vertical && ci.fixed_width.is_some() {
+            // In HStack, use fixed_width as the main-axis size
+            let fw = ci.fixed_width.unwrap();
+            fixed_total += fw;
+            child_sizes.push(fw);
         } else {
             let size = measure_intrinsic(child, &ci.kind, vertical, available_cross);
             fixed_total += size;

@@ -38,6 +38,16 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn toolbar_default_wnd_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
 /// Create a toolbar (horizontal button container).
 pub fn create() -> i64 {
     let id = NEXT_TOOLBAR_ID.with(|id| {
@@ -51,6 +61,7 @@ pub fn create() -> i64 {
     {
         use windows::Win32::Foundation::*;
         use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::Win32::Graphics::Gdi::{HBRUSH, COLOR_BTNFACE};
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::core::PCWSTR;
 
@@ -59,7 +70,7 @@ pub fn create() -> i64 {
             let class_name = to_wide("PerryToolbar");
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(DefWindowProcW),
+                lpfnWndProc: Some(toolbar_default_wnd_proc),
                 hInstance: hinstance.into(),
                 hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as *mut _),
                 lpszClassName: PCWSTR(class_name.as_ptr()),
@@ -74,7 +85,7 @@ pub fn create() -> i64 {
                 WS_CHILD | WS_VISIBLE,
                 0, 0, 800, 32,
                 None, None,
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             ).unwrap();
 
@@ -124,8 +135,8 @@ pub fn add_item(toolbar_handle: i64, label_ptr: *const u8, icon_ptr: *const u8, 
                         PCWSTR(label_wide.as_ptr()),
                         WINDOW_STYLE(BS_PUSHBUTTON as u32 | WS_CHILD.0 | WS_VISIBLE.0),
                         x, 2, 76, 28,
-                        Some(*parent), None,
-                        Some(hinstance.into()),
+                        *parent, None,
+                        HINSTANCE::from(hinstance),
                         None,
                     );
                 }
@@ -148,7 +159,7 @@ pub fn attach(toolbar_handle: i64) {
                     let apps = apps.borrow();
                     if let Some(app) = apps.first() {
                         unsafe {
-                            let _ = SetParent(*toolbar_hwnd, Some(app.hwnd));
+                            let _ = SetParent(*toolbar_hwnd, app.hwnd);
                         }
                     }
                 });

@@ -842,17 +842,23 @@ pub extern "C" fn perry_ui_widget_add_child_at(parent_handle: i64, child_handle:
 // Stubs for symbols referenced by codegen but not yet implemented on Windows
 // =============================================================================
 
-/// Set button text color (stub — not yet implemented on Windows).
+/// Set button text color.
 #[no_mangle]
-pub extern "C" fn perry_ui_button_set_text_color(_handle: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+pub extern "C" fn perry_ui_button_set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::button::set_text_color(handle, r, g, b, a);
+}
 
-/// Set widget width (stub — not yet implemented on Windows).
+/// Set widget width.
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_set_width(_handle: i64, _width: f64) {}
+pub extern "C" fn perry_ui_widget_set_width(handle: i64, width: f64) {
+    widgets::set_fixed_width(handle, width as i32);
+}
 
-/// Set widget hugging priority (stub — not yet implemented on Windows).
+/// Set widget hugging priority.
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_set_hugging(_handle: i64, _priority: f64) {}
+pub extern "C" fn perry_ui_widget_set_hugging(handle: i64, priority: f64) {
+    widgets::set_hugging_priority(handle, priority);
+}
 
 /// Set on-click callback (stub — not yet implemented on Windows).
 #[no_mangle]

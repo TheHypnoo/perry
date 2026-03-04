@@ -9,6 +9,10 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::InvalidateRect;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::SystemServices::{SS_BITMAP, SS_ICON};
+#[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
 use super::{WidgetKind, alloc_control_id, register_widget};
@@ -59,11 +63,11 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
                 WINDOW_EX_STYLE::default(),
                 windows::core::PCWSTR(to_wide("STATIC").as_ptr()),
                 windows::core::PCWSTR(to_wide("").as_ptr()),
-                WINDOW_STYLE(SS_BITMAP as u32 | WS_CHILD.0 | WS_VISIBLE.0),
+                WINDOW_STYLE(SS_BITMAP.0 | WS_CHILD.0 | WS_VISIBLE.0),
                 0, 0, 100, 100,
                 None,
                 HMENU(control_id as *mut _),
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             )
             .unwrap();
@@ -111,11 +115,11 @@ pub fn create_symbol(name_ptr: *const u8) -> i64 {
                 WINDOW_EX_STYLE::default(),
                 windows::core::PCWSTR(to_wide("STATIC").as_ptr()),
                 windows::core::PCWSTR(to_wide("").as_ptr()),
-                WINDOW_STYLE(SS_ICON as u32 | WS_CHILD.0 | WS_VISIBLE.0),
+                WINDOW_STYLE(SS_ICON.0 | WS_CHILD.0 | WS_VISIBLE.0),
                 0, 0, 32, 32,
                 None,
                 HMENU(control_id as *mut _),
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             )
             .unwrap();
@@ -192,7 +196,7 @@ pub fn set_tint(handle: i64, r: f64, g: f64, b: f64, a: f64) {
         // Force repaint (custom-draw could use the tint if implemented)
         if let Some(hwnd) = super::get_hwnd(handle) {
             unsafe {
-                let _ = InvalidateRect(Some(hwnd), None, true);
+                let _ = InvalidateRect(hwnd, None, true);
             }
         }
     }

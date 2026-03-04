@@ -22,13 +22,14 @@ pub mod lazyvstack;
 pub mod image;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::{CreateFontW, CreateRoundRectRgn, SetWindowRgn, InvalidateRect, HBRUSH};
+use windows::Win32::Graphics::Gdi::{CreateFontW, CreateRoundRectRgn, SetWindowRgn, InvalidateRect, HBRUSH, CreateSolidBrush, FillRect};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 
@@ -70,6 +71,8 @@ pub struct WidgetEntry {
     pub control_id: u16,
     /// When true, this widget absorbs remaining space in a VStack/HStack (like a Spacer).
     pub fills_remaining: bool,
+    /// Fixed width in pixels (set by widgetSetWidth)
+    pub fixed_width: Option<i32>,
 }
 
 /// Info returned by get_widget_info (clone-safe subset)
@@ -80,6 +83,7 @@ pub struct WidgetInfo {
     pub insets: (f64, f64, f64, f64),
     pub hidden: bool,
     pub fills_remaining: bool,
+    pub fixed_width: Option<i32>,
 }
 
 thread_local! {
@@ -89,6 +93,31 @@ thread_local! {
     /// before they are reparented into the real window hierarchy.
     #[cfg(target_os = "windows")]
     static PARKING_HWND: RefCell<Option<HWND>> = RefCell::new(None);
+    /// Background color brushes keyed by widget handle
+    #[cfg(target_os = "windows")]
+    static BG_BRUSHES: RefCell<HashMap<i64, HBRUSH>> = RefCell::new(HashMap::new());
+    /// Background COLORREF values keyed by widget handle
+    static BG_COLORS: RefCell<HashMap<i64, u32>> = RefCell::new(HashMap::new());
+}
+
+/// Convert RGB floats (0.0-1.0) to Win32 COLORREF (0x00BBGGRR)
+#[cfg(target_os = "windows")]
+fn rgb_to_colorref(r: f64, g: f64, b: f64) -> u32 {
+    let r = (r * 255.0).round().min(255.0).max(0.0) as u32;
+    let g = (g * 255.0).round().min(255.0).max(0.0) as u32;
+    let b = (b * 255.0).round().min(255.0).max(0.0) as u32;
+    r | (g << 8) | (b << 16)
+}
+
+/// Get the background brush for a widget (if set).
+#[cfg(target_os = "windows")]
+pub fn get_bg_brush(handle: i64) -> Option<HBRUSH> {
+    BG_BRUSHES.with(|b| b.borrow().get(&handle).copied())
+}
+
+/// Get the background COLORREF for a widget (if set).
+pub fn get_bg_color(handle: i64) -> Option<u32> {
+    BG_COLORS.with(|c| c.borrow().get(&handle).copied())
 }
 
 /// Get (or lazily create) the hidden parking window for orphan child widgets.
@@ -148,6 +177,7 @@ pub fn register_widget(hwnd: HWND, kind: WidgetKind, control_id: u16) -> i64 {
             hidden: false,
             control_id,
             fills_remaining: false,
+            fixed_width: None,
         });
         widgets.len() as i64
     })
@@ -166,6 +196,7 @@ pub fn register_widget(hwnd: isize, kind: WidgetKind, control_id: u16) -> i64 {
             hidden: false,
             control_id,
             fills_remaining: false,
+            fixed_width: None,
         });
         widgets.len() as i64
     })
@@ -186,6 +217,7 @@ pub fn register_widget_with_layout(hwnd: HWND, kind: WidgetKind, spacing: f64, i
             hidden: false,
             control_id,
             fills_remaining: false,
+            fixed_width: None,
         });
         widgets.len() as i64
     })
@@ -205,6 +237,7 @@ pub fn register_widget_with_layout(hwnd: isize, kind: WidgetKind, spacing: f64, 
             hidden: false,
             control_id,
             fills_remaining: false,
+            fixed_width: None,
         });
         widgets.len() as i64
     })
@@ -250,6 +283,7 @@ pub fn get_widget_info(handle: i64) -> Option<WidgetInfo> {
                 insets: widgets[idx].insets,
                 hidden: widgets[idx].hidden,
                 fills_remaining: widgets[idx].fills_remaining,
+                fixed_width: widgets[idx].fixed_width,
             })
         } else {
             None
@@ -570,12 +604,40 @@ pub fn set_corner_radius(handle: i64, radius: f64) {
     }
 }
 
+/// Set the fixed width of a widget (in pixels).
+pub fn set_fixed_width(handle: i64, width: i32) {
+    WIDGETS.with(|w| {
+        let mut widgets = w.borrow_mut();
+        let idx = (handle - 1) as usize;
+        if idx < widgets.len() {
+            widgets[idx].fixed_width = Some(width);
+        }
+    });
+}
+
+/// Set hugging priority. Low priority (e.g. 1) means the widget should expand to fill space.
+pub fn set_hugging_priority(handle: i64, priority: f64) {
+    if priority <= 250.0 {
+        set_fills_remaining(handle, true);
+    }
+}
+
 /// Set the background color of a widget.
-pub fn set_background_color(handle: i64, _r: f64, _g: f64, _b: f64, _a: f64) {
-    // Win32 background color requires handling WM_ERASEBKGND or WM_CTLCOLOR* messages
-    // with a custom brush. This is a best-effort no-op for non-text widgets.
-    // Text widgets use the existing handle_ctlcolor mechanism.
-    let _ = handle;
+pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, _a: f64) {
+    #[cfg(target_os = "windows")]
+    {
+        let color = rgb_to_colorref(r, g, b);
+        let brush = unsafe { CreateSolidBrush(COLORREF(color)) };
+        BG_COLORS.with(|c| c.borrow_mut().insert(handle, color));
+        BG_BRUSHES.with(|b| b.borrow_mut().insert(handle, brush));
+        if let Some(hwnd) = get_hwnd(handle) {
+            unsafe { let _ = InvalidateRect(hwnd, None, true); }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (handle, r, g, b, _a);
+    }
 }
 
 /// Set the background gradient of a widget.

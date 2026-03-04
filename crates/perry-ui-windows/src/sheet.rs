@@ -30,6 +30,16 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn sheet_default_wnd_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
 /// Create a sheet (modal popup window).
 pub fn create(width: f64, height: f64, title_val: f64) -> i64 {
     let title = {
@@ -48,6 +58,8 @@ pub fn create(width: f64, height: f64, title_val: f64) -> i64 {
     {
         use windows::Win32::Foundation::*;
         use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::Win32::Graphics::Gdi::{HBRUSH, COLOR_WINDOW, UpdateWindow};
+        use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::core::PCWSTR;
 
@@ -58,7 +70,7 @@ pub fn create(width: f64, height: f64, title_val: f64) -> i64 {
             // Register class (idempotent)
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(DefWindowProcW),
+                lpfnWndProc: Some(sheet_default_wnd_proc),
                 hInstance: hinstance.into(),
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
                 hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as *mut _),
@@ -76,7 +88,7 @@ pub fn create(width: f64, height: f64, title_val: f64) -> i64 {
                 CW_USEDEFAULT, CW_USEDEFAULT,
                 width as i32, height as i32,
                 None, None,
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             ).unwrap();
 
@@ -98,6 +110,8 @@ pub fn present(sheet_handle: i64) {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::Win32::Graphics::Gdi::UpdateWindow;
+        use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
         SHEETS.with(|s| {
             if let Some(hwnd) = s.borrow().get(&sheet_handle) {
                 unsafe {

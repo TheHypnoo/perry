@@ -1779,6 +1779,71 @@ impl Compiler {
             self.exported_function_ids.insert(func_name.clone(), (data_id, *func_id));
         }
 
+        // Create exported globals for exported classes, interfaces, and type aliases.
+        // Importing modules always pre-declare `__export_<module>__<Name>` for every imported symbol.
+        // Without a matching definition in the exporting module, MSVC's linker reports LNK2001.
+        // These globals are zero-initialized data slots — they exist only to satisfy the linker.
+        {
+            let mut already_exported: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (name, _, _) in &hir.exported_native_instances {
+                already_exported.insert(name.clone());
+            }
+            for name in &hir.exported_objects {
+                already_exported.insert(name.clone());
+            }
+            for (name, _) in &hir.exported_functions {
+                already_exported.insert(name.clone());
+            }
+
+            // Exported classes
+            for class in &hir.classes {
+                if class.is_exported && !already_exported.contains(&class.name) {
+                    let global_name = self.scoped_export_name(&class.name);
+                    let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
+                    let mut data_desc = DataDescription::new();
+                    data_desc.define_zeroinit(8);
+                    self.module.define_data(data_id, &data_desc)?;
+                    already_exported.insert(class.name.clone());
+                }
+            }
+
+            // Exported interfaces
+            for iface in &hir.interfaces {
+                if iface.is_exported && !already_exported.contains(&iface.name) {
+                    let global_name = self.scoped_export_name(&iface.name);
+                    let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
+                    let mut data_desc = DataDescription::new();
+                    data_desc.define_zeroinit(8);
+                    self.module.define_data(data_id, &data_desc)?;
+                    already_exported.insert(iface.name.clone());
+                }
+            }
+
+            // Exported type aliases
+            for ta in &hir.type_aliases {
+                if ta.is_exported && !already_exported.contains(&ta.name) {
+                    let global_name = self.scoped_export_name(&ta.name);
+                    let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
+                    let mut data_desc = DataDescription::new();
+                    data_desc.define_zeroinit(8);
+                    self.module.define_data(data_id, &data_desc)?;
+                    already_exported.insert(ta.name.clone());
+                }
+            }
+
+            // Exported enums
+            for en in &hir.enums {
+                if en.is_exported && !already_exported.contains(&en.name) {
+                    let global_name = self.scoped_export_name(&en.name);
+                    let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
+                    let mut data_desc = DataDescription::new();
+                    data_desc.define_zeroinit(8);
+                    self.module.define_data(data_id, &data_desc)?;
+                    already_exported.insert(en.name.clone());
+                }
+            }
+        }
+
         // Second pass: compile all functions
         // Note: create_module_var_globals and analyze_module_var_types were already called
         // before compiling closures/methods above

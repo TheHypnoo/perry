@@ -5,7 +5,7 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::HBRUSH;
+use windows::Win32::Graphics::Gdi::{HBRUSH, FillRect, GetDC, ReleaseDC};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -44,9 +44,22 @@ unsafe extern "system" fn container_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
     match msg {
         // Forward child notifications to the top-level window so button clicks,
         // text color, and context menus are handled by the main wnd_proc.
-        WM_COMMAND | WM_CTLCOLORSTATIC | WM_CONTEXTMENU => {
+        WM_COMMAND | WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CONTEXTMENU | WM_DRAWITEM => {
             if let Ok(parent) = GetParent(hwnd) {
                 return SendMessageW(parent, msg, wparam, lparam);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_ERASEBKGND => {
+            let handle = super::find_handle_by_hwnd(hwnd);
+            if handle > 0 {
+                if let Some(brush) = super::get_bg_brush(handle) {
+                    let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
+                    let mut rect = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rect);
+                    FillRect(hdc, &rect, brush);
+                    return LRESULT(1);
+                }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }

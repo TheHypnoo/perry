@@ -41,11 +41,11 @@ fn str_from_header(ptr: *const u8) -> &'static str {
     }
 }
 
-struct AppEntry {
+pub(crate) struct AppEntry {
     #[cfg(target_os = "windows")]
-    hwnd: HWND,
+    pub(crate) hwnd: HWND,
     #[cfg(not(target_os = "windows"))]
-    hwnd: isize,
+    pub(crate) hwnd: isize,
     root_widget: Option<i64>,
     min_size: Option<(f64, f64)>,
     max_size: Option<(f64, f64)>,
@@ -378,7 +378,7 @@ pub fn set_timer(interval_ms: f64, callback: f64) {
                 let apps = apps.borrow();
                 if let Some(app) = apps.first() {
                     unsafe {
-                        let _ = SetTimer(Some(app.hwnd), timer_id, ms, None);
+                        let _ = SetTimer(app.hwnd, timer_id, ms, None);
                     }
                 }
             });
@@ -557,6 +557,31 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             let child_hwnd = HWND(lparam.0 as *mut _);
             if let Some(result) = crate::widgets::text::handle_ctlcolor(hdc, child_hwnd) {
                 return result;
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_CTLCOLORBTN => {
+            // Make buttons use their parent container's background color
+            let hdc = HDC(wparam.0 as *mut _);
+            let btn_hwnd = HWND(lparam.0 as *mut _);
+            if let Ok(parent_hwnd) = GetParent(btn_hwnd) {
+                let parent_handle = crate::widgets::find_handle_by_hwnd(parent_hwnd);
+                if parent_handle > 0 {
+                    if let (Some(color), Some(brush)) = (
+                        crate::widgets::get_bg_color(parent_handle),
+                        crate::widgets::get_bg_brush(parent_handle),
+                    ) {
+                        SetBkColor(hdc, COLORREF(color));
+                        SetBkMode(hdc, TRANSPARENT);
+                        return LRESULT(brush.0 as isize);
+                    }
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_DRAWITEM => {
+            if crate::widgets::button::handle_draw_item(lparam) {
+                return LRESULT(1); // TRUE = handled
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }

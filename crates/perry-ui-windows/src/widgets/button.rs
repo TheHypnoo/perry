@@ -8,7 +8,7 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::InvalidateRect;
+use windows::Win32::Graphics::Gdi::{InvalidateRect, SetTextColor, SetBkMode, TRANSPARENT, DrawTextW, DT_CENTER, DT_VCENTER, DT_SINGLELINE, FillRect, SelectObject, HGDIOBJ};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -39,6 +39,11 @@ fn to_wide(s: &str) -> Vec<u16> {
 thread_local! {
     // Map from widget handle -> callback pointer
     static BUTTON_CALLBACKS: RefCell<HashMap<i64, *const u8>> = RefCell::new(HashMap::new());
+    // Map from widget handle -> text COLORREF
+    static BUTTON_TEXT_COLORS: RefCell<HashMap<i64, u32>> = RefCell::new(HashMap::new());
+    // Map from button HWND -> widget handle (for WM_DRAWITEM lookup)
+    #[cfg(target_os = "windows")]
+    static BTN_HWND_TO_HANDLE: RefCell<HashMap<isize, i64>> = RefCell::new(HashMap::new());
 }
 
 /// Create a Button. Returns widget handle.
@@ -139,4 +144,95 @@ pub fn set_title(handle: i64, title_ptr: *const u8) {
     {
         let _ = (handle, title);
     }
+}
+
+/// Set the text color of a button. Switches to owner-draw mode.
+pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, _a: f64) {
+    let r_byte = (r * 255.0).round().min(255.0).max(0.0) as u32;
+    let g_byte = (g * 255.0).round().min(255.0).max(0.0) as u32;
+    let b_byte = (b * 255.0).round().min(255.0).max(0.0) as u32;
+    let color = r_byte | (g_byte << 8) | (b_byte << 16);
+
+    BUTTON_TEXT_COLORS.with(|c| c.borrow_mut().insert(handle, color));
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(hwnd) = super::get_hwnd(handle) {
+            BTN_HWND_TO_HANDLE.with(|m| m.borrow_mut().insert(hwnd.0 as isize, handle));
+            unsafe {
+                // Switch to owner-draw so we control text rendering
+                let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+                let new_style = (style & !0x0F) | BS_OWNERDRAW as u32;
+                SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
+                let _ = InvalidateRect(hwnd, None, true);
+            }
+        }
+    }
+}
+
+/// Handle WM_DRAWITEM for owner-draw buttons. Returns true if handled.
+#[cfg(target_os = "windows")]
+pub fn handle_draw_item(lparam: LPARAM) -> bool {
+    let dis = unsafe { &*(lparam.0 as *const windows::Win32::UI::Controls::DRAWITEMSTRUCT) };
+    let btn_hwnd_val = dis.hwndItem.0 as isize;
+
+    let handle = BTN_HWND_TO_HANDLE.with(|m| m.borrow().get(&btn_hwnd_val).copied());
+    let handle = match handle {
+        Some(h) => h,
+        None => return false,
+    };
+
+    let text_color = BUTTON_TEXT_COLORS.with(|c| c.borrow().get(&handle).copied());
+    let text_color = match text_color {
+        Some(c) => c,
+        None => return false,
+    };
+
+    unsafe {
+        let hdc = dis.hDC;
+        let mut rect = dis.rcItem;
+
+        // Fill background with parent container's bg color (or default)
+        let parent_hwnd = GetParent(dis.hwndItem);
+        let mut bg_filled = false;
+        if let Ok(parent_hwnd) = parent_hwnd {
+            let parent_handle = super::find_handle_by_hwnd(parent_hwnd);
+            if parent_handle > 0 {
+                if let Some(brush) = super::get_bg_brush(parent_handle) {
+                    FillRect(hdc, &rect, brush);
+                    bg_filled = true;
+                }
+            }
+        }
+        if !bg_filled {
+            let bg_brush = windows::Win32::Graphics::Gdi::GetSysColorBrush(windows::Win32::Graphics::Gdi::COLOR_BTNFACE);
+            FillRect(hdc, &rect, bg_brush);
+        }
+
+        // Draw text
+        SetTextColor(hdc, COLORREF(text_color));
+        SetBkMode(hdc, TRANSPARENT);
+
+        // Use the button's font
+        let hfont = windows::Win32::Graphics::Gdi::HFONT(
+            SendMessageW(dis.hwndItem, WM_GETFONT, WPARAM(0), LPARAM(0)).0 as *mut _
+        );
+        let old_font = if !hfont.is_invalid() {
+            SelectObject(hdc, hfont)
+        } else {
+            HGDIOBJ::default()
+        };
+
+        let text_len = GetWindowTextLengthW(dis.hwndItem);
+        if text_len > 0 {
+            let mut buf = vec![0u16; (text_len + 1) as usize];
+            GetWindowTextW(dis.hwndItem, &mut buf);
+            DrawTextW(hdc, &mut buf[..text_len as usize], &mut rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        if !old_font.is_invalid() {
+            SelectObject(hdc, old_font);
+        }
+    }
+    true
 }

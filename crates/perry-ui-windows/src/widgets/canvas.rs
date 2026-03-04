@@ -182,7 +182,7 @@ pub fn create(width: f64, height: f64) -> i64 {
                 0, 0, width as i32, height as i32,
                 None,
                 None,
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             )
             .unwrap();
@@ -220,7 +220,7 @@ fn invalidate(handle: i64) {
     {
         if let Some(hwnd) = super::get_hwnd(handle) {
             unsafe {
-                let _ = InvalidateRect(Some(hwnd), None, false);
+                let _ = InvalidateRect(hwnd, None, false);
             }
         }
     }

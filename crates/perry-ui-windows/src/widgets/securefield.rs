@@ -69,7 +69,7 @@ pub fn create(placeholder_ptr: *const u8, on_change: f64) -> i64 {
                 0, 0, 200, 24,
                 None,
                 HMENU(control_id as *mut _),
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             )
             .unwrap();

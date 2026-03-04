@@ -73,7 +73,7 @@ pub fn create(label_ptr: *const u8, on_change: f64, _style: i64) -> i64 {
                 0, 0, 200, 200, // height includes dropdown area
                 None,
                 HMENU(control_id as *mut _),
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             )
             .unwrap();
