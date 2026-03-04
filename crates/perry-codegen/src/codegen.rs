@@ -12885,17 +12885,50 @@ impl Compiler {
                 }
             }
 
-            // For async functions, we need to handle returns specially
+            // For async functions, we need to handle returns specially.
+            // Wrap the entire body in an implicit try/catch so that any throw
+            // inside the async function rejects the returned Promise (matching JS semantics).
             if func.is_async {
+                let promise_var_unwrapped = promise_var.unwrap();
+
+                // === Implicit try/catch for async function body ===
+                let try_body_block = builder.create_block();
+                let implicit_catch_block = builder.create_block();
+
+                // Push try frame
+                let try_push_func = self.extern_funcs.get("js_try_push")
+                    .ok_or_else(|| anyhow!("js_try_push not declared"))?;
+                let try_push_ref = self.module.declare_func_in_func(*try_push_func, builder.func);
+                let call = builder.ins().call(try_push_ref, &[]);
+                let jmp_buf_ptr = builder.inst_results(call)[0];
+
+                // Call setjmp directly (must be in this stack frame)
+                let setjmp_func = self.extern_funcs.get("setjmp")
+                    .ok_or_else(|| anyhow!("setjmp not declared"))?;
+                let setjmp_ref = self.module.declare_func_in_func(*setjmp_func, builder.func);
+                let call = builder.ins().call(setjmp_ref, &[jmp_buf_ptr]);
+                let setjmp_result = builder.inst_results(call)[0];
+
+                // Branch: 0 = normal execution, non-0 = exception caught
+                let zero = builder.ins().iconst(types::I32, 0);
+                let is_normal = builder.ins().icmp(IntCC::Equal, setjmp_result, zero);
+                builder.ins().brif(is_normal, try_body_block, &[], implicit_catch_block, &[]);
+
+                // === Try body: execute async function body ===
+                builder.switch_to_block(try_body_block);
+                builder.seal_block(try_body_block);
+
+                TRY_CATCH_DEPTH.with(|d| d.set(d.get() + 1));
                 for stmt in &func.body {
-                    compile_async_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, promise_var.unwrap(), &boxed_vars, false)
+                    compile_async_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, promise_var_unwrapped, &boxed_vars, false)
                         .map_err(|e| anyhow!("In async function '{}': {}", func.name, e))?;
                 }
+                TRY_CATCH_DEPTH.with(|d| d.set(d.get() - 1));
 
                 // If no explicit return, resolve with undefined and return the promise
                 let current_block = builder.current_block().unwrap();
                 if !is_block_filled(&builder, current_block) {
-                    let promise_ptr = builder.use_var(promise_var.unwrap());
+                    let promise_ptr = builder.use_var(promise_var_unwrapped);
 
                     // Resolve with undefined
                     let resolve_func = self.extern_funcs.get("js_promise_resolve")
@@ -12905,8 +12938,49 @@ impl Compiler {
                     let undef_val = builder.ins().f64const(f64::from_bits(TAG_UNDEFINED));
                     builder.ins().call(resolve_ref, &[promise_ptr, undef_val]);
 
+                    // Pop implicit try frame before returning
+                    let try_end_func = self.extern_funcs.get("js_try_end")
+                        .ok_or_else(|| anyhow!("js_try_end not declared"))?;
+                    let try_end_ref = self.module.declare_func_in_func(*try_end_func, builder.func);
+                    builder.ins().call(try_end_ref, &[]);
+
                     builder.ins().return_(&[promise_ptr]);
                 }
+
+                // === Implicit catch: reject Promise with exception ===
+                builder.switch_to_block(implicit_catch_block);
+                builder.seal_block(implicit_catch_block);
+
+                // Pop try frame
+                {
+                    let try_end_func = self.extern_funcs.get("js_try_end")
+                        .ok_or_else(|| anyhow!("js_try_end not declared"))?;
+                    let try_end_ref = self.module.declare_func_in_func(*try_end_func, builder.func);
+                    builder.ins().call(try_end_ref, &[]);
+                }
+
+                // Get the exception value
+                let get_exc_func = self.extern_funcs.get("js_get_exception")
+                    .ok_or_else(|| anyhow!("js_get_exception not declared"))?;
+                let get_exc_ref = self.module.declare_func_in_func(*get_exc_func, builder.func);
+                let call = builder.ins().call(get_exc_ref, &[]);
+                let exc_val = builder.inst_results(call)[0];
+
+                // Clear exception
+                let clear_exc_func = self.extern_funcs.get("js_clear_exception")
+                    .ok_or_else(|| anyhow!("js_clear_exception not declared"))?;
+                let clear_exc_ref = self.module.declare_func_in_func(*clear_exc_func, builder.func);
+                builder.ins().call(clear_exc_ref, &[]);
+
+                // Reject promise with exception
+                let promise_ptr = builder.use_var(promise_var_unwrapped);
+                let reject_func = self.extern_funcs.get("js_promise_reject")
+                    .ok_or_else(|| anyhow!("js_promise_reject not declared"))?;
+                let reject_ref = self.module.declare_func_in_func(*reject_func, builder.func);
+                builder.ins().call(reject_ref, &[promise_ptr, exc_val]);
+
+                // Return the (now rejected) promise
+                builder.ins().return_(&[promise_ptr]);
             } else {
                 for stmt in &func.body {
                     compile_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, None, None, &boxed_vars, None)
@@ -14706,8 +14780,39 @@ impl Compiler {
                 None
             };
 
-            // Compile the body - use compile_async_stmt for async closures
+            // Compile the body - use compile_async_stmt for async closures.
+            // Wrap in implicit try/catch so throws reject the Promise (matching JS semantics).
             if is_async {
+                let promise_var_unwrapped = promise_var.unwrap();
+
+                // === Implicit try/catch for async closure body ===
+                let try_body_block = builder.create_block();
+                let implicit_catch_block = builder.create_block();
+
+                // Push try frame
+                let try_push_func = self.extern_funcs.get("js_try_push")
+                    .ok_or_else(|| anyhow!("js_try_push not declared"))?;
+                let try_push_ref = self.module.declare_func_in_func(*try_push_func, builder.func);
+                let call = builder.ins().call(try_push_ref, &[]);
+                let jmp_buf_ptr = builder.inst_results(call)[0];
+
+                // Call setjmp directly (must be in this stack frame)
+                let setjmp_func = self.extern_funcs.get("setjmp")
+                    .ok_or_else(|| anyhow!("setjmp not declared"))?;
+                let setjmp_ref = self.module.declare_func_in_func(*setjmp_func, builder.func);
+                let call = builder.ins().call(setjmp_ref, &[jmp_buf_ptr]);
+                let setjmp_result = builder.inst_results(call)[0];
+
+                // Branch: 0 = normal execution, non-0 = exception caught
+                let zero = builder.ins().iconst(types::I32, 0);
+                let is_normal = builder.ins().icmp(IntCC::Equal, setjmp_result, zero);
+                builder.ins().brif(is_normal, try_body_block, &[], implicit_catch_block, &[]);
+
+                // === Try body ===
+                builder.switch_to_block(try_body_block);
+                builder.seal_block(try_body_block);
+
+                TRY_CATCH_DEPTH.with(|d| d.set(d.get() + 1));
                 for stmt in body {
                     compile_async_stmt(
                         &mut builder,
@@ -14729,16 +14834,17 @@ impl Compiler {
                         &mut locals,
                         &mut next_var,
                         stmt,
-                        promise_var.unwrap(),
+                        promise_var_unwrapped,
                         &boxed_vars,
                         true,  // Closures return F64, so bitcast Promise pointer
                     ).map_err(|e| anyhow!("In async closure (func_id={}, captures={:?}): {}", func_id, captures, e))?;
                 }
+                TRY_CATCH_DEPTH.with(|d| d.set(d.get() - 1));
 
                 // If no explicit return, resolve with undefined and return the promise
                 let current_block = builder.current_block().unwrap();
                 if !is_block_filled(&builder, current_block) {
-                    let promise_ptr = builder.use_var(promise_var.unwrap());
+                    let promise_ptr = builder.use_var(promise_var_unwrapped);
 
                     // Resolve with undefined
                     let resolve_func = self.extern_funcs.get("js_promise_resolve")
@@ -14748,6 +14854,12 @@ impl Compiler {
                     let undef_val = builder.ins().f64const(f64::from_bits(TAG_UNDEFINED));
                     builder.ins().call(resolve_ref, &[promise_ptr, undef_val]);
 
+                    // Pop implicit try frame before returning
+                    let try_end_func = self.extern_funcs.get("js_try_end")
+                        .ok_or_else(|| anyhow!("js_try_end not declared"))?;
+                    let try_end_ref = self.module.declare_func_in_func(*try_end_func, builder.func);
+                    builder.ins().call(try_end_ref, &[]);
+
                     // NaN-box the Promise pointer with POINTER_TAG so caller can detect it
                     let nanbox_func = self.extern_funcs.get("js_nanbox_pointer")
                         .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
@@ -14756,6 +14868,46 @@ impl Compiler {
                     let ret_val = builder.inst_results(call)[0];
                     builder.ins().return_(&[ret_val]);
                 }
+
+                // === Implicit catch: reject Promise with exception ===
+                builder.switch_to_block(implicit_catch_block);
+                builder.seal_block(implicit_catch_block);
+
+                // Pop try frame
+                {
+                    let try_end_func = self.extern_funcs.get("js_try_end")
+                        .ok_or_else(|| anyhow!("js_try_end not declared"))?;
+                    let try_end_ref = self.module.declare_func_in_func(*try_end_func, builder.func);
+                    builder.ins().call(try_end_ref, &[]);
+                }
+
+                // Get the exception value
+                let get_exc_func = self.extern_funcs.get("js_get_exception")
+                    .ok_or_else(|| anyhow!("js_get_exception not declared"))?;
+                let get_exc_ref = self.module.declare_func_in_func(*get_exc_func, builder.func);
+                let call = builder.ins().call(get_exc_ref, &[]);
+                let exc_val = builder.inst_results(call)[0];
+
+                // Clear exception
+                let clear_exc_func = self.extern_funcs.get("js_clear_exception")
+                    .ok_or_else(|| anyhow!("js_clear_exception not declared"))?;
+                let clear_exc_ref = self.module.declare_func_in_func(*clear_exc_func, builder.func);
+                builder.ins().call(clear_exc_ref, &[]);
+
+                // Reject promise with exception
+                let promise_ptr = builder.use_var(promise_var_unwrapped);
+                let reject_func = self.extern_funcs.get("js_promise_reject")
+                    .ok_or_else(|| anyhow!("js_promise_reject not declared"))?;
+                let reject_ref = self.module.declare_func_in_func(*reject_func, builder.func);
+                builder.ins().call(reject_ref, &[promise_ptr, exc_val]);
+
+                // NaN-box and return the rejected promise
+                let nanbox_func = self.extern_funcs.get("js_nanbox_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                let nanbox_ref = self.module.declare_func_in_func(*nanbox_func, builder.func);
+                let call = builder.ins().call(nanbox_ref, &[promise_ptr]);
+                let ret_val = builder.inst_results(call)[0];
+                builder.ins().return_(&[ret_val]);
             } else {
                 for stmt in body {
                     compile_stmt(
@@ -15924,6 +16076,10 @@ fn compile_async_stmt(
                 builder.ins().call(resolve_ref, &[promise_ptr, value_f64]);
             }
 
+            // Pop any enclosing try frames (including the implicit async try/catch) before returning
+            let try_depth = TRY_CATCH_DEPTH.with(|d| d.get());
+            emit_try_end_cleanup(builder, module, extern_funcs, try_depth)?;
+
             // Return the promise (NaN-boxed for closures so caller recognizes it as a pointer)
             let ret_val = if return_as_f64 {
                 // NaN-box the Promise pointer with POINTER_TAG so caller can detect it
@@ -15948,6 +16104,10 @@ fn compile_async_stmt(
             const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
             let undef_val = builder.ins().f64const(f64::from_bits(TAG_UNDEFINED));
             builder.ins().call(resolve_ref, &[promise_ptr, undef_val]);
+
+            // Pop any enclosing try frames (including the implicit async try/catch) before returning
+            let try_depth = TRY_CATCH_DEPTH.with(|d| d.get());
+            emit_try_end_cleanup(builder, module, extern_funcs, try_depth)?;
 
             // Return the promise (NaN-boxed for closures so caller recognizes it as a pointer)
             let ret_val = if return_as_f64 {

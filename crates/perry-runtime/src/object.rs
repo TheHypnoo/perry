@@ -972,28 +972,24 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
     }
     unsafe {
         // Validate that this is actually an ObjectHeader, not some other heap type.
-        // If called with an ArrayHeader, ClosureHeader, or other struct, object_type at offset 0
-        // will be something other than OBJECT_TYPE_REGULAR (1) or OBJECT_TYPE_ERROR (2).
-        // Example: ArrayHeader.length=3 at offset 0 → object_type=3 → not an object → return undefined.
+        // object_type == 0: static/const objects from codegen (not heap-allocated via js_object_alloc)
+        // object_type == 1: OBJECT_TYPE_REGULAR (heap-allocated objects)
+        // object_type == 2: OBJECT_TYPE_ERROR (ErrorHeader — different layout)
+        // Other values: likely type confusion (ArrayHeader.length, ClosureHeader.func_ptr bits, etc.)
         let object_type = (*obj).object_type;
-        if object_type != crate::error::OBJECT_TYPE_REGULAR {
+        if object_type != crate::error::OBJECT_TYPE_REGULAR && object_type != 0 {
             if object_type == crate::error::OBJECT_TYPE_ERROR {
-                // ErrorHeader — has no general keys_array; return undefined
                 return JSValue::undefined();
             }
             // Check for ClosureHeader (CLOSURE_MAGIC at offset 12)
             let type_tag_at_12 = *((obj as *const u8).add(12) as *const u32);
-            if type_tag_at_12 != crate::closure::CLOSURE_MAGIC {
-                // Unknown struct type — not an ObjectHeader
-                eprintln!(
-                    "[PERRY WARN] js_object_get_field_by_name: not an ObjectHeader (object_type={}) at {:p} — returning undefined",
-                    object_type, obj
-                );
+            if type_tag_at_12 == crate::closure::CLOSURE_MAGIC {
+                return JSValue::undefined();
             }
+            // Likely an ArrayHeader or other non-object struct — return undefined to avoid crash
             return JSValue::undefined();
         }
-        // Belt-and-suspenders: also check for CLOSURE_MAGIC at offset 12 in case
-        // func_ptr low bits happen to be 1 (OBJECT_TYPE_REGULAR) by coincidence.
+        // Check for CLOSURE_MAGIC at offset 12 in case func_ptr low bits happen to be 0 or 1
         {
             let type_tag_at_12 = *((obj as *const u8).add(12) as *const u32);
             if type_tag_at_12 == crate::closure::CLOSURE_MAGIC {
