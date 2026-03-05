@@ -1138,15 +1138,13 @@ fn create_project_tarball(project_dir: &Path) -> Result<Vec<u8>> {
         .into_iter()
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
-            // Exclude known directory names
-            if e.file_type().is_dir() {
-                if exclude_dirs.iter().any(|ex| name == *ex) {
-                    return false;
-                }
-                // Exclude .app bundles
-                if name.ends_with(".app") {
-                    return false;
-                }
+            // Exclude known directory/symlink names regardless of entry type
+            if exclude_dirs.iter().any(|ex| name == *ex) {
+                return false;
+            }
+            // Exclude .app bundles
+            if name.ends_with(".app") {
+                return false;
             }
             true
         })
