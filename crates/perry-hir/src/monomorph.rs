@@ -1119,6 +1119,9 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
             array: Box::new(substitute_expr(array, substitutions)),
             separator: separator.as_ref().map(|s| Box::new(substitute_expr(s, substitutions))),
         },
+        Expr::ArrayFlat { array } => Expr::ArrayFlat {
+            array: Box::new(substitute_expr(array, substitutions)),
+        },
 
         // String methods
         Expr::StringSplit(string, delimiter) => Expr::StringSplit(

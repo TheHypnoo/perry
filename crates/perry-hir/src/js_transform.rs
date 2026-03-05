@@ -722,6 +722,9 @@ fn transform_expr(
                 transform_expr(sep, js_imports, extern_func_to_js, local_name_to_js, tracker);
             }
         }
+        Expr::ArrayFlat { array } => {
+            transform_expr(array, js_imports, extern_func_to_js, local_name_to_js, tracker);
+        }
         Expr::StringSplit(a, b) => {
             transform_expr(a, js_imports, extern_func_to_js, local_name_to_js, tracker);
             transform_expr(b, js_imports, extern_func_to_js, local_name_to_js, tracker);

@@ -1522,6 +1522,10 @@ impl JsEmitter {
                 }
                 self.output.push(')');
             }
+            Expr::ArrayFlat { array } => {
+                self.emit_expr(array);
+                self.output.push_str(".flat()");
+            }
 
             // --- String methods ---
             Expr::StringSplit(string, delimiter) => {

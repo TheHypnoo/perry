@@ -918,6 +918,7 @@ pub enum Expr {
     ArraySort { array: Box<Expr>, comparator: Box<Expr> },   // arr.sort(fn) -> same array (in-place)
     ArrayReduce { array: Box<Expr>, callback: Box<Expr>, initial: Option<Box<Expr>> }, // arr.reduce(fn, init?) -> value
     ArrayJoin { array: Box<Expr>, separator: Option<Box<Expr>> }, // arr.join(separator?) -> string
+    ArrayFlat { array: Box<Expr> },                          // arr.flat() -> flattened array
 
     // String methods
     StringSplit(Box<Expr>, Box<Expr>),  // string.split(delimiter) -> string[]

@@ -663,6 +663,78 @@ pub extern "C" fn js_array_concat(dest: *mut ArrayHeader, src: *const ArrayHeade
     }
 }
 
+/// Flatten an array of arrays into a single array (depth=1).
+/// For each element: if it's an array pointer (NaN-boxed with POINTER_TAG or raw pointer),
+/// append all its elements; otherwise append the element directly.
+#[no_mangle]
+pub extern "C" fn js_array_flat(arr: *const ArrayHeader) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() {
+        return js_array_alloc(0);
+    }
+    unsafe {
+        let len = (*arr).length as usize;
+        let elements = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+        let mut result = js_array_alloc(0);
+
+        for i in 0..len {
+            let element = *elements.add(i);
+            let bits = element.to_bits();
+            let top16 = (bits >> 48) as u16;
+
+            // Check if the element is an array pointer (NaN-boxed or raw)
+            let maybe_arr_ptr = if top16 >= 0x7FF8 {
+                // NaN-boxed value - check if it's a pointer-like tag
+                if top16 == 0x7FFD || top16 == 0x7FFF || top16 == 0x7FFA || top16 == 0x7FFB {
+                    // Could be POINTER_TAG, STRING_TAG, BIGINT_TAG, JS_HANDLE_TAG
+                    // For flat(), we only care about array pointers (POINTER_TAG)
+                    if top16 == 0x7FFD {
+                        let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader;
+                        if (ptr as usize) >= 0x1000 { Some(ptr) } else { None }
+                    } else {
+                        None
+                    }
+                } else if top16 == 0x7FFC {
+                    None // undefined
+                } else {
+                    None // regular NaN
+                }
+            } else if bits > 0x0001_0000_0000_0000 && (bits & 0x7) == 0 {
+                // Raw pointer (aligned, high address)
+                let ptr = bits as *const ArrayHeader;
+                if (ptr as usize) >= 0x1000 { Some(ptr) } else { None }
+            } else {
+                None
+            };
+
+            if let Some(sub_arr) = maybe_arr_ptr {
+                // Check if it's a registered set — if so, it's not an array
+                if crate::set::is_registered_set(sub_arr as usize) || crate::map::is_registered_map(sub_arr as usize) {
+                    // Not an array — push as-is
+                    result = js_array_push_f64(result, element);
+                } else {
+                    // Try to read as array
+                    let sub_len = (*sub_arr).length as usize;
+                    // Sanity check: if length is unreasonably large, treat as non-array
+                    if sub_len <= 1_000_000 {
+                        let sub_elements = (sub_arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+                        for j in 0..sub_len {
+                            result = js_array_push_f64(result, *sub_elements.add(j));
+                        }
+                    } else {
+                        result = js_array_push_f64(result, element);
+                    }
+                }
+            } else {
+                // Not a pointer - push element directly
+                result = js_array_push_f64(result, element);
+            }
+        }
+
+        result
+    }
+}
+
 /// Clone an array from a NaN-boxed f64 pointer value.
 /// Extracts the array pointer from the NaN-boxed value and creates a shallow copy.
 /// If the value is not a valid array pointer, returns an empty array.

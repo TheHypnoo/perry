@@ -5252,6 +5252,12 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                 separator,
                                             });
                                         }
+                                        "flat" => {
+                                            // arr.flat() -> flattened array
+                                            return Ok(Expr::ArrayFlat {
+                                                array: Box::new(Expr::LocalGet(array_id)),
+                                            });
+                                        }
                                         // Map methods (only apply to actual Map/Set types)
                                         "set" => {
                                             // Check if this is a Map or Set type before treating as Map.set()
@@ -5599,6 +5605,11 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                         });
                                                     }
                                                 }
+                                                "flat" => {
+                                                    return Ok(Expr::ArrayFlat {
+                                                        array: Box::new(extern_ref),
+                                                    });
+                                                }
                                                 _ => {} // Fall through for other methods
                                             }
                                         }
@@ -5704,6 +5715,11 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                     initial,
                                                 });
                                             }
+                                        }
+                                        "flat" => {
+                                            return Ok(Expr::ArrayFlat {
+                                                array: Box::new(array_expr),
+                                            });
                                         }
                                         _ => {} // Fall through for other methods
                                     }
@@ -5828,6 +5844,33 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                             return Ok(Expr::ArrayIncludes {
                                                 array: Box::new(array_expr),
                                                 value: Box::new(value_expr),
+                                            });
+                                        }
+                                    }
+                                    "flat" => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        return Ok(Expr::ArrayFlat {
+                                            array: Box::new(array_expr),
+                                        });
+                                    }
+                                    "push" if args.len() >= 1 => {
+                                        // Generic expr.push(value) or expr.push(...spread)
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        if call.args.len() >= 1 && call.args[0].spread.is_some() {
+                                            return Ok(Expr::NativeMethodCall {
+                                                module: "array".to_string(),
+                                                method: "push_spread".to_string(),
+                                                class_name: None,
+                                                object: Some(Box::new(array_expr)),
+                                                args: args,
+                                            });
+                                        } else {
+                                            return Ok(Expr::NativeMethodCall {
+                                                module: "array".to_string(),
+                                                method: "push_single".to_string(),
+                                                class_name: None,
+                                                object: Some(Box::new(array_expr)),
+                                                args: args,
                                             });
                                         }
                                     }
@@ -9530,6 +9573,9 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
                 collect_local_refs_expr(sep, refs);
             }
         }
+        Expr::ArrayFlat { array } => {
+            collect_local_refs_expr(array, refs);
+        }
         // Native module calls
         Expr::NativeMethodCall { object, args, .. } => {
             if let Some(obj) = object {
@@ -10293,6 +10339,9 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
             if let Some(sep) = separator {
                 collect_assigned_locals_expr(sep, assigned);
             }
+        }
+        Expr::ArrayFlat { array } => {
+            collect_assigned_locals_expr(array, assigned);
         }
         // Native module calls
         Expr::NativeMethodCall { object, args, .. } => {

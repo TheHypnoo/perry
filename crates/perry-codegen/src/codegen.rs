@@ -4396,6 +4396,19 @@ impl Compiler {
             self.extern_funcs.insert("js_array_concat".to_string(), func_id);
         }
 
+        // js_array_flat(arr: *const ArrayHeader) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.returns.push(AbiParam::new(types::I64)); // new flattened array pointer
+            let func_id = self.module.declare_function(
+                "js_array_flat",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_array_flat".to_string(), func_id);
+        }
+
         // js_array_clone(src: *const ArrayHeader) -> *mut ArrayHeader
         {
             let mut sig = self.module.make_signature();
@@ -7900,6 +7913,16 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::I64)); // handle
             let func_id = self.module.declare_function("js_ws_server_new", Linkage::Import, &sig)?;
             self.extern_funcs.insert("js_ws_server_new".to_string(), func_id);
+        }
+
+        // js_ws_handle_to_i64(val_f64: f64) -> i64
+        // Converts WS values to i64: NaN-boxed pointers (server) or plain f64 (client)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_ws_handle_to_i64", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_ws_handle_to_i64".to_string(), func_id);
         }
 
         // js_ws_on(handle: i64, event_name: i64, callback: i64) -> i64
@@ -14129,6 +14152,9 @@ impl Compiler {
                     self.collect_closures_from_expr(sep, closures, enclosing_class);
                 }
             }
+            Expr::ArrayFlat { array } => {
+                self.collect_closures_from_expr(array, closures, enclosing_class);
+            }
             Expr::NativeMethodCall { object, args, .. } => {
                 // Collect closures from object (if present)
                 if let Some(obj) = object {
@@ -14811,6 +14837,9 @@ impl Compiler {
                 if let Some(sep) = separator {
                     self.collect_mutable_captures_from_expr(sep, captures);
                 }
+            }
+            Expr::ArrayFlat { array } => {
+                self.collect_mutable_captures_from_expr(array, captures);
             }
             Expr::LocalSet(_, val) | Expr::GlobalSet(_, val) => {
                 self.collect_mutable_captures_from_expr(val, captures);
@@ -17563,7 +17592,8 @@ fn compile_stmt(
                                 // Array/Map/Set constructors may return NaN-boxed
                                 Expr::Array(_) | Expr::ArraySpread(_) | Expr::ArrayMap { .. } |
                                 Expr::ArrayFilter { .. } | Expr::ArraySort { .. } | Expr::ArraySlice { .. } |
-                                Expr::MapNew | Expr::SetNew | Expr::SetNewFromArray(_) => true,
+                                Expr::MapNew | Expr::SetNew | Expr::SetNewFromArray(_) |
+                                Expr::MapEntries(_) | Expr::MapKeys(_) | Expr::MapValues(_) => true,
                                 // Map.get() returns NaN-boxed value (may be POINTER_TAG object)
                                 Expr::MapGet { .. } => true,
                                 Expr::New { .. } => true,
@@ -19460,37 +19490,10 @@ fn compile_stmt(
                 }
 
                 // OPTIMIZATION 4: Field strength reduction for obj.field = obj.field + constant
-                if let Some((obj_id, ref property, constant)) = use_field_strength_reduction {
-                    if let Some(obj_info) = locals.get(&obj_id) {
-                        let combined_const = constant * (UNROLL_FACTOR as f64);
-
-                        // Get the object pointer
-                        let obj_f64 = builder.use_var(obj_info.var);
-                        let obj_ptr = ensure_i64(builder, obj_f64);
-
-                        // Look up field offset from class metadata
-                        if let Some(class_name) = &obj_info.class_name {
-                            if let Some(class_meta) = classes.get(class_name) {
-                                if let Some(&field_idx) = class_meta.field_indices.get(property) {
-                                    // ObjectHeader is 24 bytes, fields start after that
-                                    let field_offset = 24 + (field_idx as i32) * 8;
-
-                                    // Load current value
-                                    let current_val = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
-
-                                    // Add combined constant
-                                    let add_val = builder.ins().f64const(combined_const);
-                                    let new_val = builder.ins().fadd(current_val, add_val);
-
-                                    // Store back
-                                    builder.ins().store(MemFlags::new(), new_val, obj_ptr, field_offset);
-
-                                    optimized = true;
-                                }
-                            }
-                        }
-                    }
-                }
+                // DISABLED: Index-based field access is unsafe for non-this variables because
+                // plain objects (MySQL rows, JSON.parse results) may have different field ordering
+                // than the class definition. The non-optimized path uses name-based access.
+                // if let Some((obj_id, ref property, constant)) = use_field_strength_reduction { ... }
 
                 // OPTIMIZATION 5: Scalar replacement for non-escaping objects
                 // Skip allocation, compile constructor args directly to scalar variables
@@ -23922,6 +23925,30 @@ fn compile_expr(
             let nanbox_call = builder.ins().call(nanbox_ref, &[result]);
             Ok(builder.inst_results(nanbox_call)[0])
         }
+        Expr::ArrayFlat { array } => {
+            // Compile array
+            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
+
+            // Extract pointer (handle both NaN-boxed F64 and raw I64)
+            let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                let call = builder.ins().call(get_ptr_ref, &[arr_val]);
+                builder.inst_results(call)[0]
+            } else {
+                arr_val
+            };
+
+            let func = extern_funcs.get("js_array_flat")
+                .ok_or_else(|| anyhow!("js_array_flat not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[arr_ptr]);
+            let result = builder.inst_results(call)[0];
+
+            // Result is an array pointer (i64) - bitcast to f64
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
+        }
         // Map operations
         Expr::MapNew => {
             // Allocate a new empty map
@@ -26615,6 +26642,86 @@ fn compile_expr(
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // Handle generic expr.push(value) on non-local arrays
+                    // (e.g., map.get(key).push(value) or map.get(key).push(...spread))
+                    if property == "push" && args.len() >= 1 {
+                        // Compile the object expression to get the array pointer
+                        let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+
+                        // Extract array pointer (handle both NaN-boxed F64 and raw I64)
+                        let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                            let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                            let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                            let call = builder.ins().call(get_ptr_ref, &[arr_val]);
+                            builder.inst_results(call)[0]
+                        } else {
+                            arr_val
+                        };
+
+                        // Check if the argument is an array (for spread semantics)
+                        // When args[0] is a known array expression, use concat (spread-like behavior)
+                        let arg_is_array = match &args[0] {
+                            Expr::LocalGet(id) => locals.get(id).map(|i| i.is_array).unwrap_or(false),
+                            Expr::Array(_) | Expr::ArraySpread(_) | Expr::ArrayFlat { .. } |
+                            Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySlice { .. } => true,
+                            Expr::Call { callee, .. } => {
+                                if let Expr::PropertyGet { property: p, .. } = callee.as_ref() {
+                                    matches!(p.as_str(), "map" | "filter" | "flat" | "flatMap" |
+                                        "concat" | "slice" | "reverse" | "sort" | "split")
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
+
+                        if arg_is_array {
+                            // Spread-like: concat all elements from source array
+                            let src_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+                            let src_ptr = if builder.func.dfg.value_type(src_val) == types::F64 {
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let call = builder.ins().call(get_ptr_ref, &[src_val]);
+                                builder.inst_results(call)[0]
+                            } else {
+                                src_val
+                            };
+
+                            let func = extern_funcs.get("js_array_concat")
+                                .ok_or_else(|| anyhow!("js_array_concat not declared"))?;
+                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                            let call = builder.ins().call(func_ref, &[arr_ptr, src_ptr]);
+                            let new_arr_ptr = builder.inst_results(call)[0];
+
+                            // Return the new length using the new pointer (concat may reallocate)
+                            let len_func = extern_funcs.get("js_array_length")
+                                .ok_or_else(|| anyhow!("js_array_length not declared"))?;
+                            let len_ref = module.declare_func_in_func(*len_func, builder.func);
+                            let len_call = builder.ins().call(len_ref, &[new_arr_ptr]);
+                            let len_i32 = builder.inst_results(len_call)[0];
+                            return Ok(builder.ins().fcvt_from_sint(types::F64, len_i32));
+                        } else {
+                            // Single element push
+                            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+                            let push_val = ensure_f64(builder, val);
+
+                            let func = extern_funcs.get("js_array_push_f64")
+                                .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
+                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                            let _call = builder.ins().call(func_ref, &[arr_ptr, push_val]);
+
+                            // Return the new length
+                            let len_func = extern_funcs.get("js_array_length")
+                                .ok_or_else(|| anyhow!("js_array_length not declared"))?;
+                            let len_ref = module.declare_func_in_func(*len_func, builder.func);
+                            let len_call = builder.ins().call(len_ref, &[arr_ptr]);
+                            let len_i32 = builder.inst_results(len_call)[0];
+                            return Ok(builder.ins().fcvt_from_sint(types::F64, len_i32));
                         }
                     }
 
@@ -32536,21 +32643,10 @@ fn compile_expr(
                                 return Ok(val);
                             }
 
-                            // Fall back to direct field access (inline store)
-                            if let Some(&field_idx) = class_meta.field_indices.get(property) {
-                                // Get the object pointer - ensure it's i64
-                                let obj_val = builder.use_var(info.var);
-                                let obj_ptr = ensure_i64(builder, obj_val);
-                                let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
-                                // Ensure val is f64 for storage
-                                let val_f64 = ensure_f64(builder, val);
-
-                                // ObjectHeader is 24 bytes, fields start after that
-                                let field_offset = 24 + (field_idx as i32) * 8;
-                                builder.ins().store(MemFlags::new(), val_f64, obj_ptr, field_offset);
-
-                                return Ok(val);
-                            }
+                            // Skip index-based field store for non-this variables:
+                            // Plain objects (MySQL rows, JSON.parse results) may have different
+                            // field ordering than the class definition. Fall through to name-based
+                            // access which works for all object types.
                         }
                     }
                 }
@@ -32668,37 +32764,9 @@ fn compile_expr(
             }
 
             // Handle obj.field++ where obj is a local variable
-            if let Expr::LocalGet(id) = object.as_ref() {
-                if let Some(info) = locals.get(id) {
-                    if let Some(ref class_name) = info.class_name {
-                        if let Some(class_meta) = classes.get(class_name) {
-                            if let Some(&field_idx) = class_meta.field_indices.get(property) {
-                                // Get the object pointer - ensure it's i64
-                                let obj_val = builder.use_var(info.var);
-                                let obj_ptr = ensure_i64(builder, obj_val);
-
-                                // Get current value (inline load)
-                                let field_offset = 24 + (field_idx as i32) * 8;
-                                let old_val = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
-
-                                // Compute new value: old +/- 1
-                                let one = builder.ins().f64const(1.0);
-                                let new_val = match op {
-                                    BinaryOp::Add => builder.ins().fadd(old_val, one),
-                                    BinaryOp::Sub => builder.ins().fsub(old_val, one),
-                                    _ => return Err(anyhow!("Unexpected op in PropertyUpdate: {:?}", op)),
-                                };
-
-                                // Set new value (inline store)
-                                builder.ins().store(MemFlags::new(), new_val, obj_ptr, field_offset);
-
-                                // Return old value for postfix (x++), new value for prefix (++x)
-                                return Ok(if *prefix { new_val } else { old_val });
-                            }
-                        }
-                    }
-                }
-            }
+            // NOTE: Skip index-based field access for non-this variables.
+            // Plain objects (MySQL rows, JSON.parse) may have different field ordering.
+            // Fall through to generic runtime-based update.
 
             // Generic fallback: Use runtime functions for dynamic property update
             // This handles cases like obj.field++ where obj is any expression
@@ -33020,11 +33088,13 @@ fn compile_expr(
                     }
 
                     // Handle object field access (check for getter first)
+                    // NOTE: Skip index-based field access for non-this variables.
+                    // Plain objects (MySQL rows, JSON.parse results) may have different
+                    // field ordering than the class definition. Fall through to name-based
+                    // access which works for all object types.
                     if let Some(ref class_name) = info.class_name {
                         if let Some(class_meta) = classes.get(class_name) {
                             // Get the object pointer - ensure it's i64 for memory access
-                            // The variable might be stored as f64 (bitcast from i64) if is_union is true,
-                            // or as i64 if is_pointer && !is_union. Use ensure_i64 to handle both cases.
                             let obj_val = builder.use_var(info.var);
                             let obj_ptr = ensure_i64(builder, obj_val);
 
@@ -33035,15 +33105,7 @@ fn compile_expr(
 
                                 return Ok(builder.inst_results(call)[0]);
                             }
-
-                            // Fall back to direct field access (inline load)
-                            if let Some(&field_idx) = class_meta.field_indices.get(property) {
-                                // ObjectHeader is 24 bytes, fields start after that
-                                // field offset = 24 + field_idx * 8
-                                let field_offset = 24 + (field_idx as i32) * 8;
-                                let value = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
-                                return Ok(value);
-                            }
+                            // No index-based field access — fall through to name-based
                         }
                     }
                 }
@@ -33180,6 +33242,11 @@ fn compile_expr(
             }
 
             // Handle class instance field access (obj.field where obj is a local variable with known class)
+            // NOTE: Only use index-based access for variables known to be Perry-constructed class instances.
+            // Function parameters and cross-module objects may be plain objects (e.g., MySQL rows) with
+            // different field ordering than the class definition. For safety, we only use index-based access
+            // for getters (which are compiled functions, not offset-based), and fall through to name-based
+            // access for regular field reads.
             if let Expr::LocalGet(id) = object.as_ref() {
                 if let Some(info) = locals.get(id) {
                     if let Some(ref class_name) = info.class_name {
@@ -33196,18 +33263,10 @@ fn compile_expr(
                                 return Ok(builder.inst_results(call)[0]);
                             }
 
-                            // Fall back to direct field access (inline load)
-                            if let Some(&field_idx) = class_meta.field_indices.get(property) {
-                                // Get the object pointer - ensure it's i64
-                                let obj_val = builder.use_var(info.var);
-                                let obj_ptr = ensure_i64(builder, obj_val);
-
-                                // ObjectHeader is 24 bytes, fields start after that
-                                let field_offset = 24 + (field_idx as i32) * 8;
-                                let field_val = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
-
-                                return Ok(field_val);
-                            }
+                            // Skip index-based field access for non-this variables:
+                            // Plain objects (MySQL rows, JSON.parse results) may have different
+                            // field ordering than the class definition. Fall through to name-based
+                            // access at the end of this function which works for all object types.
                         }
                     }
                 }
@@ -34995,7 +35054,21 @@ fn compile_expr(
                     .ok_or_else(|| anyhow!("js_await_js_promise not declared"))?;
                 let await_ref = module.declare_func_in_func(*await_func, builder.func);
                 let call = builder.ins().call(await_ref, &[promise_f64]);
-                return Ok(builder.inst_results(call)[0]);
+                let result = builder.inst_results(call)[0];
+
+                // Reload module-level variables from global slots after await
+                // These may have been mutated by other async work during the wait
+                for (_local_id, info) in locals.iter() {
+                    if let Some(data_id) = info.module_var_data_id {
+                        let var_type = if info.is_pointer && !info.is_union { types::I64 } else { types::F64 };
+                        let global_val = module.declare_data_in_func(data_id, builder.func);
+                        let ptr = builder.ins().global_value(types::I64, global_val);
+                        let val = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
+                        builder.def_var(info.var, val);
+                    }
+                }
+
+                return Ok(result);
             }
 
             // Get the promise pointer. The value could be:
@@ -35141,6 +35214,18 @@ fn compile_expr(
             builder.switch_to_block(done_block);
             builder.seal_block(done_block);
             let done_promise_ptr = builder.block_params(done_block)[0];
+
+            // Reload module-level variables from global slots after await
+            // These may have been mutated by other async work during the wait
+            for (_local_id, info) in locals.iter() {
+                if let Some(data_id) = info.module_var_data_id {
+                    let var_type = if info.is_pointer && !info.is_union { types::I64 } else { types::F64 };
+                    let global_val = module.declare_data_in_func(data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    let val = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
+                    builder.def_var(info.var, val);
+                }
+            }
 
             // Get the resolved value
             let value_func = extern_funcs.get("js_promise_value")
@@ -36606,6 +36691,66 @@ fn compile_expr(
                 }
             }
 
+            // Handle array.push_spread and array.push_single (from generic expr.push() lowering)
+            if native_module == "array" && (method == "push_spread" || method == "push_single") {
+                if let Some(obj_expr) = object {
+                    let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, obj_expr, this_ctx)?;
+
+                    // Extract array pointer (handle both NaN-boxed F64 and raw I64)
+                    let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let call = builder.ins().call(get_ptr_ref, &[arr_val]);
+                        builder.inst_results(call)[0]
+                    } else {
+                        arr_val
+                    };
+
+                    if method == "push_spread" && !arg_vals.is_empty() {
+                        // Spread: concat source array into dest
+                        let src_ptr = if builder.func.dfg.value_type(arg_vals[0]) == types::F64 {
+                            let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                            let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                            let call = builder.ins().call(get_ptr_ref, &[arg_vals[0]]);
+                            builder.inst_results(call)[0]
+                        } else {
+                            arg_vals[0]
+                        };
+
+                        let func = extern_funcs.get("js_array_concat")
+                            .ok_or_else(|| anyhow!("js_array_concat not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        let call = builder.ins().call(func_ref, &[arr_ptr, src_ptr]);
+                        let new_arr_ptr = builder.inst_results(call)[0];
+
+                        // Return length using new pointer (concat may reallocate)
+                        let len_func = extern_funcs.get("js_array_length")
+                            .ok_or_else(|| anyhow!("js_array_length not declared"))?;
+                        let len_ref = module.declare_func_in_func(*len_func, builder.func);
+                        let len_call = builder.ins().call(len_ref, &[new_arr_ptr]);
+                        let len_i32 = builder.inst_results(len_call)[0];
+                        return Ok(builder.ins().fcvt_from_sint(types::F64, len_i32));
+                    } else if !arg_vals.is_empty() {
+                        // Single element push
+                        let val = ensure_f64(builder, arg_vals[0]);
+                        let func = extern_funcs.get("js_array_push_f64")
+                            .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[arr_ptr, val]);
+                    }
+
+                    // Return the new length
+                    let len_func = extern_funcs.get("js_array_length")
+                        .ok_or_else(|| anyhow!("js_array_length not declared"))?;
+                    let len_ref = module.declare_func_in_func(*len_func, builder.func);
+                    let len_call = builder.ins().call(len_ref, &[arr_ptr]);
+                    let len_i32 = builder.inst_results(len_call)[0];
+                    return Ok(builder.ins().fcvt_from_sint(types::F64, len_i32));
+                }
+            }
+
             // Special case: dotenv.config({ path: X }) → extract path and call js_dotenv_config_path
             if native_module == "dotenv" && method == "config" && !args.is_empty() {
                 if let Expr::Object(fields) = &args[0] {
@@ -37474,9 +37619,17 @@ fn compile_expr(
                     } else {
                         obj_val
                     }
+                } else if native_module == "ws" {
+                    // WS handles can be either NaN-boxed pointers (server) or plain f64 numbers (client).
+                    // Use js_ws_handle_to_i64 which detects the type at runtime.
+                    let obj_f64 = ensure_f64(builder, obj_val);
+                    let ws_handle_func = extern_funcs.get("js_ws_handle_to_i64")
+                        .ok_or_else(|| anyhow!("js_ws_handle_to_i64 not declared"))?;
+                    let ws_handle_ref = module.declare_func_in_func(*ws_handle_func, builder.func);
+                    let call = builder.ins().call(ws_handle_ref, &[obj_f64]);
+                    builder.inst_results(call)[0]
                 } else if native_module == "mysql2" || native_module == "mysql2/promise" ||
                           native_module == "ioredis" ||
-                          native_module == "ws" ||
                           native_module == "events" || native_module == "lru-cache" ||
                           native_module == "commander" || native_module == "ethers" ||
                           native_module == "decimal.js" || native_module == "big.js" ||

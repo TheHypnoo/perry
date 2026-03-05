@@ -357,6 +357,22 @@ pub unsafe extern "C" fn js_ws_wait_for_message(handle: i64, timeout_ms: f64) ->
 // WebSocketServer (wss) implementation
 // ============================================================================
 
+/// Convert a WS value (f64 bits as i64) to the correct i64 handle.
+/// Server handles are NaN-boxed pointers (tag 0x7FFD); client handles are plain f64 numbers.
+#[no_mangle]
+pub unsafe extern "C" fn js_ws_handle_to_i64(val_f64: f64) -> i64 {
+    let bits = val_f64.to_bits();
+    let ptr_tag: u64 = 0x7FFD_0000_0000_0000;
+    let mask: u64 = 0xFFFF_0000_0000_0000;
+    if (bits & mask) == ptr_tag {
+        // NaN-boxed pointer (server handle) — extract raw pointer
+        (bits & 0x0000_FFFF_FFFF_FFFF) as i64
+    } else {
+        // Plain f64 number (client ws_id) — convert to integer
+        val_f64 as i64
+    }
+}
+
 /// Register an event listener on a WebSocket handle (server or client).
 /// Unified function: checks handle type at runtime.
 ///

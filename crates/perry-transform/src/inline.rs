@@ -978,6 +978,9 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
                 substitute_locals(sep, param_map, next_local_id);
             }
         }
+        Expr::ArrayFlat { array } => {
+            substitute_locals(array, param_map, next_local_id);
+        }
         Expr::Await(inner) => {
             substitute_locals(inner, param_map, next_local_id);
         }
