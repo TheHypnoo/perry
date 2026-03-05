@@ -321,6 +321,12 @@ pub extern "C" fn perry_ui_widget_set_hugging(handle: i64, priority: f64) {
     widgets::set_hugging_priority(handle, priority);
 }
 
+/// Pin a child view's top and bottom to its superview so it fills the parent height.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_match_parent_height(handle: i64) {
+    widgets::match_parent_height(handle);
+}
+
 /// Set whether a Button has a border.
 #[no_mangle]
 pub extern "C" fn perry_ui_button_set_bordered(handle: i64, bordered: f64) {

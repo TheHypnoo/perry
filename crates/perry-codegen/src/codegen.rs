@@ -11471,6 +11471,14 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_widget_set_hugging".to_string(), func_id);
         }
 
+        // perry_ui_widget_match_parent_height(handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_widget_match_parent_height", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_match_parent_height".to_string(), func_id);
+        }
+
         // perry_ui_button_set_title(handle: i64, title_ptr: i64)
         {
             let mut sig = self.module.make_signature();
@@ -35815,7 +35823,7 @@ fn compile_expr(
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
                     "widgetSetHidden" | "stackSetDetachesHidden" | "textSetFontSize" | "textSetSelectable" |
-                    "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" |
+                    "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" | "widgetMatchParentHeight" |
                     "widgetSetWidth" | "widgetSetHeight" | "widgetSetHugging" | "buttonSetImagePosition" => {
                         // (handle, ...) — extract handle, pass remaining args as f64
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
@@ -35833,6 +35841,7 @@ fn compile_expr(
                             "buttonSetBordered" => "perry_ui_button_set_bordered",
                             "textfieldFocus" => "perry_ui_textfield_focus",
                             "widgetClearChildren" => "perry_ui_widget_clear_children",
+                            "widgetMatchParentHeight" => "perry_ui_widget_match_parent_height",
                             "widgetSetWidth" => "perry_ui_widget_set_width",
                             "widgetSetHeight" => "perry_ui_widget_set_height",
                             "widgetSetHugging" => "perry_ui_widget_set_hugging",
@@ -35857,7 +35866,7 @@ fn compile_expr(
                             let pos_f64 = ensure_f64(builder, arg_vals[1]);
                             let pos_i64 = builder.ins().fcvt_to_sint_sat(types::I64, pos_f64);
                             builder.ins().call(func_ref, &[handle, pos_i64]);
-                        } else if method == "widgetClearChildren" || method == "textfieldFocus" {
+                        } else if method == "widgetClearChildren" || method == "textfieldFocus" || method == "widgetMatchParentHeight" {
                             builder.ins().call(func_ref, &[handle]);
                         } else {
                             builder.ins().call(func_ref, &call_args);

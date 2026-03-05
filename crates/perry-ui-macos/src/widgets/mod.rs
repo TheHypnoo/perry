@@ -55,7 +55,14 @@ pub fn register_external_nsview(nsview_ptr: i64) -> i64 {
         return 0;
     }
     match unsafe { Retained::retain(nsview_ptr as *mut NSView) } {
-        Some(nsview) => register_widget(nsview),
+        Some(nsview) => {
+            // Disable autoresizing mask constraints so the view can be sized
+            // by NSStackView layout instead of being fixed at its initial frame size.
+            unsafe {
+                let _: () = objc2::msg_send![&*nsview, setTranslatesAutoresizingMaskIntoConstraints: false];
+            }
+            register_widget(nsview)
+        },
         None => {
             eprintln!("register_external_nsview: failed to retain NSView at {:#x}", nsview_ptr);
             0
@@ -451,6 +458,29 @@ pub fn set_hugging_priority(handle: i64, priority: f64) {
             priority as f32, NSLayoutConstraintOrientation::Horizontal);
         view.setContentHuggingPriority_forOrientation(
             priority as f32, NSLayoutConstraintOrientation::Vertical);
+    }
+}
+
+/// Pin a child view's top and bottom anchors to its superview, forcing it to
+/// fill the parent's height.  Useful for HStack children that should stretch
+/// vertically instead of being centered.
+pub fn match_parent_height(child_handle: i64) {
+    if let Some(child) = get_widget(child_handle) {
+        unsafe {
+            let superview_ptr: *const NSView = msg_send![&*child, superview];
+            if superview_ptr.is_null() {
+                eprintln!("match_parent_height: view has no superview");
+                return;
+            }
+            let child_top: Retained<AnyObject> = msg_send![&*child, topAnchor];
+            let child_bottom: Retained<AnyObject> = msg_send![&*child, bottomAnchor];
+            let parent_top: Retained<AnyObject> = msg_send![superview_ptr, topAnchor];
+            let parent_bottom: Retained<AnyObject> = msg_send![superview_ptr, bottomAnchor];
+            let top_c: Retained<AnyObject> = msg_send![&*child_top, constraintEqualToAnchor: &*parent_top];
+            let bot_c: Retained<AnyObject> = msg_send![&*child_bottom, constraintEqualToAnchor: &*parent_bottom];
+            let _: () = msg_send![&*top_c, setActive: true];
+            let _: () = msg_send![&*bot_c, setActive: true];
+        }
     }
 }
 
