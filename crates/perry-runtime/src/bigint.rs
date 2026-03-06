@@ -1,20 +1,24 @@
 //! BigInt runtime support for Perry
 //!
-//! Provides 512-bit integer arithmetic for cryptocurrency operations.
-//! Uses 8 x u64 limbs in little-endian order.
+//! Provides 1024-bit integer arithmetic for cryptocurrency operations.
+//! Uses 16 x u64 limbs in little-endian order.
+//! 1024 bits is needed because secp256k1 (used by ethers.js/noble-curves)
+//! has a ~256-bit prime, and intermediate products (a*b before mod reduction)
+//! can be ~512 bits. With 512-bit two's complement, bit 511 is the sign bit,
+//! causing false negatives. 1024 bits keeps the sign bit at bit 1023.
 
-/// Number of 64-bit limbs in a BigInt (512 bits total)
-const BIGINT_LIMBS: usize = 8;
+/// Number of 64-bit limbs in a BigInt (1024 bits total)
+pub const BIGINT_LIMBS: usize = 16;
 /// Total number of bits
 const BIGINT_BITS: usize = BIGINT_LIMBS * 64;
 
 const ZERO_LIMBS: [u64; BIGINT_LIMBS] = [0; BIGINT_LIMBS];
 
-/// BigInt is stored as a heap-allocated 512-bit integer
-/// Layout: 64 bytes (8 x u64)
+/// BigInt is stored as a heap-allocated 1024-bit integer
+/// Layout: 128 bytes (16 x u64)
 #[repr(C)]
 pub struct BigIntHeader {
-    /// The 512-bit value stored as 8 x u64 in little-endian order
+    /// The 1024-bit value stored as 16 x u64 in little-endian order
     pub limbs: [u64; BIGINT_LIMBS],
 }
 
@@ -77,9 +81,12 @@ pub extern "C" fn js_bigint_from_i64(value: i64) -> *mut BigIntHeader {
             (*ptr).limbs = ZERO_LIMBS;
             (*ptr).limbs[0] = value as u64;
         } else {
-            // Two's complement for negative numbers
-            (*ptr).limbs = [value as u64, u64::MAX, u64::MAX, u64::MAX,
-                           u64::MAX, u64::MAX, u64::MAX, u64::MAX];
+            // Two's complement for negative numbers: sign-extend with u64::MAX
+            (*ptr).limbs = [0u64; BIGINT_LIMBS];
+            (*ptr).limbs[0] = value as u64;
+            for k in 1..BIGINT_LIMBS {
+                (*ptr).limbs[k] = u64::MAX;
+            }
         }
         ptr
     }
@@ -290,7 +297,7 @@ pub extern "C" fn js_bigint_to_buffer(a: *const BigIntHeader, length: i32) -> *m
         if !a.is_null() {
             // Extract bytes from limbs (little-endian in memory)
             let limbs = &(*a).limbs;
-            let mut all_bytes = Vec::with_capacity(64);
+            let mut all_bytes = Vec::with_capacity(BIGINT_LIMBS * 8);
             for limb in limbs.iter() {
                 all_bytes.extend_from_slice(&limb.to_le_bytes());
             }
@@ -316,7 +323,7 @@ pub extern "C" fn js_bigint_is_negative(a: *const BigIntHeader) -> i32 {
     if a.is_null() { return 0; }
     unsafe {
         // In two's complement, negative numbers have MSB set in highest limb
-        let msb = (*a).limbs[7];
+        let msb = (*a).limbs[BIGINT_LIMBS - 1];
         if msb & (1u64 << 63) != 0 { 1 } else { 0 }
     }
 }
@@ -426,7 +433,7 @@ pub extern "C" fn js_bigint_mul(a: *const BigIntHeader, b: *const BigIntHeader) 
         let b_limbs = (*b).limbs;
         let mut result = ZERO_LIMBS;
 
-        // School multiplication (only keeping lower 512 bits)
+        // School multiplication (keeping lower 1024 bits)
         for i in 0..BIGINT_LIMBS {
             let mut carry = 0u128;
             for j in 0..(BIGINT_LIMBS - i) {
@@ -436,6 +443,15 @@ pub extern "C" fn js_bigint_mul(a: *const BigIntHeader, b: *const BigIntHeader) 
                 result[i + j] = product as u64;
                 carry = product >> 64;
             }
+        }
+
+        // Debug: detect positive*positive=negative
+        let a_neg = is_negative(&a_limbs);
+        let b_neg = is_negative(&b_limbs);
+        let r_neg = is_negative(&result);
+        if !a_neg && !b_neg && r_neg {
+            eprintln!("BUG: pos*pos=neg! a_limbs[4..8]: {:?}, result[8..16]: {:?}",
+                      &a_limbs[4..8], &result[8..16]);
         }
 
         (*ptr).limbs = result;
@@ -535,11 +551,27 @@ pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) 
         let a_neg = is_negative(&a_limbs);
         let b_neg = is_negative(&b_limbs);
 
+        // Debug: detect false negative sign in modulo
+        if a_neg && !b_neg {
+            // Check if 'a' is actually a large positive number with bit 1023 set
+            // by checking how many non-zero upper limbs there are
+            let upper_nonzero = a_limbs[8..].iter().filter(|&&l| l != 0).count();
+            if upper_nonzero > 0 {
+                eprintln!("BIGINT_MOD: a detected as neg, upper_nonzero={}, a[8..16]={:?}",
+                    upper_nonzero, &a_limbs[8..16]);
+            }
+        }
+
         // Get magnitudes
         let abs_a = if a_neg { negate_limbs(&a_limbs) } else { a_limbs };
         let abs_b = if b_neg { negate_limbs(&b_limbs) } else { b_limbs };
 
         let (_, remainder) = unsigned_div_limbs(&abs_a, &abs_b);
+
+        // Debug: detect pos % pos = neg
+        if !a_neg && !b_neg && is_negative(&remainder) {
+            eprintln!("BIGINT_MOD: pos%pos=neg! remainder[8..16]={:?}", &remainder[8..16]);
+        }
 
         // Remainder has sign of dividend
         (*ptr).limbs = if a_neg && remainder != ZERO_LIMBS {

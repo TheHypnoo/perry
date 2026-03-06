@@ -921,7 +921,17 @@ pub(crate) fn lower_var_decl_with_destructuring(
             }
 
             let init = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
-            let id = ctx.define_local(name.clone(), ty.clone());
+            let id = if ctx.pre_registered_module_vars.remove(&name) {
+                // Reuse pre-registered LocalId from module-level forward-declaration pass
+                let id = ctx.lookup_local(&name).unwrap();
+                // Update the type now that we have full inference
+                if let Some((_, _, existing_ty)) = ctx.locals.iter_mut().rev().find(|(n, _, _)| n == &name) {
+                    *existing_ty = ty.clone();
+                }
+                id
+            } else {
+                ctx.define_local(name.clone(), ty.clone())
+            };
             result.push(Stmt::Let {
                 id,
                 name,
@@ -1185,7 +1195,15 @@ pub(crate) fn lower_var_decl_with_destructuring(
             let name = get_binding_name(&decl.name)?;
             let ty = extract_binding_type(&decl.name);
             let init = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
-            let id = ctx.define_local(name.clone(), ty.clone());
+            let id = if ctx.pre_registered_module_vars.remove(&name) {
+                let id = ctx.lookup_local(&name).unwrap();
+                if let Some((_, _, existing_ty)) = ctx.locals.iter_mut().rev().find(|(n, _, _)| n == &name) {
+                    *existing_ty = ty.clone();
+                }
+                id
+            } else {
+                ctx.define_local(name.clone(), ty.clone())
+            };
             result.push(Stmt::Let {
                 id,
                 name,

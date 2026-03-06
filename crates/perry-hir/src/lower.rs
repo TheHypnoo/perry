@@ -82,6 +82,9 @@ pub struct LoweringContext {
     /// Resolved types from external type checker (tsgo): byte_position -> Type
     /// Populated before lowering when --type-check is enabled
     pub resolved_types: Option<std::collections::HashMap<u32, Type>>,
+    /// Module-level variable names pre-registered in the forward-declaration pass.
+    /// Used to avoid duplicate define_local calls when the actual declaration is lowered.
+    pub(crate) pre_registered_module_vars: HashSet<String>,
 }
 
 impl LoweringContext {
@@ -121,6 +124,7 @@ impl LoweringContext {
             pending_classes: Vec::new(),
             func_return_types: Vec::new(),
             resolved_types: None,
+            pre_registered_module_vars: HashSet::new(),
         }
     }
 
@@ -535,6 +539,36 @@ pub fn lower_module_with_class_id_and_types(ast_module: &ast::Module, name: &str
         }
     }
 
+    // Pre-register module-level variable declarations so function bodies
+    // declared before the variable can still reference them via lookup_local
+    for item in &ast_module.body {
+        let var_decl = match item {
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Var(v))) => Some(v),
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export_decl)) => {
+                if let ast::Decl::Var(v) = &export_decl.decl {
+                    Some(v)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(var_decl) = var_decl {
+            for decl in &var_decl.decls {
+                if let ast::Pat::Ident(ident) = &decl.name {
+                    let name = ident.id.sym.to_string();
+                    if ctx.lookup_local(&name).is_none() {
+                        let ty = ident.type_ann.as_ref()
+                            .map(|ann| extract_ts_type(&ann.type_ann))
+                            .unwrap_or(Type::Any);
+                        ctx.define_local(name.clone(), ty);
+                        ctx.pre_registered_module_vars.insert(name);
+                    }
+                }
+            }
+        }
+    }
+
     // Second pass: lower everything
     for item in &ast_module.body {
         match item {
@@ -883,7 +917,15 @@ fn lower_module_decl(
                             );
 
                             let expr = lower_expr(ctx, init)?;
-                            let id = ctx.define_local(name.clone(), ty.clone());
+                            let id = if ctx.pre_registered_module_vars.remove(&name) {
+                                let id = ctx.lookup_local(&name).unwrap();
+                                if let Some((_, _, existing_ty)) = ctx.locals.iter_mut().rev().find(|(n, _, _)| n == &name) {
+                                    *existing_ty = ty.clone();
+                                }
+                                id
+                            } else {
+                                ctx.define_local(name.clone(), ty.clone())
+                            };
                             module.init.push(Stmt::Let {
                                 id,
                                 name: name.clone(),

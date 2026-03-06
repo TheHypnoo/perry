@@ -555,10 +555,12 @@ fn v8_bigint_to_native(_scope: &mut v8::HandleScope<'_>, bigint: v8::Local<v8::B
         panic!("Failed to allocate BigInt");
     }
 
+    use perry_runtime::bigint::BIGINT_LIMBS;
+
     if word_count == 0 {
         // Zero value
         unsafe {
-            (*ptr).limbs = [0; 8];
+            (*ptr).limbs = [0; BIGINT_LIMBS];
         }
         return ptr as *mut u8;
     }
@@ -567,14 +569,14 @@ fn v8_bigint_to_native(_scope: &mut v8::HandleScope<'_>, bigint: v8::Local<v8::B
     let mut words = vec![0u64; word_count];
     let (sign_bit, _) = bigint.to_words_array(&mut words);
 
-    // Copy words to our BigIntHeader (up to 8 limbs / 512 bits)
+    // Copy words to our BigIntHeader (up to BIGINT_LIMBS limbs)
     unsafe {
-        let mut limbs = [0u64; 8];
-        for (i, &word) in words.iter().enumerate().take(8) {
+        let mut limbs = [0u64; BIGINT_LIMBS];
+        for (i, &word) in words.iter().enumerate().take(BIGINT_LIMBS) {
             limbs[i] = word;
         }
 
-        // Handle negative numbers (two's complement for 512 bits)
+        // Handle negative numbers (two's complement)
         if sign_bit {
             // Negate: invert all bits and add 1
             for limb in limbs.iter_mut() {

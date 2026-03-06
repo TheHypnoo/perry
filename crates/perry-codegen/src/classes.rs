@@ -1131,7 +1131,7 @@ impl crate::codegen::Compiler {
                 self.static_field_runtime_inits.push((data_id, expr.clone()));
                 0.0 // Placeholder, will be overwritten at runtime
             }
-            _ => 0.0, // Default to 0.0 for other types
+            _ => 0.0
         };
 
         data_desc.init = Init::Bytes {
@@ -1238,7 +1238,7 @@ impl crate::codegen::Compiler {
                     is_pointer: false,  // NaN-boxed F64, not raw I64 pointer
                     is_array,
                     is_string,
-                    is_bigint: false,
+                    is_bigint: matches!(param.ty, perry_types::Type::BigInt),
                     is_closure,
                     is_boxed: false,
                     is_map, is_set, is_buffer: false, is_event_emitter: false, is_union,

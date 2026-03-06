@@ -16,6 +16,18 @@ use crate::common::async_bridge::{queue_promise_resolution, spawn};
 lazy_static::lazy_static! {
     static ref FETCH_RESPONSES: Mutex<HashMap<usize, FetchResponse>> = Mutex::new(HashMap::new());
     static ref NEXT_RESPONSE_ID: Mutex<usize> = Mutex::new(1);
+    static ref STREAM_HANDLES: Mutex<HashMap<usize, StreamState>> = Mutex::new(HashMap::new());
+    static ref NEXT_STREAM_ID: Mutex<usize> = Mutex::new(1);
+}
+
+struct StreamState {
+    status: u8,           // 0=connecting, 1=streaming, 2=done, 3=error
+    pending_lines: Vec<String>,
+    partial: String,
+    #[allow(dead_code)]
+    http_status: u16,
+    #[allow(dead_code)]
+    error: String,
 }
 
 struct FetchResponse {
@@ -611,4 +623,103 @@ pub unsafe extern "C" fn js_fetch_text(url_ptr: *const StringHeader) -> *mut per
     });
 
     promise
+}
+
+// ========================================================================
+// SSE Streaming Functions
+// ========================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn js_fetch_stream_start(
+    url_ptr: *const StringHeader, method_ptr: *const StringHeader,
+    body_ptr: *const StringHeader, headers_json_ptr: *const StringHeader,
+) -> f64 {
+    let url = string_from_header(url_ptr).unwrap_or_default();
+    let method = string_from_header(method_ptr).unwrap_or_else(|| "POST".to_string());
+    let body = string_from_header(body_ptr);
+    let headers_json = string_from_header(headers_json_ptr).unwrap_or_else(|| "{}".to_string());
+    let custom_headers: HashMap<String, String> = serde_json::from_str(&headers_json).unwrap_or_default();
+    let mut id_guard = NEXT_STREAM_ID.lock().unwrap();
+    let stream_id = *id_guard;
+    *id_guard += 1;
+    drop(id_guard);
+    STREAM_HANDLES.lock().unwrap().insert(stream_id, StreamState {
+        status: 0, pending_lines: Vec::new(), partial: String::new(), http_status: 0, error: String::new(),
+    });
+    let sid = stream_id;
+    spawn(async move {
+        let client = reqwest::Client::new();
+        let mut request = match method.to_uppercase().as_str() {
+            "POST" => client.post(&url), "PUT" => client.put(&url),
+            "PATCH" => client.patch(&url), _ => client.get(&url),
+        };
+        for (key, value) in &custom_headers { request = request.header(key.as_str(), value.as_str()); }
+        if let Some(b) = body { request = request.body(b); }
+        match request.send().await {
+            Ok(mut response) => {
+                let http_status = response.status().as_u16();
+                { let mut g = STREAM_HANDLES.lock().unwrap(); if let Some(s) = g.get_mut(&sid) { s.http_status = http_status; s.status = 1; } }
+                loop {
+                    match response.chunk().await {
+                        Ok(Some(chunk)) => {
+                            let text = String::from_utf8_lossy(&chunk).to_string();
+                            let mut g = STREAM_HANDLES.lock().unwrap();
+                            if let Some(s) = g.get_mut(&sid) {
+                                s.partial.push_str(&text);
+                                loop {
+                                    if let Some(pos) = s.partial.find('\n') {
+                                        let line = s.partial[..pos].to_string();
+                                        s.partial = s.partial[pos + 1..].to_string();
+                                        if !line.is_empty() { s.pending_lines.push(line); }
+                                    } else { break; }
+                                }
+                            } else { break; }
+                        }
+                        Ok(None) => {
+                            let mut g = STREAM_HANDLES.lock().unwrap();
+                            if let Some(s) = g.get_mut(&sid) {
+                                if !s.partial.is_empty() { let r = std::mem::take(&mut s.partial); s.pending_lines.push(r); }
+                                s.status = 2;
+                            }
+                            break;
+                        }
+                        Err(e) => {
+                            let mut g = STREAM_HANDLES.lock().unwrap();
+                            if let Some(s) = g.get_mut(&sid) { s.error = format!("Stream error: {}", e); s.status = 3; }
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => { let mut g = STREAM_HANDLES.lock().unwrap(); if let Some(s) = g.get_mut(&sid) { s.error = format!("Connection error: {}", e); s.status = 3; } }
+        }
+    });
+    stream_id as f64
+}
+
+#[no_mangle]
+pub extern "C" fn js_fetch_stream_poll(handle: f64) -> *mut StringHeader {
+    let id = handle as usize;
+    let mut g = STREAM_HANDLES.lock().unwrap();
+    if let Some(s) = g.get_mut(&id) {
+        if !s.pending_lines.is_empty() {
+            let line = s.pending_lines.remove(0);
+            return js_string_from_bytes(line.as_ptr(), line.len() as u32);
+        }
+    }
+    js_string_from_bytes("".as_ptr(), 0)
+}
+
+#[no_mangle]
+pub extern "C" fn js_fetch_stream_status(handle: f64) -> f64 {
+    let id = handle as usize;
+    let g = STREAM_HANDLES.lock().unwrap();
+    if let Some(s) = g.get(&id) { s.status as f64 } else { 3.0 }
+}
+
+#[no_mangle]
+pub extern "C" fn js_fetch_stream_close(handle: f64) -> f64 {
+    let id = handle as usize;
+    let mut g = STREAM_HANDLES.lock().unwrap();
+    if g.remove(&id).is_some() { 1.0 } else { 0.0 }
 }

@@ -4168,6 +4168,17 @@ pub(crate) fn compile_expr(
                                 builder.def_var(info.var, new_f64);
                             }
 
+                            // Write back to module-level global slot so other functions
+                            // see the updated pointer after js_string_append may reallocate
+                            if !info.is_boxed {
+                                if let Some(data_id) = info.module_var_data_id {
+                                    let current = builder.use_var(info.var);
+                                    let global_val = module.declare_data_in_func(data_id, builder.func);
+                                    let ptr = builder.ins().global_value(types::I64, global_val);
+                                    builder.ins().store(MemFlags::new(), current, ptr, 0);
+                                }
+                            }
+
                             // Return as f64 for consistency
                             let ret_f64 = inline_nanbox_string(builder, new_ptr);
                             return Ok(ret_f64);
@@ -12614,6 +12625,17 @@ pub(crate) fn compile_expr(
             // Special handling for ExternFuncRef (imported values from another module)
             // e.g., import { config } from './config'; then config.db.host
             if let Expr::ExternFuncRef { name, .. } = object.as_ref() {
+                // Check if this is a class static field access (e.g., TickMath.MIN_TICK)
+                // The HIR lowering can't produce StaticFieldGet for imported classes because
+                // class statics aren't available during lowering of the importing module.
+                if let Some(class_meta) = classes.get(name.as_str()) {
+                    if let Some(data_id) = class_meta.static_field_ids.get(property.as_str()) {
+                        let global_val = module.declare_data_in_func(*data_id, builder.func);
+                        let ptr = builder.ins().global_value(types::I64, global_val);
+                        return Ok(builder.ins().load(types::F64, MemFlags::new(), ptr, 0));
+                    }
+                }
+
                 // Check if this is a namespace import (import * as X from './module')
                 // If so, resolve the property directly to the export global
                 if tl_is_namespace_import(name) {
@@ -19406,7 +19428,17 @@ pub(crate) fn compile_expr(
 
             // js_bigint_from_f64 handles strings, numbers, and other NaN-boxed types at runtime
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
-            let val_f64 = ensure_f64(builder, val);
+            // If the value is I64 (raw string pointer from string-typed param), NaN-box it
+            // with STRING_TAG so js_bigint_from_f64 recognizes it as a string
+            let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                let nanbox_str_func = extern_funcs.get("js_nanbox_string")
+                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                let nanbox_str_ref = module.declare_func_in_func(*nanbox_str_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_str_ref, &[val]);
+                builder.inst_results(nanbox_call)[0]
+            } else {
+                val
+            };
 
             // Call js_bigint_from_f64(value) -> I64 pointer (handles string/number/bigint at runtime)
             let from_f64_func = extern_funcs.get("js_bigint_from_f64")
