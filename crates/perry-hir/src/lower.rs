@@ -1331,6 +1331,9 @@ fn lower_module_decl(
                             // Namespace import of native module (e.g., import * as mysql from 'mysql2')
                             // Methods are called via the namespace, so no specific method name
                             ctx.register_native_module(local.clone(), source.clone(), None);
+                            // Also register as builtin module alias so method-level
+                            // recognition works (child_process, fs, os, etc.)
+                            ctx.register_builtin_module_alias(local.clone(), source.clone());
                         } else {
                             // Namespace import from JS module - register so calls resolve to ExternFuncRef
                             ctx.register_imported_func(local.clone(), local.clone());
@@ -4445,9 +4448,13 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                             }
 
                             if let Some((module_name, _imported_method)) = ctx.lookup_native_module(&obj_name) {
-                                // Skip modules handled specifically below (path, fs, etc.)
+                                // Skip modules handled specifically below (path, fs, child_process, etc.)
                                 let is_handled_module = module_name == "path" || module_name == "node:path"
-                                    || module_name == "fs" || module_name == "node:fs";
+                                    || module_name == "fs" || module_name == "node:fs"
+                                    || module_name == "child_process" || module_name == "node:child_process"
+                                    || module_name == "crypto" || module_name == "node:crypto"
+                                    || module_name == "os" || module_name == "node:os"
+                                    || module_name == "net" || module_name == "node:net";
                                 if !is_handled_module {
                                     // This is a call on a native module (e.g., mysql.createConnection)
                                     if let ast::MemberProp::Ident(method_ident) = &member.prop {

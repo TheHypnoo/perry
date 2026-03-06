@@ -221,7 +221,7 @@ pub extern "C" fn js_child_process_kill_process(handle_id_val: f64) -> i32 {
 pub extern "C" fn js_child_process_exec_sync(
     cmd_ptr: *const StringHeader,
     _options_ptr: *const ObjectHeader,
-) -> *mut BufferHeader {
+) -> *mut StringHeader {
     if cmd_ptr.is_null() {
         return std::ptr::null_mut();
     }
@@ -251,15 +251,9 @@ pub extern "C" fn js_child_process_exec_sync(
 
         match output {
             Ok(output) => {
-                // Return stdout as a buffer
+                // Return stdout as a string
                 let stdout = &output.stdout;
-                let buf = crate::buffer::js_buffer_alloc(stdout.len() as i32, 0);
-                if !buf.is_null() {
-                    let buf_data = (buf as *mut u8).add(std::mem::size_of::<BufferHeader>());
-                    std::ptr::copy_nonoverlapping(stdout.as_ptr(), buf_data, stdout.len());
-                    (*buf).length = stdout.len() as u32;
-                }
-                buf
+                js_string_from_bytes(stdout.as_ptr(), stdout.len() as u32)
             }
             Err(_) => std::ptr::null_mut(),
         }
@@ -298,14 +292,9 @@ pub extern "C" fn js_child_process_spawn_sync(
             let args_data = (args_ptr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
 
             for i in 0..args_len {
-                let arg_ptr = (*args_data.add(i)).to_bits() as *const StringHeader;
-                if !arg_ptr.is_null() {
-                    let arg_len = (*arg_ptr).length as usize;
-                    let arg_data = (arg_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                    let arg_bytes = std::slice::from_raw_parts(arg_data, arg_len);
-                    if let Ok(arg_str) = std::str::from_utf8(arg_bytes) {
-                        command.arg(arg_str);
-                    }
+                let arg_val = *args_data.add(i);
+                if let Some(arg_str) = extract_string_from_nanboxed(arg_val) {
+                    command.arg(arg_str);
                 }
             }
         }
@@ -313,43 +302,35 @@ pub extern "C" fn js_child_process_spawn_sync(
         // Execute the command
         match command.output() {
             Ok(output) => {
+                use crate::array::{js_array_alloc, js_array_push_f64};
+                use crate::value::js_nanbox_string;
+
                 // Create result object with stdout, stderr, status (3 fields)
-                // Fields: 0=stdout, 1=stderr, 2=status
                 let result = crate::object::js_object_alloc(0, 3);
 
-                // Set stdout as buffer (field 0)
-                let stdout_buf = crate::buffer::js_buffer_alloc(output.stdout.len() as i32, 0);
-                if !stdout_buf.is_null() {
-                    let buf_data = (stdout_buf as *mut u8).add(std::mem::size_of::<BufferHeader>());
-                    std::ptr::copy_nonoverlapping(output.stdout.as_ptr(), buf_data, output.stdout.len());
-                    (*stdout_buf).length = output.stdout.len() as u32;
-                }
-                crate::object::js_object_set_field_f64(
-                    result,
-                    0,
-                    (stdout_buf as u64) as f64
-                );
+                // Set stdout as string (field 0)
+                let stdout_str = js_string_from_bytes(output.stdout.as_ptr(), output.stdout.len() as u32);
+                let stdout_boxed = js_nanbox_string(stdout_str as i64);
+                crate::object::js_object_set_field_f64(result, 0, stdout_boxed);
 
-                // Set stderr as buffer (field 1)
-                let stderr_buf = crate::buffer::js_buffer_alloc(output.stderr.len() as i32, 0);
-                if !stderr_buf.is_null() {
-                    let buf_data = (stderr_buf as *mut u8).add(std::mem::size_of::<BufferHeader>());
-                    std::ptr::copy_nonoverlapping(output.stderr.as_ptr(), buf_data, output.stderr.len());
-                    (*stderr_buf).length = output.stderr.len() as u32;
-                }
-                crate::object::js_object_set_field_f64(
-                    result,
-                    1,
-                    (stderr_buf as u64) as f64
-                );
+                // Set stderr as string (field 1)
+                let stderr_str = js_string_from_bytes(output.stderr.as_ptr(), output.stderr.len() as u32);
+                let stderr_boxed = js_nanbox_string(stderr_str as i64);
+                crate::object::js_object_set_field_f64(result, 1, stderr_boxed);
 
                 // Set status (field 2)
                 let status = output.status.code().unwrap_or(-1) as f64;
-                crate::object::js_object_set_field_f64(
-                    result,
-                    2,
-                    status
-                );
+                crate::object::js_object_set_field_f64(result, 2, status);
+
+                // Build keys array for named property access
+                let keys = js_array_alloc(3);
+                let k_stdout = js_string_from_bytes(b"stdout".as_ptr(), 6);
+                let k_stderr = js_string_from_bytes(b"stderr".as_ptr(), 6);
+                let k_status = js_string_from_bytes(b"status".as_ptr(), 6);
+                js_array_push_f64(keys, js_nanbox_string(k_stdout as i64));
+                js_array_push_f64(keys, js_nanbox_string(k_stderr as i64));
+                js_array_push_f64(keys, js_nanbox_string(k_status as i64));
+                crate::object::js_object_set_keys(result, keys);
 
                 result
             }

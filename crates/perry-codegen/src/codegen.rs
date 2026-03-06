@@ -21262,7 +21262,7 @@ fn compile_expr(
             let func_ref = module.declare_func_in_func(*func, builder.func);
             let call = builder.ins().call(func_ref, &[cmd_f64, args_i64, log_f64, env_f64]);
             let result_ptr = builder.inst_results(call)[0];
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+            Ok(inline_nanbox_pointer(builder, result_ptr))
         }
         Expr::ChildProcessGetProcessStatus(handle_expr) => {
             let handle_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, handle_expr, this_ctx)?;
@@ -21273,7 +21273,7 @@ fn compile_expr(
             let func_ref = module.declare_func_in_func(*func, builder.func);
             let call = builder.ins().call(func_ref, &[handle_f64]);
             let result_ptr = builder.inst_results(call)[0];
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+            Ok(inline_nanbox_pointer(builder, result_ptr))
         }
         Expr::ChildProcessKillProcess(handle_expr) => {
             let handle_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, handle_expr, this_ctx)?;
@@ -22214,7 +22214,7 @@ fn compile_expr(
             let func_ref = module.declare_func_in_func(*func, builder.func);
             let call = builder.ins().call(func_ref, &[cmd_ptr, args_ptr, opts_ptr]);
             let result_ptr = builder.inst_results(call)[0];
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+            Ok(inline_nanbox_pointer(builder, result_ptr))
         }
         Expr::ChildProcessSpawn { .. } | Expr::ChildProcessExec { .. } => {
             // Async child processes are not fully supported yet
