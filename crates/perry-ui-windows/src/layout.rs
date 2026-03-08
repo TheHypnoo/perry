@@ -249,6 +249,18 @@ fn layout_navstack(handle: i64, width: i32, height: i32) {
 
 /// Measure the intrinsic size of a widget along the main axis.
 fn measure_intrinsic(handle: i64, kind: &WidgetKind, vertical: bool, cross_size: i32) -> i32 {
+    // Check fixed dimensions first — they override intrinsic measurement
+    if let Some(info) = widgets::get_widget_info(handle) {
+        if vertical {
+            if let Some(fh) = info.fixed_height {
+                return fh;
+            }
+        } else {
+            if let Some(fw) = info.fixed_width {
+                return fw;
+            }
+        }
+    }
     match kind {
         WidgetKind::Text => {
             #[cfg(target_os = "windows")]
