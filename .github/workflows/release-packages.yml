@@ -1,0 +1,360 @@
+name: Release Packages
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build release binaries for all platforms
+  # ---------------------------------------------------------------------------
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: perry-macos-aarch64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: perry-macos-x86_64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: perry-linux-x86_64
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: perry-linux-aarch64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu' && matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build perry
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build runtime libraries
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p perry-runtime
+          cargo build --release --target ${{ matrix.target }} -p perry-stdlib
+
+      - name: Package release archive
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/perry staging/
+          # Include static libraries for linking
+          if [ -f target/${{ matrix.target }}/release/libperry_runtime.a ]; then
+            cp target/${{ matrix.target }}/release/libperry_runtime.a staging/
+          fi
+          if [ -f target/${{ matrix.target }}/release/libperry_stdlib.a ]; then
+            cp target/${{ matrix.target }}/release/libperry_stdlib.a staging/
+          fi
+          cd staging
+          tar czf ../${{ matrix.artifact }}.tar.gz *
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}.tar.gz" --clobber
+
+      - name: Upload build artifact (for deb job)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staging/
+
+  # ---------------------------------------------------------------------------
+  # Update Homebrew tap
+  # ---------------------------------------------------------------------------
+  homebrew:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get release info
+        id: release
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download source tarball and compute SHA256
+        id: sha
+        run: |
+          curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.release.outputs.tag }}.tar.gz" -o source.tar.gz
+          SHA256=$(sha256sum source.tar.gz | cut -d' ' -f1)
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: Download macOS ARM64 bottle and compute SHA256
+        id: bottle_arm64
+        run: |
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${{ steps.release.outputs.tag }}/perry-macos-aarch64.tar.gz" -o perry-macos-aarch64.tar.gz
+          SHA256=$(sha256sum perry-macos-aarch64.tar.gz | cut -d' ' -f1)
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: Download macOS x86_64 bottle and compute SHA256
+        id: bottle_x64
+        run: |
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${{ steps.release.outputs.tag }}/perry-macos-x86_64.tar.gz" -o perry-macos-x86_64.tar.gz
+          SHA256=$(sha256sum perry-macos-x86_64.tar.gz | cut -d' ' -f1)
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/PerryTS/homebrew-perry.git" tap
+          cd tap
+
+          mkdir -p Formula
+
+          cat > Formula/perry.rb << 'FORMULA_EOF'
+          class Perry < Formula
+            desc "Native TypeScript compiler — compiles TypeScript to native executables"
+            homepage "https://github.com/PerryTS/perry"
+            version "${{ steps.release.outputs.version }}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/PerryTS/perry/releases/download/${{ steps.release.outputs.tag }}/perry-macos-aarch64.tar.gz"
+                sha256 "${{ steps.bottle_arm64.outputs.sha256 }}"
+              else
+                url "https://github.com/PerryTS/perry/releases/download/${{ steps.release.outputs.tag }}/perry-macos-x86_64.tar.gz"
+                sha256 "${{ steps.bottle_x64.outputs.sha256 }}"
+              end
+            end
+
+            on_linux do
+              url "https://github.com/PerryTS/perry/archive/refs/tags/${{ steps.release.outputs.tag }}.tar.gz"
+              sha256 "${{ steps.sha.outputs.sha256 }}"
+              depends_on "rust" => :build
+            end
+
+            def install
+              if OS.mac?
+                bin.install "perry"
+                lib.install Dir["libperry_*.a"]
+              else
+                system "cargo", "build", "--release"
+                system "cargo", "build", "--release", "-p", "perry-runtime", "-p", "perry-stdlib"
+                bin.install "target/release/perry"
+                lib.install Dir["target/release/libperry_*.a"]
+              end
+            end
+
+            def caveats
+              <<~EOS
+                Perry requires a C linker to link compiled executables.
+
+                macOS:  Xcode Command Line Tools (xcode-select --install)
+                Linux:  GCC or Clang (sudo apt install build-essential)
+
+                Quick start:
+                  echo 'console.log("hello")' > hello.ts
+                  perry hello.ts -o hello && ./hello
+              EOS
+            end
+
+            test do
+              assert_match "perry", shell_output("#{bin}/perry --version")
+              (testpath/"test.ts").write('console.log("works");')
+              system bin/"perry", testpath/"test.ts", "-o", testpath/"test"
+              assert_equal "works\n", shell_output(testpath/"test")
+            end
+          end
+          FORMULA_EOF
+
+          # Remove leading whitespace from heredoc indentation
+          sed -i 's/^          //' Formula/perry.rb
+
+          git config user.name "perry-bot"
+          git config user.email "bot@perryts.com"
+          git add Formula/perry.rb
+          git commit -m "perry ${VERSION}" || echo "No changes"
+          git push
+
+  # ---------------------------------------------------------------------------
+  # Build .deb packages and update APT repository
+  # ---------------------------------------------------------------------------
+  apt:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - artifact: perry-linux-x86_64
+            arch: amd64
+          - artifact: perry-linux-aarch64
+            arch: arm64
+    steps:
+      - name: Get release info
+        id: release
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staging/
+
+      - name: Build .deb package
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          ARCH="${{ matrix.arch }}"
+          PKG="perry_${VERSION}_${ARCH}"
+
+          mkdir -p "${PKG}/DEBIAN"
+          mkdir -p "${PKG}/usr/bin"
+          mkdir -p "${PKG}/usr/lib/perry"
+
+          cat > "${PKG}/DEBIAN/control" << EOF
+          Package: perry
+          Version: ${VERSION}
+          Section: devel
+          Priority: optional
+          Architecture: ${ARCH}
+          Depends: gcc | clang
+          Maintainer: Perry Team <hello@perryts.com>
+          Homepage: https://github.com/PerryTS/perry
+          Description: Native TypeScript compiler
+           Perry compiles TypeScript source code directly to native
+           executables using Cranelift for code generation.
+          EOF
+          sed -i 's/^          //' "${PKG}/DEBIAN/control"
+
+          cp staging/perry "${PKG}/usr/bin/"
+          chmod 755 "${PKG}/usr/bin/perry"
+
+          if [ -f staging/libperry_runtime.a ]; then
+            cp staging/libperry_runtime.a "${PKG}/usr/lib/perry/"
+          fi
+          if [ -f staging/libperry_stdlib.a ]; then
+            cp staging/libperry_stdlib.a "${PKG}/usr/lib/perry/"
+          fi
+
+          # Add library path config so perry can find its libs
+          mkdir -p "${PKG}/etc/perry"
+          echo "/usr/lib/perry" > "${PKG}/etc/perry/lib-path"
+
+          dpkg-deb --build "${PKG}"
+
+      - name: Upload .deb as release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          ARCH="${{ matrix.arch }}"
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "perry_${VERSION}_${ARCH}.deb" \
+            --repo "${{ github.repository }}" --clobber
+
+      - name: Upload .deb artifact (for apt-repo job)
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: "*.deb"
+
+  # ---------------------------------------------------------------------------
+  # Update APT repository (GitHub Pages)
+  # ---------------------------------------------------------------------------
+  apt-repo:
+    needs: apt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get release info
+        id: release
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Download .deb packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          merge-multiple: true
+          path: debs/
+
+      - name: Clone APT repo
+        env:
+          APT_TOKEN: ${{ secrets.APT_REPO_TOKEN }}
+        run: git clone "https://x-access-token:${APT_TOKEN}@github.com/PerryTS/perry-apt.git" apt-repo
+
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: Update repository
+        env:
+          GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
+        run: |
+          cd apt-repo
+
+          # Copy new .deb files into pool
+          mkdir -p pool/main/p/perry
+          cp ../debs/*.deb pool/main/p/perry/
+
+          # Generate Packages index for each architecture
+          for ARCH in amd64 arm64; do
+            mkdir -p dists/stable/main/binary-${ARCH}
+            dpkg-scanpackages --arch ${ARCH} pool/ > dists/stable/main/binary-${ARCH}/Packages
+            gzip -9c dists/stable/main/binary-${ARCH}/Packages > dists/stable/main/binary-${ARCH}/Packages.gz
+          done
+
+          # Generate Release file
+          cd dists/stable
+          cat > Release << EOF
+          Origin: PerryTS
+          Label: Perry
+          Suite: stable
+          Codename: stable
+          Architectures: amd64 arm64
+          Components: main
+          Description: Perry native TypeScript compiler
+          EOF
+          sed -i 's/^          //' Release
+
+          # Add checksums
+          {
+            echo "MD5Sum:"
+            find main/ -type f | while read f; do
+              echo " $(md5sum "$f" | cut -d' ' -f1) $(wc -c < "$f") $f"
+            done
+            echo "SHA256:"
+            find main/ -type f | while read f; do
+              echo " $(sha256sum "$f" | cut -d' ' -f1) $(wc -c < "$f") $f"
+            done
+          } >> Release
+
+          # Sign
+          gpg --batch --yes --default-key "${GPG_KEY_ID}" -abs -o Release.gpg Release
+          gpg --batch --yes --default-key "${GPG_KEY_ID}" --clearsign -o InRelease Release
+
+          cd ../..
+
+          # Export public key for users
+          gpg --armor --export "${GPG_KEY_ID}" > perry.gpg.pub
+
+          git config user.name "perry-bot"
+          git config user.email "bot@perryts.com"
+          git add -A
+          git commit -m "perry ${{ steps.release.outputs.version }}"
+          git push

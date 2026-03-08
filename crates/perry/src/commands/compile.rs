@@ -397,9 +397,15 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 candidates.push(dir.join(name));
+                // Homebrew: libs installed in ../lib relative to bin
+                if let Some(prefix) = dir.parent() {
+                    candidates.push(prefix.join("lib").join(name));
+                }
             }
         }
         candidates.push(PathBuf::from(format!("/usr/local/lib/{}", name)));
+        // Debian/Ubuntu: libs installed in /usr/lib/perry
+        candidates.push(PathBuf::from(format!("/usr/lib/perry/{}", name)));
     }
 
     for path in &candidates {
