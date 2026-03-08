@@ -448,6 +448,13 @@ pub fn clear_children(handle: i64) {
                 }
             }
         }
+        // Invalidate the parent so it repaints its background immediately,
+        // preventing a black flash while new children are being added.
+        if let Some(parent_hwnd) = get_hwnd(handle) {
+            unsafe {
+                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(parent_hwnd, None, true);
+            }
+        }
     }
 
     let _ = children;
