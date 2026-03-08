@@ -8,7 +8,7 @@ use sqlx::Connection;
 
 use crate::common::{register_handle, get_handle_mut, Handle};
 use super::pool::MysqlPoolConnectionHandle;
-use super::result::RawQueryResult;
+use super::result::{RawQueryResult, QueryOutcome, is_row_returning_query};
 use super::types::parse_mysql_config;
 
 /// Default timeout for connecting to the database (in seconds)
@@ -127,6 +127,8 @@ pub unsafe extern "C" fn js_mysql2_connection_query(
     };
 
 
+    let is_select = is_row_returning_query(&sql);
+
     // Use spawn_for_promise_deferred to safely create JSValues on the main thread
     crate::common::spawn_for_promise_deferred(
         promise as *mut u8,
@@ -136,19 +138,34 @@ pub unsafe extern "C" fn js_mysql2_connection_query(
             // First try as a regular connection
             if let Some(wrapper) = get_handle_mut::<MysqlConnectionHandle>(conn_handle) {
                 if let Some(conn) = wrapper.connection.as_mut() {
-                    // Wrap the query in a timeout to prevent indefinite hangs
-                    let query_future = sqlx::query(&sql).fetch_all(conn);
-                    match timeout(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS), query_future).await {
-                        Ok(Ok(rows)) => {
-                            // Extract raw data on worker thread (no JSValue allocation)
-                            let raw_result = RawQueryResult::from_mysql_rows(rows);
-                            return Ok(raw_result);
+                    if is_select {
+                        let query_future = sqlx::query(&sql).fetch_all(conn);
+                        match timeout(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS), query_future).await {
+                            Ok(Ok(rows)) => {
+                                let raw_result = RawQueryResult::from_mysql_rows(rows);
+                                return Ok(QueryOutcome::Rows(raw_result));
+                            }
+                            Ok(Err(e)) => return Err(format!("Query failed: {}", e)),
+                            Err(_) => return Err(format!(
+                                "Query timed out after {} seconds (MySQL server may be unavailable)",
+                                DEFAULT_QUERY_TIMEOUT_SECS
+                            )),
                         }
-                        Ok(Err(e)) => return Err(format!("Query failed: {}", e)),
-                        Err(_) => return Err(format!(
-                            "Query timed out after {} seconds (MySQL server may be unavailable)",
-                            DEFAULT_QUERY_TIMEOUT_SECS
-                        )),
+                    } else {
+                        let query_future = sqlx::query(&sql).execute(conn);
+                        match timeout(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS), query_future).await {
+                            Ok(Ok(result)) => {
+                                return Ok(QueryOutcome::Executed {
+                                    affected_rows: result.rows_affected(),
+                                    last_insert_id: result.last_insert_id(),
+                                });
+                            }
+                            Ok(Err(e)) => return Err(format!("Query failed: {}", e)),
+                            Err(_) => return Err(format!(
+                                "Query timed out after {} seconds (MySQL server may be unavailable)",
+                                DEFAULT_QUERY_TIMEOUT_SECS
+                            )),
+                        }
                     }
                 } else {
                     return Err("Connection already closed".to_string());
@@ -158,19 +175,34 @@ pub unsafe extern "C" fn js_mysql2_connection_query(
             // Then try as a pool connection
             if let Some(wrapper) = get_handle_mut::<MysqlPoolConnectionHandle>(conn_handle) {
                 if let Some(ref mut conn) = wrapper.connection {
-                    // Wrap the query in a timeout to prevent indefinite hangs
-                    let query_future = sqlx::query(&sql).fetch_all(&mut **conn);
-                    match timeout(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS), query_future).await {
-                        Ok(Ok(rows)) => {
-                            // Extract raw data on worker thread (no JSValue allocation)
-                            let raw_result = RawQueryResult::from_mysql_rows(rows);
-                            return Ok(raw_result);
+                    if is_select {
+                        let query_future = sqlx::query(&sql).fetch_all(&mut **conn);
+                        match timeout(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS), query_future).await {
+                            Ok(Ok(rows)) => {
+                                let raw_result = RawQueryResult::from_mysql_rows(rows);
+                                return Ok(QueryOutcome::Rows(raw_result));
+                            }
+                            Ok(Err(e)) => return Err(format!("Query failed: {}", e)),
+                            Err(_) => return Err(format!(
+                                "Query timed out after {} seconds (MySQL server may be unavailable)",
+                                DEFAULT_QUERY_TIMEOUT_SECS
+                            )),
                         }
-                        Ok(Err(e)) => return Err(format!("Query failed: {}", e)),
-                        Err(_) => return Err(format!(
-                            "Query timed out after {} seconds (MySQL server may be unavailable)",
-                            DEFAULT_QUERY_TIMEOUT_SECS
-                        )),
+                    } else {
+                        let query_future = sqlx::query(&sql).execute(&mut **conn);
+                        match timeout(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS), query_future).await {
+                            Ok(Ok(result)) => {
+                                return Ok(QueryOutcome::Executed {
+                                    affected_rows: result.rows_affected(),
+                                    last_insert_id: result.last_insert_id(),
+                                });
+                            }
+                            Ok(Err(e)) => return Err(format!("Query failed: {}", e)),
+                            Err(_) => return Err(format!(
+                                "Query timed out after {} seconds (MySQL server may be unavailable)",
+                                DEFAULT_QUERY_TIMEOUT_SECS
+                            )),
+                        }
                     }
                 } else {
                     return Err("Connection has been released".to_string());
@@ -179,9 +211,8 @@ pub unsafe extern "C" fn js_mysql2_connection_query(
 
             Err("Invalid connection handle".to_string())
         },
-        // Converter runs on main thread - safe to create JSValues here
-        |raw_result: RawQueryResult| {
-            raw_result.to_jsvalue().bits()
+        |outcome: QueryOutcome| {
+            outcome.to_jsvalue().bits()
         },
     );
 

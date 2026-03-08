@@ -6,6 +6,17 @@ use sqlx::{Column, Row, TypeInfo};
 
 use super::types::{column_to_field_packet, row_to_js_object};
 
+/// Returns true if the SQL query returns rows (SELECT, SHOW, DESCRIBE, EXPLAIN, etc.)
+pub fn is_row_returning_query(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    let upper = trimmed.get(..10).unwrap_or(trimmed).to_uppercase();
+    upper.starts_with("SELECT")
+        || upper.starts_with("SHOW")
+        || upper.starts_with("DESC")
+        || upper.starts_with("EXPLAIN")
+        || upper.starts_with("WITH")
+}
+
 /// Raw value types for thread-safe data transfer
 #[derive(Clone, Debug)]
 pub enum RawValue {
@@ -35,6 +46,13 @@ pub struct RawRowData {
 pub struct RawQueryResult {
     pub rows: Vec<RawRowData>,
     pub columns: Vec<RawColumnInfo>,
+}
+
+/// Query outcome: either rows (SELECT) or execution metadata (INSERT/UPDATE/DELETE)
+#[derive(Clone, Debug)]
+pub enum QueryOutcome {
+    Rows(RawQueryResult),
+    Executed { affected_rows: u64, last_insert_id: u64 },
 }
 
 impl RawQueryResult {
@@ -240,6 +258,17 @@ pub fn rows_to_result_tuple(rows: Vec<MySqlRow>, columns: &[MySqlColumn]) -> JSV
     result_array = js_array_push(result_array, fields_jsval);
 
     JSValue::array_ptr(result_array)
+}
+
+impl QueryOutcome {
+    pub fn to_jsvalue(&self) -> JSValue {
+        match self {
+            QueryOutcome::Rows(raw) => raw.to_jsvalue(),
+            QueryOutcome::Executed { affected_rows, last_insert_id } => {
+                affected_rows_result(*affected_rows, *last_insert_id)
+            }
+        }
+    }
 }
 
 /// Create an empty result (for queries that don't return rows, like INSERT/UPDATE)
