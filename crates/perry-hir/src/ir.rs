@@ -61,6 +61,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "perry/plugin",
     // Node.js worker threads
     "worker_threads",
+    // SQLite
+    "better-sqlite3",
 ];
 
 /// Check if a module path refers to a native stdlib module

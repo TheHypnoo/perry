@@ -63,15 +63,16 @@ pub fn create() -> i64 {
     {
         ensure_form_class_registered();
         let class_name = to_wide("PerryForm");
+        let window_text = to_wide("");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 windows::core::PCWSTR(class_name.as_ptr()),
-                windows::core::PCWSTR(to_wide("").as_ptr()),
+                windows::core::PCWSTR(window_text.as_ptr()),
                 WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
                 0, 0, 100, 100,
-                None,
+                super::get_parking_hwnd(),
                 None,
                 HINSTANCE::from(hinstance),
                 None,
@@ -97,17 +98,18 @@ pub fn section_create(title_ptr: *const u8) -> i64 {
     {
         let control_id = alloc_control_id();
         let wide_title = to_wide(title);
+        let class_name = to_wide("BUTTON");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
 
             // Create the BS_GROUPBOX frame
             let groupbox_hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
-                windows::core::PCWSTR(to_wide("BUTTON").as_ptr()),
+                windows::core::PCWSTR(class_name.as_ptr()),
                 windows::core::PCWSTR(wide_title.as_ptr()),
                 WINDOW_STYLE(BS_GROUPBOX as u32 | WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPCHILDREN.0),
                 0, 0, 200, 100,
-                None,
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
                 HINSTANCE::from(hinstance),
                 None,

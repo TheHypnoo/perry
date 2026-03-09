@@ -30,15 +30,16 @@ pub fn create() -> i64 {
 
     #[cfg(target_os = "windows")]
     {
+        let window_text = to_wide("");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 PROGRESS_CLASSW,
-                windows::core::PCWSTR(to_wide("").as_ptr()),
+                windows::core::PCWSTR(window_text.as_ptr()),
                 WINDOW_STYLE(PBS_MARQUEE | WS_CHILD.0 | WS_VISIBLE.0),
                 0, 0, 200, 20,
-                None,
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
                 HINSTANCE::from(hinstance),
                 None,

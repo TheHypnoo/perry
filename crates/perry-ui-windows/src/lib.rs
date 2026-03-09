@@ -914,10 +914,15 @@ pub extern "C" fn perry_ui_widget_set_height(handle: i64, height: f64) {
 }
 
 /// Match parent height — marks the widget to stretch vertically to fill its parent.
-/// On Windows, this is handled by the HStack/VStack layout engine via fills_remaining.
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_match_parent_height(handle: i64) {
     widgets::set_match_parent_height(handle, true);
+}
+
+/// Match parent width — marks the widget to stretch horizontally to fill its parent.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_match_parent_width(handle: i64) {
+    widgets::set_match_parent_width(handle, true);
 }
 
 /// Set hidden state (perry_ui_widget_set_hidden — matches macOS naming convention).

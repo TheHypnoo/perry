@@ -131,12 +131,13 @@ pub fn create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right:
     {
         ensure_class_registered();
         let class_name = to_wide("PerryHStack");
+        let window_text = to_wide("");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 windows::core::PCWSTR(class_name.as_ptr()),
-                windows::core::PCWSTR(to_wide("").as_ptr()),
+                windows::core::PCWSTR(window_text.as_ptr()),
                 WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
                 0, 0, 100, 100,
                 super::get_parking_hwnd(),

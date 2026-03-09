@@ -57,15 +57,17 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
 
     #[cfg(target_os = "windows")]
     {
+        let class_name = to_wide("STATIC");
+        let window_text = to_wide("");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
-                windows::core::PCWSTR(to_wide("STATIC").as_ptr()),
-                windows::core::PCWSTR(to_wide("").as_ptr()),
+                windows::core::PCWSTR(class_name.as_ptr()),
+                windows::core::PCWSTR(window_text.as_ptr()),
                 WINDOW_STYLE(SS_BITMAP.0 | WS_CHILD.0 | WS_VISIBLE.0),
                 0, 0, 100, 100,
-                None,
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
                 HINSTANCE::from(hinstance),
                 None,
@@ -109,15 +111,17 @@ pub fn create_symbol(name_ptr: *const u8) -> i64 {
 
     #[cfg(target_os = "windows")]
     {
+        let class_name = to_wide("STATIC");
+        let window_text = to_wide("");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
-                windows::core::PCWSTR(to_wide("STATIC").as_ptr()),
-                windows::core::PCWSTR(to_wide("").as_ptr()),
+                windows::core::PCWSTR(class_name.as_ptr()),
+                windows::core::PCWSTR(window_text.as_ptr()),
                 WINDOW_STYLE(SS_ICON.0 | WS_CHILD.0 | WS_VISIBLE.0),
                 0, 0, 32, 32,
-                None,
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
                 HINSTANCE::from(hinstance),
                 None,

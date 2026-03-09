@@ -51,12 +51,14 @@ pub fn create(placeholder_ptr: *const u8, on_change: f64) -> i64 {
 
     #[cfg(target_os = "windows")]
     {
+        let class_name = to_wide("EDIT");
+        let window_text = to_wide("");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WS_EX_CLIENTEDGE,
-                windows::core::PCWSTR(to_wide("EDIT").as_ptr()),
-                windows::core::PCWSTR(to_wide("").as_ptr()),
+                windows::core::PCWSTR(class_name.as_ptr()),
+                windows::core::PCWSTR(window_text.as_ptr()),
                 WINDOW_STYLE(
                     ES_PASSWORD as u32
                         | ES_AUTOHSCROLL as u32

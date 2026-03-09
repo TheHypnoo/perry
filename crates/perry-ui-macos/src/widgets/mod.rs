@@ -628,6 +628,28 @@ pub fn match_parent_height(child_handle: i64) {
     }
 }
 
+/// Pin a child view's leading and trailing anchors to its superview, forcing it
+/// to fill the parent's width.
+pub fn match_parent_width(child_handle: i64) {
+    if let Some(child) = get_widget(child_handle) {
+        unsafe {
+            let superview_ptr: *const NSView = msg_send![&*child, superview];
+            if superview_ptr.is_null() {
+                eprintln!("match_parent_width: view has no superview");
+                return;
+            }
+            let child_leading: Retained<AnyObject> = msg_send![&*child, leadingAnchor];
+            let child_trailing: Retained<AnyObject> = msg_send![&*child, trailingAnchor];
+            let parent_leading: Retained<AnyObject> = msg_send![superview_ptr, leadingAnchor];
+            let parent_trailing: Retained<AnyObject> = msg_send![superview_ptr, trailingAnchor];
+            let lead_c: Retained<AnyObject> = msg_send![&*child_leading, constraintEqualToAnchor: &*parent_leading];
+            let trail_c: Retained<AnyObject> = msg_send![&*child_trailing, constraintEqualToAnchor: &*parent_trailing];
+            let _: () = msg_send![&*lead_c, setActive: true];
+            let _: () = msg_send![&*trail_c, setActive: true];
+        }
+    }
+}
+
 // =============================================================================
 // Cross-cutting: Enabled, Hover, DoubleClick, Animations, Tooltip, ControlSize
 // =============================================================================

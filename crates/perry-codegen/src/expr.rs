@@ -11879,6 +11879,26 @@ pub(crate) fn compile_expr(
                 return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), handle));
             }
 
+            // new Database(filename) — better-sqlite3
+            if class_name == "Database" && !classes.contains_key("Database") {
+                let open_func = extern_funcs.get("js_sqlite_open")
+                    .ok_or_else(|| anyhow!("js_sqlite_open not declared"))?;
+                let func_ref = module.declare_func_in_func(*open_func, builder.func);
+                if !args.is_empty() {
+                    let arg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+                    let str_ptr = ensure_i64(builder, arg_val);
+                    let call = builder.ins().call(func_ref, &[str_ptr]);
+                    let handle = builder.inst_results(call)[0];
+                    return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), handle));
+                } else {
+                    // No filename — open in-memory (pass null)
+                    let null_ptr = builder.ins().iconst(types::I64, 0);
+                    let call = builder.ins().call(func_ref, &[null_ptr]);
+                    let handle = builder.inst_results(call)[0];
+                    return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), handle));
+                }
+            }
+
             // new Big(value) / new Decimal(value) / new BigNumber(value)
             if (class_name == "Big" && !classes.contains_key("Big"))
                 || (class_name == "Decimal" && !classes.contains_key("Decimal"))

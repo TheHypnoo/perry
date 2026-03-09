@@ -77,6 +77,8 @@ pub struct WidgetEntry {
     pub fixed_height: Option<i32>,
     /// Whether this widget should stretch to match its parent's height
     pub match_parent_height: bool,
+    /// Whether this widget should stretch to match its parent's width
+    pub match_parent_width: bool,
     /// Whether this stack should exclude hidden children from layout
     pub detaches_hidden: bool,
 }
@@ -92,6 +94,7 @@ pub struct WidgetInfo {
     pub fixed_width: Option<i32>,
     pub fixed_height: Option<i32>,
     pub match_parent_height: bool,
+    pub match_parent_width: bool,
     pub detaches_hidden: bool,
 }
 
@@ -189,6 +192,7 @@ pub fn register_widget(hwnd: HWND, kind: WidgetKind, control_id: u16) -> i64 {
             fixed_width: None,
             fixed_height: None,
             match_parent_height: false,
+            match_parent_width: false,
             detaches_hidden: false,
         });
         widgets.len() as i64
@@ -211,6 +215,7 @@ pub fn register_widget(hwnd: isize, kind: WidgetKind, control_id: u16) -> i64 {
             fixed_width: None,
             fixed_height: None,
             match_parent_height: false,
+            match_parent_width: false,
             detaches_hidden: false,
         });
         widgets.len() as i64
@@ -235,6 +240,7 @@ pub fn register_widget_with_layout(hwnd: HWND, kind: WidgetKind, spacing: f64, i
             fixed_width: None,
             fixed_height: None,
             match_parent_height: false,
+            match_parent_width: false,
             detaches_hidden: false,
         });
         widgets.len() as i64
@@ -258,6 +264,7 @@ pub fn register_widget_with_layout(hwnd: isize, kind: WidgetKind, spacing: f64, 
             fixed_width: None,
             fixed_height: None,
             match_parent_height: false,
+            match_parent_width: false,
             detaches_hidden: false,
         });
         widgets.len() as i64
@@ -307,6 +314,7 @@ pub fn get_widget_info(handle: i64) -> Option<WidgetInfo> {
                 fixed_width: widgets[idx].fixed_width,
                 fixed_height: widgets[idx].fixed_height,
                 match_parent_height: widgets[idx].match_parent_height,
+                match_parent_width: widgets[idx].match_parent_width,
                 detaches_hidden: widgets[idx].detaches_hidden,
             })
         } else {
@@ -687,6 +695,17 @@ pub fn set_fixed_height(handle: i64, height: i32) {
         let idx = (handle - 1) as usize;
         if idx < widgets.len() {
             widgets[idx].fixed_height = Some(height);
+        }
+    });
+}
+
+/// Set whether this widget should stretch to match its parent's width.
+pub fn set_match_parent_width(handle: i64, value: bool) {
+    WIDGETS.with(|w| {
+        let mut widgets = w.borrow_mut();
+        let idx = (handle - 1) as usize;
+        if idx < widgets.len() {
+            widgets[idx].match_parent_width = value;
         }
     });
 }

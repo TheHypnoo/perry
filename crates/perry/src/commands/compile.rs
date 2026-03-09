@@ -206,15 +206,20 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         .map(|l| l.to_string())
         .collect();
 
-    // Identify members to DELETE. Only strip the Rust std library objects that contain
-    // .CRT$XCU entries (global constructors) — these cause a crash when duplicated.
-    // Keep everything else (alloc, core, perry_runtime) since they may have unique
-    // monomorphized symbols; /FORCE:MULTIPLE handles the duplicates safely.
+    // Identify members to DELETE. Strip Rust std, perry-runtime, alloc, core, and
+    // other duplicated objects from the UI lib. When perry-stdlib is also linked,
+    // it already contains all these symbols — keeping them in the UI lib causes
+    // MSVC /FORCE:MULTIPLE to produce corrupt binaries (LNK4088).
     let remove: Vec<&String> = members.iter().filter(|m| {
         // std contains .CRT$XCU entries that cause double init crash
         if m.starts_with("std-") { return true; }
         // DLL import stubs are already provided by system import libs
         if m.ends_with(".dll") { return true; }
+        // Rust compiler_builtins are duplicated
+        if m.starts_with("compiler_builtins-") { return true; }
+        // perry-runtime objects — keep them since they may contain unique
+        // monomorphizations needed by UI code.
+        // alloc-*, core-*, hashbrown-* — also keep for same reason.
         false
     }).collect();
 
@@ -420,6 +425,8 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
 fn find_runtime_library(target: Option<&str>) -> Result<PathBuf> {
     let lib_name = match target {
         Some("windows") => "perry_runtime.lib",
+        #[cfg(target_os = "windows")]
+        None => "perry_runtime.lib",
         _ => "libperry_runtime.a",
     };
     find_library(lib_name, target).ok_or_else(|| {
@@ -441,6 +448,8 @@ fn find_runtime_library(target: Option<&str>) -> Result<PathBuf> {
 fn find_stdlib_library(target: Option<&str>) -> Option<PathBuf> {
     let lib_name = match target {
         Some("windows") => "perry_stdlib.lib",
+        #[cfg(target_os = "windows")]
+        None => "perry_stdlib.lib",
         _ => "libperry_stdlib.a",
     };
     find_library(lib_name, target)
@@ -450,6 +459,8 @@ fn find_stdlib_library(target: Option<&str>) -> Option<PathBuf> {
 fn find_jsruntime_library(target: Option<&str>) -> Option<PathBuf> {
     let lib_name = match target {
         Some("windows") => "perry_jsruntime.lib",
+        #[cfg(target_os = "windows")]
+        None => "perry_jsruntime.lib",
         _ => "libperry_jsruntime.a",
     };
     find_library(lib_name, target)
@@ -462,6 +473,8 @@ fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
         Some("android") => "libperry_ui_android.a",
         Some("linux") => "libperry_ui_gtk4.a",
         Some("windows") => "perry_ui_windows.lib",
+        #[cfg(target_os = "windows")]
+        None => "perry_ui_windows.lib",
         _ => {
             if cfg!(target_os = "linux") {
                 "libperry_ui_gtk4.a"
@@ -2848,7 +2861,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let is_android = matches!(target.as_deref(), Some("android"));
     let is_linux = matches!(target.as_deref(), Some("linux"))
         || (target.is_none() && cfg!(target_os = "linux"));
-    let is_windows = matches!(target.as_deref(), Some("windows"));
+    let is_windows = matches!(target.as_deref(), Some("windows"))
+        || (target.is_none() && cfg!(target_os = "windows"));
 
     // For dylib output, skip runtime/stdlib linking — symbols resolve from host at dlopen time
     if is_dylib {
@@ -2894,7 +2908,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     let runtime_lib = find_runtime_library(target.as_deref())?;
     let stdlib_lib = find_stdlib_library(target.as_deref());
-    let jsruntime_lib = if !is_ios && !is_android && !is_windows && (ctx.needs_js_runtime || args.enable_js_runtime) {
+    let jsruntime_lib = if !is_ios && !is_android && (ctx.needs_js_runtime || args.enable_js_runtime) {
         match find_jsruntime_library(target.as_deref()) {
             Some(lib) => {
                 match format {
@@ -3044,6 +3058,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     if is_windows {
         cmd.arg(format!("/OUT:{}", exe_path.display()));
+        // V8/deno_core needs additional Windows system libraries
+        if jsruntime_lib.is_some() {
+            cmd.arg("winmm.lib");
+            cmd.arg("dbghelp.lib");
+            cmd.arg("msvcprt.lib"); // C++ runtime for exception_ptr
+        }
     } else {
         cmd.arg("-o")
             .arg(&exe_path)

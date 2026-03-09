@@ -129,9 +129,10 @@ pub fn add_item(toolbar_handle: i64, label_ptr: *const u8, icon_ptr: *const u8, 
                     });
                     let x = ((item_count - 1) * 80) as i32;
                     let label_wide = to_wide(&label);
+                    let btn_class = to_wide("BUTTON");
                     let _btn = CreateWindowExW(
                         WINDOW_EX_STYLE::default(),
-                        PCWSTR(to_wide("BUTTON").as_ptr()),
+                        PCWSTR(btn_class.as_ptr()),
                         PCWSTR(label_wide.as_ptr()),
                         WINDOW_STYLE(BS_PUSHBUTTON as u32 | WS_CHILD.0 | WS_VISIBLE.0),
                         x, 2, 76, 28,

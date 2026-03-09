@@ -61,11 +61,12 @@ pub fn create(text_ptr: *const u8) -> i64 {
     #[cfg(target_os = "windows")]
     {
         let wide = to_wide(text);
+        let class_name = to_wide("STATIC");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
-                windows::core::PCWSTR(to_wide("STATIC").as_ptr()),
+                windows::core::PCWSTR(class_name.as_ptr()),
                 windows::core::PCWSTR(wide.as_ptr()),
                 WINDOW_STYLE(SS_LEFT.0 | WS_CHILD.0 | WS_VISIBLE.0),
                 0, 0, 100, 20,
@@ -284,6 +285,7 @@ fn create_font(size: i32, weight: i32) -> HFONT {
 
 #[cfg(target_os = "windows")]
 fn create_font_with_family(size: i32, weight: i32, family: &str) -> HFONT {
+    let family_wide = to_wide(family);
     unsafe {
         CreateFontW(
             -size,              // nHeight (negative = character height)
@@ -299,7 +301,7 @@ fn create_font_with_family(size: i32, weight: i32, family: &str) -> HFONT {
             0,                  // fdwClipPrecision
             0,                  // fdwQuality
             0,                  // fdwPitchAndFamily
-            windows::core::PCWSTR(to_wide(family).as_ptr()),
+            windows::core::PCWSTR(family_wide.as_ptr()),
         )
     }
 }

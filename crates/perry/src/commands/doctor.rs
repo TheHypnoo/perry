@@ -41,40 +41,88 @@ fn check_perry_version() -> CheckResult {
 }
 
 fn check_system_linker() -> CheckResult {
-    let output = Command::new("cc").arg("--version").output();
-
-    match output {
-        Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout);
-            let first_line = version.lines().next().unwrap_or("unknown");
-            CheckResult {
-                name: "system linker (cc)".to_string(),
-                status: CheckStatus::Ok,
-                details: Some(first_line.to_string()),
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, check for MSVC link.exe via vswhere or PATH
+        let mut linker = PathBuf::from("link.exe");
+        let vswhere = PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
+        if vswhere.exists() {
+            if let Ok(output) = Command::new(&vswhere)
+                .args(["-products", "*", "-latest", "-property", "installationPath", "-nologo"])
+                .output()
+            {
+                let install_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !install_path.is_empty() {
+                    let msvc_dir = PathBuf::from(&install_path).join(r"VC\Tools\MSVC");
+                    if let Ok(entries) = std::fs::read_dir(&msvc_dir) {
+                        let mut versions: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                        versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+                        for entry in versions {
+                            let link = entry.path().join(r"bin\Hostx64\x64\link.exe");
+                            if link.exists() {
+                                linker = link;
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
-        Ok(_) => CheckResult {
-            name: "system linker (cc)".to_string(),
-            status: CheckStatus::Error,
-            details: Some("cc command failed".to_string()),
-        },
-        Err(e) => CheckResult {
-            name: "system linker (cc)".to_string(),
-            status: CheckStatus::Error,
-            details: Some(format!("cc not found: {}", e)),
-        },
+        let output = Command::new(&linker).arg("/NOLOGO").output();
+        match output {
+            Ok(_) => CheckResult {
+                name: "system linker (MSVC link.exe)".to_string(),
+                status: CheckStatus::Ok,
+                details: Some(linker.display().to_string()),
+            },
+            Err(e) => CheckResult {
+                name: "system linker (MSVC link.exe)".to_string(),
+                status: CheckStatus::Error,
+                details: Some(format!("link.exe not found: {}. Install Visual Studio Build Tools.", e)),
+            },
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let output = Command::new("cc").arg("--version").output();
+        match output {
+            Ok(output) if output.status.success() => {
+                let version = String::from_utf8_lossy(&output.stdout);
+                let first_line = version.lines().next().unwrap_or("unknown");
+                CheckResult {
+                    name: "system linker (cc)".to_string(),
+                    status: CheckStatus::Ok,
+                    details: Some(first_line.to_string()),
+                }
+            }
+            Ok(_) => CheckResult {
+                name: "system linker (cc)".to_string(),
+                status: CheckStatus::Error,
+                details: Some("cc command failed".to_string()),
+            },
+            Err(e) => CheckResult {
+                name: "system linker (cc)".to_string(),
+                status: CheckStatus::Error,
+                details: Some(format!("cc not found: {}", e)),
+            },
+        }
     }
 }
 
 fn check_runtime_library() -> CheckResult {
+    #[cfg(target_os = "windows")]
+    let lib_name = "perry_runtime.lib";
+    #[cfg(not(target_os = "windows"))]
+    let lib_name = "libperry_runtime.a";
+
     let candidates = [
-        PathBuf::from("target/release/libperry_runtime.a"),
-        PathBuf::from("target/debug/libperry_runtime.a"),
+        PathBuf::from(format!("target/release/{}", lib_name)),
+        PathBuf::from(format!("target/debug/{}", lib_name)),
         std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|p| p.join("libperry_runtime.a")))
+            .and_then(|p| p.parent().map(|p| p.join(lib_name)))
             .unwrap_or_default(),
-        PathBuf::from("/usr/local/lib/libperry_runtime.a"),
+        PathBuf::from(format!("/usr/local/lib/{}", lib_name)),
     ];
 
     for path in &candidates {

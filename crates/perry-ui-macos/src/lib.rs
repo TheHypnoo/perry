@@ -361,6 +361,12 @@ pub extern "C" fn perry_ui_widget_match_parent_height(handle: i64) {
     widgets::match_parent_height(handle);
 }
 
+/// Pin a child view's leading and trailing to its superview so it fills the parent width.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_match_parent_width(handle: i64) {
+    widgets::match_parent_width(handle);
+}
+
 /// Set whether a Button has a border.
 #[no_mangle]
 pub extern "C" fn perry_ui_button_set_bordered(handle: i64, bordered: f64) {

@@ -482,17 +482,22 @@ pub fn perform_self_update(verbose: bool) -> Result<()> {
         let _ = fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755));
     }
 
-    // Also update libperry_runtime.a if present next to binary
+    // Also update runtime/stdlib libs if present next to binary
     if let Some(exe_dir) = current_exe.parent() {
-        let runtime_lib = exe_dir.join("libperry_runtime.a");
+        #[cfg(target_os = "windows")]
+        let (runtime_name, stdlib_name) = ("perry_runtime.lib", "perry_stdlib.lib");
+        #[cfg(not(target_os = "windows"))]
+        let (runtime_name, stdlib_name) = ("libperry_runtime.a", "libperry_stdlib.a");
+
+        let runtime_lib = exe_dir.join(runtime_name);
         if runtime_lib.exists() {
-            if let Some(new_lib) = find_binary_in_dir(&tmp_dir, "libperry_runtime.a") {
+            if let Some(new_lib) = find_binary_in_dir(&tmp_dir, runtime_name) {
                 let _ = fs::copy(&new_lib, &runtime_lib);
             }
         }
-        let stdlib_lib = exe_dir.join("libperry_stdlib.a");
+        let stdlib_lib = exe_dir.join(stdlib_name);
         if stdlib_lib.exists() {
-            if let Some(new_lib) = find_binary_in_dir(&tmp_dir, "libperry_stdlib.a") {
+            if let Some(new_lib) = find_binary_in_dir(&tmp_dir, stdlib_name) {
                 let _ = fs::copy(&new_lib, &stdlib_lib);
             }
         }

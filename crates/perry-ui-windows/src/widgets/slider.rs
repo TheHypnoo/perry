@@ -60,12 +60,13 @@ pub fn create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
 
     #[cfg(target_os = "windows")]
     {
+        let window_text = to_wide("");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 TRACKBAR_CLASSW,
-                windows::core::PCWSTR(to_wide("").as_ptr()),
+                windows::core::PCWSTR(window_text.as_ptr()),
                 WINDOW_STYLE(TBS_HORZ as u32 | TBS_AUTOTICKS as u32 | WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0),
                 0, 0, 200, 24,
                 super::get_parking_hwnd(),

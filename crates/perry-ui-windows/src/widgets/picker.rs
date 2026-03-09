@@ -57,12 +57,14 @@ pub fn create(label_ptr: *const u8, on_change: f64, _style: i64) -> i64 {
 
     #[cfg(target_os = "windows")]
     {
+        let class_name = to_wide("COMBOBOX");
+        let window_text = to_wide("");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
-                windows::core::PCWSTR(to_wide("COMBOBOX").as_ptr()),
-                windows::core::PCWSTR(to_wide("").as_ptr()),
+                windows::core::PCWSTR(class_name.as_ptr()),
+                windows::core::PCWSTR(window_text.as_ptr()),
                 WINDOW_STYLE(
                     CBS_DROPDOWNLIST as u32
                         | WS_CHILD.0

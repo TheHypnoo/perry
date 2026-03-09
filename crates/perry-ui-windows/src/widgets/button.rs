@@ -55,11 +55,12 @@ pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
     #[cfg(target_os = "windows")]
     {
         let wide = to_wide(label);
+        let class_name = to_wide("BUTTON");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
-                windows::core::PCWSTR(to_wide("BUTTON").as_ptr()),
+                windows::core::PCWSTR(class_name.as_ptr()),
                 windows::core::PCWSTR(wide.as_ptr()),
                 WINDOW_STYLE(BS_PUSHBUTTON as u32 | WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0),
                 0, 0, 80, 30,
