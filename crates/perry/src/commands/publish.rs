@@ -166,6 +166,8 @@ struct MacosConfig {
 struct IosConfig {
     bundle_id: Option<String>,
     deployment_target: Option<String>,
+    /// Alias for deployment_target (perry.toml uses minimum_version)
+    minimum_version: Option<String>,
     device_family: Option<Vec<String>>,
     orientations: Option<Vec<String>>,
     capabilities: Option<Vec<String>>,
@@ -530,7 +532,9 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let macos_signing_identity = config.macos.as_ref().and_then(|m| m.signing_identity.clone());
 
     // iOS-specific config from perry.toml
-    let ios_deployment_target = config.ios.as_ref().and_then(|i| i.deployment_target.clone());
+    let ios_deployment_target = config.ios.as_ref().and_then(|i| {
+        i.deployment_target.clone().or_else(|| i.minimum_version.clone())
+    });
     let ios_device_family = config.ios.as_ref().and_then(|i| i.device_family.clone());
     let ios_orientations = config.ios.as_ref().and_then(|i| i.orientations.clone());
     let ios_capabilities = config.ios.as_ref().and_then(|i| i.capabilities.clone());
