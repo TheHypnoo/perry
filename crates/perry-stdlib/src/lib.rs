@@ -61,6 +61,11 @@ pub mod fetch;
 pub use fetch::*;
 
 #[cfg(feature = "http-client")]
+pub mod http;
+#[cfg(feature = "http-client")]
+pub use http::*;
+
+#[cfg(feature = "http-client")]
 pub mod axios;
 #[cfg(feature = "http-client")]
 pub use axios::*;

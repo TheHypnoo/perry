@@ -6587,6 +6587,7 @@ pub(crate) fn compile_expr(
                                     || (module == "ws" && method == "receive")
                                     || ((module == "node-fetch" || module == "fetch" || module == "fetchWithAuth" || module == "fetchPostWithAuth") && method == "statusText")
                                     || (module == "node-fetch" && method == "streamPoll")
+                                    || ((module == "http" || module == "https") && method == "statusMessage")
                                     || (module == "perry/ui" && (method == "textfieldGetString" || method == "textareaGetString"))
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
@@ -7008,6 +7009,7 @@ pub(crate) fn compile_expr(
                                     || (module == "ws" && method == "receive")
                                     || ((module == "node-fetch" || module == "fetch" || module == "fetchWithAuth" || module == "fetchPostWithAuth") && method == "statusText")
                                     || (module == "node-fetch" && method == "streamPoll")
+                                    || ((module == "http" || module == "https") && method == "statusMessage")
                                     || (module == "perry/ui" && (method == "textfieldGetString" || method == "textareaGetString"))
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
@@ -7189,6 +7191,7 @@ pub(crate) fn compile_expr(
                                     || (module == "ws" && method == "receive")
                                     || ((module == "node-fetch" || module == "fetch" || module == "fetchWithAuth" || module == "fetchPostWithAuth") && method == "statusText")
                                     || (module == "node-fetch" && method == "streamPoll")
+                                    || ((module == "http" || module == "https") && method == "statusMessage")
                                     || (module == "perry/ui" && (method == "textfieldGetString" || method == "textareaGetString"))
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
@@ -16813,6 +16816,22 @@ pub(crate) fn compile_expr(
                 ("ws", true, "waitForMessage") => "js_ws_wait_for_message",
                 ("ws", true, "on") => "js_ws_on",
 
+                // http/https module (client-side)
+                ("http", false, "request") => "js_http_request",
+                ("http", false, "get") => "js_http_get",
+                ("https", false, "request") => "js_https_request",
+                ("https", false, "get") => "js_https_get",
+                // ClientRequest methods
+                ("http", true, "write") | ("https", true, "write") => "js_http_client_request_write",
+                ("http", true, "end") | ("https", true, "end") => "js_http_client_request_end",
+                ("http", true, "on") | ("https", true, "on") => "js_http_on",
+                ("http", true, "setHeader") | ("https", true, "setHeader") => "js_http_set_header",
+                ("http", true, "setTimeout") | ("https", true, "setTimeout") => "js_http_set_timeout",
+                // IncomingMessage properties
+                ("http", true, "statusCode") | ("https", true, "statusCode") => "js_http_status_code",
+                ("http", true, "statusMessage") | ("https", true, "statusMessage") => "js_http_status_message",
+                ("http", true, "headers") | ("https", true, "headers") => "js_http_response_headers",
+
                 // events module (EventEmitter)
                 ("events", true, "on") => "js_event_emitter_on",
                 ("events", true, "emit") => "js_event_emitter_emit",
@@ -17560,7 +17579,8 @@ pub(crate) fn compile_expr(
                     let ws_handle_ref = module.declare_func_in_func(*ws_handle_func, builder.func);
                     let call = builder.ins().call(ws_handle_ref, &[obj_f64]);
                     builder.inst_results(call)[0]
-                } else if native_module == "mysql2" || native_module == "mysql2/promise" ||
+                } else if native_module == "http" || native_module == "https" ||
+                          native_module == "mysql2" || native_module == "mysql2/promise" ||
                           native_module == "ioredis" ||
                           native_module == "events" || native_module == "lru-cache" ||
                           native_module == "commander" || native_module == "ethers" ||
@@ -17783,6 +17803,68 @@ pub(crate) fn compile_expr(
                         }
                         "close" | "isOpen" | "receive" | "messageCount" => {
                             // No additional args - just the handle
+                        }
+                        _ => {}
+                    }
+                } else if native_module == "http" || native_module == "https" {
+                    // HTTP/HTTPS module methods
+                    match method.as_str() {
+                        "on" => {
+                            // on(eventName, callback) - eventName is NaN-boxed string, callback is closure
+                            if arg_vals.len() >= 2 {
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                let event_f64 = ensure_f64(builder, arg_vals[0]);
+                                let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
+                                let event_ptr = builder.inst_results(event_call)[0];
+                                let callback_ptr = ensure_i64(builder, arg_vals[1]);
+                                call_args.push(event_ptr);
+                                call_args.push(callback_ptr);
+                            }
+                        }
+                        "write" => {
+                            // write(body) - body is NaN-boxed string, pass as f64
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_f64(builder, arg_vals[0]));
+                            } else {
+                                call_args.push(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0000))); // undefined
+                            }
+                        }
+                        "end" => {
+                            // end(body?) - optional body is NaN-boxed string, pass as f64
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_f64(builder, arg_vals[0]));
+                            } else {
+                                call_args.push(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0000))); // undefined
+                            }
+                        }
+                        "setHeader" => {
+                            // setHeader(name, value) - both NaN-boxed strings, extract pointers
+                            if arg_vals.len() >= 2 {
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                let name_f64 = ensure_f64(builder, arg_vals[0]);
+                                let name_call = builder.ins().call(get_str_ptr_ref, &[name_f64]);
+                                let name_ptr = builder.inst_results(name_call)[0];
+                                let value_f64 = ensure_f64(builder, arg_vals[1]);
+                                let value_call = builder.ins().call(get_str_ptr_ref, &[value_f64]);
+                                let value_ptr = builder.inst_results(value_call)[0];
+                                call_args.push(name_ptr);
+                                call_args.push(value_ptr);
+                            }
+                        }
+                        "setTimeout" => {
+                            // setTimeout(ms) - number as f64
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_f64(builder, arg_vals[0]));
+                            } else {
+                                call_args.push(builder.ins().f64const(0.0));
+                            }
+                        }
+                        "statusCode" | "statusMessage" | "headers" => {
+                            // Property accessors - no additional args
                         }
                         _ => {}
                     }
@@ -18063,13 +18145,13 @@ pub(crate) fn compile_expr(
                         "header" => {
                             // reply.header(name, value)
                             if arg_vals.len() >= 2 {
-                                // Pass NaN-boxed strings as i64 bits
+                                // Pass NaN-boxed strings as i64 bits (preserve tags for string_from_nanboxed)
                                 let name_f64 = ensure_f64(builder, arg_vals[0]);
-                                let name_i64 = ensure_i64(builder, name_f64);
+                                let name_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), name_f64);
                                 call_args.push(name_i64);
 
                                 let val_f64 = ensure_f64(builder, arg_vals[1]);
-                                let val_i64 = ensure_i64(builder, val_f64);
+                                let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val_f64);
                                 call_args.push(val_i64);
                             }
                         }
@@ -18094,9 +18176,9 @@ pub(crate) fn compile_expr(
                         "text" | "html" => {
                             // c.text(text, status?) or c.html(html, status?)
                             if !arg_vals.is_empty() {
-                                // Pass NaN-boxed text as i64 bits
+                                // Pass NaN-boxed text as i64 bits (preserve tags for string_from_nanboxed)
                                 let text_f64 = ensure_f64(builder, arg_vals[0]);
-                                let text_i64 = ensure_i64(builder, text_f64);
+                                let text_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), text_f64);
                                 call_args.push(text_i64);
                             }
                             if arg_vals.len() >= 2 {
@@ -18108,9 +18190,9 @@ pub(crate) fn compile_expr(
                         "redirect" => {
                             // c.redirect(url, status?)
                             if !arg_vals.is_empty() {
-                                // Pass NaN-boxed URL as i64 bits
+                                // Pass NaN-boxed URL as i64 bits (preserve tags for string_from_nanboxed)
                                 let url_f64 = ensure_f64(builder, arg_vals[0]);
-                                let url_i64 = ensure_i64(builder, url_f64);
+                                let url_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), url_f64);
                                 call_args.push(url_i64);
                             }
                             if arg_vals.len() >= 2 {
@@ -18122,9 +18204,9 @@ pub(crate) fn compile_expr(
                         "param" => {
                             // c.req.param(name) - get single param
                             if !arg_vals.is_empty() {
-                                // Pass NaN-boxed name as i64 bits
+                                // Pass NaN-boxed name as i64 bits (preserve NaN-box tags for string_from_nanboxed)
                                 let name_f64 = ensure_f64(builder, arg_vals[0]);
-                                let name_i64 = ensure_i64(builder, name_f64);
+                                let name_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), name_f64);
                                 call_args.push(name_i64);
                             }
                         }
@@ -18546,6 +18628,31 @@ pub(crate) fn compile_expr(
                             arg_vals.iter().map(|&val| {
                                 ensure_i64(builder, val)
                             }).collect()
+                        }
+                        _ => arg_vals.clone()
+                    }
+                } else if native_module == "http" || native_module == "https" {
+                    // http/https module-level functions
+                    match method.as_str() {
+                        "request" => {
+                            // request(options, callback)
+                            // options: pass as f64 (NaN-boxed object), callback: extract as i64 (closure ptr)
+                            let mut args = Vec::new();
+                            if arg_vals.len() >= 2 {
+                                args.push(ensure_f64(builder, arg_vals[0])); // options as f64
+                                args.push(ensure_i64(builder, arg_vals[1])); // callback as i64
+                            }
+                            args
+                        }
+                        "get" => {
+                            // get(url_or_options, callback)
+                            // first arg: pass as f64 (could be string or object), callback: extract as i64
+                            let mut args = Vec::new();
+                            if arg_vals.len() >= 2 {
+                                args.push(ensure_f64(builder, arg_vals[0])); // url/options as f64
+                                args.push(ensure_i64(builder, arg_vals[1])); // callback as i64
+                            }
+                            args
                         }
                         _ => arg_vals.clone()
                     }
@@ -19342,6 +19449,27 @@ pub(crate) fn compile_expr(
                 } else if native_module == "events" && (method == "emit" || method == "listenerCount") {
                     // emit and listenerCount return f64 directly (boolean/number)
                     Ok(result)
+                } else if (native_module == "http" || native_module == "https") && (method == "statusCode" || method == "setTimeout") {
+                    // statusCode returns f64 directly (number), setTimeout returns handle as f64
+                    Ok(result)
+                } else if (native_module == "http" || native_module == "https") && method == "statusMessage" {
+                    // statusMessage returns string pointer - NaN-box with STRING_TAG
+                    let nanbox_func = extern_funcs.get("js_nanbox_string")
+                        .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let call = builder.ins().call(nanbox_ref, &[result]);
+                    Ok(builder.inst_results(call)[0])
+                } else if (native_module == "http" || native_module == "https") && method == "headers" {
+                    // headers returns f64 directly (NaN-boxed object from Rust)
+                    Ok(result)
+                } else if (native_module == "http" || native_module == "https") &&
+                          (method == "request" || method == "get" || method == "write" || method == "end" || method == "on" || method == "setHeader") {
+                    // These return i64 handles - NaN-box with POINTER_TAG
+                    let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                        .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let call = builder.ins().call(nanbox_ref, &[result]);
+                    Ok(builder.inst_results(call)[0])
                 } else if native_module == "ethers" && method == "formatUnits" {
                     // formatUnits returns string pointer - NaN-box with STRING_TAG
                     let nanbox_func = extern_funcs.get("js_nanbox_string")
@@ -19403,8 +19531,26 @@ pub(crate) fn compile_expr(
                             Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
                         }
                         // These already return f64 (NaN-boxed JS value) - pass through directly
-                        "body" | "json" | "query" | "user" => {
+                        "body" | "json" | "query" | "user" |
+                        // html/text/redirect/send return f64 (undefined)
+                        "html" | "text" | "redirect" | "send" => {
                             Ok(result)
+                        }
+                        // These return string pointers (i64) - NaN-box as STRING
+                        "param" | "method" | "url" | "params" | "rawBody" | "header" | "headers" => {
+                            let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                            let call = builder.ins().call(nanbox_ref, &[result]);
+                            Ok(builder.inst_results(call)[0])
+                        }
+                        // status returns i64 handle (for chaining) - NaN-box as pointer
+                        "status" => {
+                            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                            let call = builder.ins().call(nanbox_ref, &[result]);
+                            Ok(builder.inst_results(call)[0])
                         }
                         _ => {
                             // Constructor (default) and other methods return Handle (i64) - NaN-box

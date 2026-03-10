@@ -4401,6 +4401,129 @@ impl Compiler {
         }
 
         // ========================================================================
+        // HTTP/HTTPS Client Functions (http, https)
+        // ========================================================================
+
+        // js_http_request(options: f64, callback: i64) -> i64 (ClientRequest handle)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // options object (NaN-boxed)
+            sig.params.push(AbiParam::new(types::I64)); // response callback closure ptr
+            sig.returns.push(AbiParam::new(types::I64)); // ClientRequest handle
+            let func_id = self.module.declare_function("js_http_request", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_http_request".to_string(), func_id);
+        }
+
+        // js_https_request(options: f64, callback: i64) -> i64 (ClientRequest handle)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // options object (NaN-boxed)
+            sig.params.push(AbiParam::new(types::I64)); // response callback closure ptr
+            sig.returns.push(AbiParam::new(types::I64)); // ClientRequest handle
+            let func_id = self.module.declare_function("js_https_request", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_https_request".to_string(), func_id);
+        }
+
+        // js_http_get(url_or_options: f64, callback: i64) -> i64 (ClientRequest handle)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // url string or options object (NaN-boxed)
+            sig.params.push(AbiParam::new(types::I64)); // response callback closure ptr
+            sig.returns.push(AbiParam::new(types::I64)); // ClientRequest handle
+            let func_id = self.module.declare_function("js_http_get", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_http_get".to_string(), func_id);
+        }
+
+        // js_https_get(url_or_options: f64, callback: i64) -> i64 (ClientRequest handle)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // url string or options object (NaN-boxed)
+            sig.params.push(AbiParam::new(types::I64)); // response callback closure ptr
+            sig.returns.push(AbiParam::new(types::I64)); // ClientRequest handle
+            let func_id = self.module.declare_function("js_https_get", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_https_get".to_string(), func_id);
+        }
+
+        // js_http_client_request_write(handle: i64, body: f64) -> i64 (handle for chaining)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // ClientRequest handle
+            sig.params.push(AbiParam::new(types::F64)); // body (NaN-boxed string)
+            sig.returns.push(AbiParam::new(types::I64)); // handle
+            let func_id = self.module.declare_function("js_http_client_request_write", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_http_client_request_write".to_string(), func_id);
+        }
+
+        // js_http_client_request_end(handle: i64, body: f64) -> i64 (handle for chaining)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // ClientRequest handle
+            sig.params.push(AbiParam::new(types::F64)); // optional body (NaN-boxed string or undefined)
+            sig.returns.push(AbiParam::new(types::I64)); // handle
+            let func_id = self.module.declare_function("js_http_client_request_end", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_http_client_request_end".to_string(), func_id);
+        }
+
+        // js_http_on(handle: i64, event_name: i64, callback: i64) -> i64 (handle for chaining)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle (ClientRequest or IncomingMessage)
+            sig.params.push(AbiParam::new(types::I64)); // event name string ptr
+            sig.params.push(AbiParam::new(types::I64)); // callback closure ptr
+            sig.returns.push(AbiParam::new(types::I64)); // handle
+            let func_id = self.module.declare_function("js_http_on", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_http_on".to_string(), func_id);
+        }
+
+        // js_http_set_header(handle: i64, name: i64, value: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::I64)); // header name string ptr
+            sig.params.push(AbiParam::new(types::I64)); // header value string ptr
+            sig.returns.push(AbiParam::new(types::I64)); // handle
+            let func_id = self.module.declare_function("js_http_set_header", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_http_set_header".to_string(), func_id);
+        }
+
+        // js_http_set_timeout(handle: i64, ms: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::F64)); // timeout milliseconds
+            sig.returns.push(AbiParam::new(types::I64)); // handle
+            let func_id = self.module.declare_function("js_http_set_timeout", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_http_set_timeout".to_string(), func_id);
+        }
+
+        // js_http_status_code(handle: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // IncomingMessage handle
+            sig.returns.push(AbiParam::new(types::F64)); // status code
+            let func_id = self.module.declare_function("js_http_status_code", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_http_status_code".to_string(), func_id);
+        }
+
+        // js_http_status_message(handle: i64) -> i64 (StringHeader ptr)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // IncomingMessage handle
+            sig.returns.push(AbiParam::new(types::I64)); // StringHeader ptr
+            let func_id = self.module.declare_function("js_http_status_message", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_http_status_message".to_string(), func_id);
+        }
+
+        // js_http_response_headers(handle: i64) -> f64 (NaN-boxed object)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // IncomingMessage handle
+            sig.returns.push(AbiParam::new(types::F64)); // NaN-boxed headers object
+            let func_id = self.module.declare_function("js_http_response_headers", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_http_response_headers".to_string(), func_id);
+        }
+
+        // ========================================================================
         // WebSocket Functions (ws)
         // ========================================================================
 

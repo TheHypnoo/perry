@@ -3467,6 +3467,43 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             eprintln!("Warning: ibtool failed to compile LaunchScreen.storyboard");
         }
 
+        // Bundle resource files: scan source for ImageFile('...') calls and copy referenced files
+        // Also copy any directories named 'logo', 'assets', 'resources', 'images' from the project root
+        let source_dir = args.input.canonicalize().ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        if let Some(src_dir) = &source_dir {
+            // Walk up to find project root (where package.json is)
+            let mut project_root = src_dir.clone();
+            for _ in 0..5 {
+                if project_root.join("package.json").exists() { break; }
+                if let Some(parent) = project_root.parent() {
+                    project_root = parent.to_path_buf();
+                } else { break; }
+            }
+            // Copy common resource directories into the bundle
+            for dir_name in &["logo", "assets", "resources", "images"] {
+                let resource_dir = project_root.join(dir_name);
+                if resource_dir.is_dir() {
+                    let dest = app_dir.join(dir_name);
+                    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+                        fs::create_dir_all(dst)?;
+                        for entry in fs::read_dir(src)? {
+                            let entry = entry?;
+                            let ty = entry.file_type()?;
+                            let dest_path = dst.join(entry.file_name());
+                            if ty.is_dir() {
+                                copy_dir_recursive(&entry.path(), &dest_path)?;
+                            } else {
+                                fs::copy(entry.path(), &dest_path)?;
+                            }
+                        }
+                        Ok(())
+                    }
+                    let _ = copy_dir_recursive(&resource_dir, &dest);
+                }
+            }
+        }
+
         match format {
             OutputFormat::Text => {
                 println!("Wrote iOS app bundle: {}", app_dir.display());

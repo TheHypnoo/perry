@@ -911,6 +911,7 @@ fn lower_module_decl(
                                                         ("mysql2" | "mysql2/promise", "createPool") => Some("Pool"),
                                                         ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
                                                         ("pg", "connect") => Some("Client"),
+                                                        ("http" | "https", "request" | "get") => Some("ClientRequest"),
                                                         _ => None,
                                                     };
                                                     if let Some(class_name) = class_name {
@@ -960,6 +961,7 @@ fn lower_module_decl(
                                                             ("mysql2" | "mysql2/promise", "createPool") => Some("Pool"),
                                                             ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
                                                             ("pg", "connect") => Some("Client"),
+                                                            ("http" | "https", "request" | "get") => Some("ClientRequest"),
                                                             _ => None,
                                                         };
                                                         if let Some(class_name) = class_name {
@@ -5487,6 +5489,10 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         "FastifyInstance" => Some(("fastify", "App")),
                         "FastifyRequest" => Some(("fastify", "Request")),
                         "FastifyReply" => Some(("fastify", "Reply")),
+                        // HTTP/HTTPS types
+                        "IncomingMessage" => Some(("http", "IncomingMessage")),
+                        "ClientRequest" => Some(("http", "ClientRequest")),
+                        "ServerResponse" => Some(("http", "ServerResponse")),
                         _ => None,
                     };
                     if let Some((module, class)) = native_info {

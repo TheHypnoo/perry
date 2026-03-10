@@ -173,6 +173,13 @@ pub extern "C" fn js_stdlib_process_pending() -> i32 {
         count += ws_count;
     }
 
+    // Process pending HTTP events (http/https client callbacks)
+    #[cfg(feature = "http-client")]
+    {
+        let http_count = unsafe { crate::http::js_http_process_pending() };
+        count += http_count;
+    }
+
     // Process pending worker_threads messages (stdin reader)
     count += crate::worker_threads::js_worker_threads_process_pending();
 

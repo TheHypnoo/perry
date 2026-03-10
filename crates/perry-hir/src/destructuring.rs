@@ -789,6 +789,7 @@ pub(crate) fn lower_var_decl_with_destructuring(
                                             ("mysql2" | "mysql2/promise", "createPool") => Some("Pool"),
                                             ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
                                             ("pg", "connect") => Some("Client"),
+                                            ("http" | "https", "request" | "get") => Some("ClientRequest"),
                                             _ => None,
                                         };
                                         if let Some(class_name) = class_name {

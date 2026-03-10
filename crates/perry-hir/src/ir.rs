@@ -33,6 +33,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "mongodb",
     "better-sqlite3",
     // Node.js built-ins
+    "http",
+    "https",
     "events",
     "os",
     "buffer",
