@@ -1035,6 +1035,18 @@ pub extern "C" fn perry_ui_save_file_dialog(_callback: f64, _default_name: i64, 
 }
 
 // =============================================================================
+// Poll Open File (stub — iOS uses URL schemes / UIDocumentBrowser instead)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_poll_open_file() -> i64 {
+    extern "C" {
+        fn js_string_from_bytes(ptr: *const u8, len: i32) -> i64;
+    }
+    unsafe { js_string_from_bytes(std::ptr::null(), 0) }
+}
+
+// =============================================================================
 // State TextField Binding
 // =============================================================================
 

@@ -16144,6 +16144,15 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
+                    "pollOpenFile" => {
+                        // () -> string (returns NaN-boxed string)
+                        let func = extern_funcs.get("perry_ui_poll_open_file")
+                            .ok_or_else(|| anyhow!("perry_ui_poll_open_file not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        let call = builder.ins().call(func_ref, &[]);
+                        let str_ptr = builder.inst_results(call)[0];
+                        return Ok(inline_nanbox_string(builder, str_ptr));
+                    }
                     "openFileDialog" | "openFolderDialog" => {
                         // (callback) — pass callback as f64
                         let callback = ensure_f64(builder, arg_vals[0]);

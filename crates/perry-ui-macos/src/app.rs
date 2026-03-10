@@ -30,6 +30,8 @@ thread_local! {
     static ON_ACTIVATE_CALLBACK: RefCell<Option<f64>> = RefCell::new(None);
     static WINDOWS: RefCell<Vec<WindowEntry>> = RefCell::new(Vec::new());
     static PENDING_ICON_PATH: RefCell<Option<String>> = RefCell::new(None);
+    /// Files requested to be opened via macOS Open With / double-click.
+    static PENDING_OPEN_FILES: RefCell<Vec<String>> = RefCell::new(Vec::new());
 }
 
 struct WindowEntry {
@@ -304,6 +306,26 @@ pub fn app_run(_app_handle: i64) {
             entry.window.makeKeyAndOrderFront(None);
         }
     });
+
+    // Set up app delegate for file open events
+    unsafe {
+        let delegate = PerryAppDelegate::new();
+        let _: () = msg_send![&*app, setDelegate: &*delegate];
+        std::mem::forget(delegate);
+    }
+
+    // Also check process argv for files passed on command line
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        PENDING_OPEN_FILES.with(|files| {
+            let mut files = files.borrow_mut();
+            for arg in args.iter().skip(1) {
+                if !arg.starts_with('-') {
+                    files.push(arg.clone());
+                }
+            }
+        });
+    }
 
     // Activate the app (bring to front)
     #[allow(deprecated)]
@@ -596,6 +618,49 @@ impl PerryTimerTarget {
         });
         unsafe { msg_send![super(this), init] }
     }
+}
+
+// ============================================
+// Application Delegate — handles file open events
+// ============================================
+
+pub struct PerryAppDelegateIvars;
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryAppDelegate"]
+    #[ivars = PerryAppDelegateIvars]
+    pub struct PerryAppDelegate;
+
+    impl PerryAppDelegate {
+        #[unsafe(method(application:openFile:))]
+        fn application_open_file(&self, _app: &AnyObject, filename: &NSString) -> bool {
+            let path = filename.to_string();
+            PENDING_OPEN_FILES.with(|files| {
+                files.borrow_mut().push(path);
+            });
+            true
+        }
+    }
+);
+
+impl PerryAppDelegate {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryAppDelegateIvars);
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Poll for pending open-file requests. Returns the next file path or empty string.
+pub fn poll_open_file() -> String {
+    PENDING_OPEN_FILES.with(|files| {
+        let mut files = files.borrow_mut();
+        if files.is_empty() {
+            String::new()
+        } else {
+            files.remove(0)
+        }
+    })
 }
 
 /// Set a recurring timer. interval_ms is in milliseconds.

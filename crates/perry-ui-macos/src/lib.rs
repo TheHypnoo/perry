@@ -53,6 +53,25 @@ pub extern "C" fn perry_ui_app_set_icon(path_ptr: i64) {
     app::app_set_icon(path_ptr as *const u8);
 }
 
+/// Poll for pending file-open requests (from macOS Open With or argv).
+/// Returns a StringHeader pointer (empty string if none pending).
+#[no_mangle]
+pub extern "C" fn perry_ui_poll_open_file() -> i64 {
+    let path = app::poll_open_file();
+    if path.is_empty() {
+        // Return empty string
+        extern "C" {
+            fn js_string_from_bytes(ptr: *const u8, len: i32) -> i64;
+        }
+        unsafe { js_string_from_bytes(std::ptr::null(), 0) }
+    } else {
+        extern "C" {
+            fn js_string_from_bytes(ptr: *const u8, len: i32) -> i64;
+        }
+        unsafe { js_string_from_bytes(path.as_ptr(), path.len() as i32) }
+    }
+}
+
 /// Register an external NSView (from a native library) as a Perry widget.
 /// Returns widget handle usable with widgetAddChild, widgetSetWidth, etc.
 #[no_mangle]

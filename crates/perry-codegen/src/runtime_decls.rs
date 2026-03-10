@@ -7829,6 +7829,14 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_app_set_icon".to_string(), func_id);
         }
 
+        // perry_ui_poll_open_file() -> i64 (returns NaN-boxed string)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64)); // string ptr
+            let func_id = self.module.declare_function("perry_ui_poll_open_file", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_poll_open_file".to_string(), func_id);
+        }
+
         // perry_ui_text_create(text_ptr: i64) -> i64
         {
             let mut sig = self.module.make_signature();
