@@ -1710,7 +1710,7 @@ pub(crate) struct PerryConfig {
     pub(crate) android: Option<AndroidSavedConfig>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AppleSavedConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) team_id: Option<String>,

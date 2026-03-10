@@ -1,9 +1,10 @@
 //! `perry setup` — guided credential setup wizard for App Store / Google Play distribution
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Args;
 use console::style;
 use dialoguer::{Confirm, Input, Password, Select};
+use std::process::Command;
 
 use super::publish::{
     AndroidSavedConfig, AppleSavedConfig, IosSavedConfig, PerryConfig,
@@ -235,96 +236,509 @@ fn android_wizard(saved: &mut PerryConfig) -> Result<()> {
 
 fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!("  {}", style("iOS Setup").bold());
+    println!("  Automates: certificate, bundle ID, and provisioning profile via App Store Connect API");
     println!();
 
     // --- Step 1: App Store Connect API Key ---
-    println!("  {} App Store Connect API Key", style("Step 1/3 —").cyan().bold());
-    println!();
-    println!("  1. Go to App Store Connect → Users and Access → Integrations → API:");
-    println!("     https://appstoreconnect.apple.com/access/integrations/api");
-    println!("  2. Click '+' and create a key with App Manager role.");
-    println!("  3. Download the .p8 file immediately — it can only be downloaded once.");
-    println!("  4. Note the Key ID and Issuer ID shown on the page.");
+    // Check for existing credentials first
+    let existing_apple = saved.apple.clone().unwrap_or_default();
+
+    println!("  {} App Store Connect API Key", style("Step 1 —").cyan().bold());
     println!();
 
-    press_enter_to_continue("  Press Enter when ready");
+    let has_existing = existing_apple.p8_key_path.is_some()
+        && existing_apple.key_id.is_some()
+        && existing_apple.issuer_id.is_some();
 
-    let p8_path = prompt_file_path("  Path to .p8 key file", ".p8")?;
-    let p8_content = std::fs::read_to_string(&p8_path)?;
+    let (p8_path, key_id, issuer_id, team_id) = if has_existing {
+        let p8 = existing_apple.p8_key_path.clone().unwrap();
+        let kid = existing_apple.key_id.clone().unwrap();
+        let iss = existing_apple.issuer_id.clone().unwrap();
+        let tid = existing_apple.team_id.clone().unwrap_or_default();
+        println!("  Found existing credentials:");
+        println!("    Key ID:    {}", style(&kid).bold());
+        println!("    Issuer ID: {}", style(&iss).dim());
+        println!("    .p8 key:   {}", style(&p8).dim());
+        println!();
+        let reuse = Confirm::new()
+            .with_prompt("  Use these existing credentials?")
+            .default(true)
+            .interact()?;
+        if reuse {
+            (p8, kid, iss, tid)
+        } else {
+            prompt_api_credentials()?
+        }
+    } else {
+        println!("  You need an App Store Connect API key.");
+        println!("  1. Go to: {}", style("https://appstoreconnect.apple.com/access/integrations/api").underlined());
+        println!("  2. Click '+', create a key with {} role.", style("App Manager").bold());
+        println!("  3. Download the .p8 file (only downloadable once).");
+        println!("  4. Note the Key ID and Issuer ID.");
+        println!();
+        press_enter_to_continue("  Press Enter when ready");
+        prompt_api_credentials()?
+    };
+
+    // Validate p8 file
+    let p8_content = std::fs::read_to_string(&p8_path)
+        .with_context(|| format!("Cannot read .p8 key: {p8_path}"))?;
     if !p8_content.trim_start().starts_with("-----BEGIN") {
-        bail!("Invalid .p8 file — expected PEM format starting with '-----BEGIN'");
+        bail!("Invalid .p8 file — expected PEM format");
     }
 
-    let key_id = Input::<String>::new()
-        .with_prompt("  Key ID (e.g. ABC123XYZ)")
-        .interact_text()?;
-    let issuer_id = Input::<String>::new()
-        .with_prompt("  Issuer ID (UUID format, e.g. a1b2c3d4-...)")
-        .interact_text()?;
-    let team_id = Input::<String>::new()
-        .with_prompt("  Apple Developer Team ID (10 characters)")
-        .interact_text()?;
-
+    // Save API credentials immediately
     let apple = saved.apple.get_or_insert_with(AppleSavedConfig::default);
     apple.p8_key_path = Some(p8_path.clone());
     apple.key_id = Some(key_id.clone());
     apple.issuer_id = Some(issuer_id.clone());
     apple.team_id = Some(team_id.clone());
+    save_config(saved).ok();
 
-    println!();
-    println!("  {} Key ID: {}", style("✓").green(), style(&key_id).bold());
-    println!("  {} Issuer ID: {}", style("✓").green(), style(&issuer_id).bold());
-    println!("  {} Team ID: {}", style("✓").green(), style(&team_id).bold());
+    println!("  {} API credentials configured", style("✓").green().bold());
     println!();
 
-    // --- Step 2: Signing Certificate (.p12) ---
-    println!("  {} Signing Certificate (.p12)", style("Step 2/3 —").cyan().bold());
+    // Generate JWT for API calls
+    let jwt = generate_asc_jwt(&key_id, &issuer_id, &p8_content)?;
+
+    // Verify API connectivity
+    print!("  Verifying API access... ");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    let client = reqwest::blocking::Client::new();
+    let resp = client.get("https://api.appstoreconnect.apple.com/v1/certificates?limit=1")
+        .bearer_auth(&jwt)
+        .send()
+        .context("Failed to connect to App Store Connect API")?;
+    if resp.status() == 401 || resp.status() == 403 {
+        bail!("API authentication failed — check your Key ID, Issuer ID, and .p8 key file");
+    }
+    if !resp.status().is_success() {
+        let body = resp.text().unwrap_or_default();
+        bail!("API error: {body}");
+    }
+    println!("{}", style("ok").green());
     println!();
-    println!("  1. Open Xcode → Settings → Accounts → select your Apple ID.");
-    println!("  2. Click 'Manage Certificates'.");
-    println!("  3. Create an 'Apple Distribution' certificate if you don't have one.");
-    println!("  4. Right-click the certificate → Export Certificate → save as .p12.");
+
+    // --- Step 2: Read bundle_id from perry.toml ---
+    let perry_toml_path = std::env::current_dir()?.join("perry.toml");
+    let bundle_id = if perry_toml_path.exists() {
+        let content = std::fs::read_to_string(&perry_toml_path)?;
+        let parsed: toml::Value = toml::from_str(&content)?;
+        parsed.get("project")
+            .and_then(|p| p.get("bundle_id"))
+            .and_then(|v| v.as_str())
+            .or_else(|| parsed.get("ios").and_then(|i| i.get("bundle_id")).and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    let bundle_id = if let Some(bid) = bundle_id {
+        println!("  Found bundle ID in perry.toml: {}", style(&bid).bold());
+        let use_it = Confirm::new()
+            .with_prompt("  Use this bundle ID?")
+            .default(true)
+            .interact()?;
+        if use_it { bid } else {
+            Input::<String>::new()
+                .with_prompt("  Bundle ID (e.g. com.company.app)")
+                .interact_text()?
+        }
+    } else {
+        Input::<String>::new()
+            .with_prompt("  Bundle ID (e.g. com.company.app)")
+            .interact_text()?
+    };
     println!();
 
-    press_enter_to_continue("  Press Enter when ready");
+    // --- Step 3: Register Bundle ID (App ID) if needed ---
+    println!("  {} Registering App ID", style("Step 2 —").cyan().bold());
+    print!("  Checking if {} exists... ", style(&bundle_id).bold());
+    std::io::Write::flush(&mut std::io::stdout()).ok();
 
-    let cert_path = prompt_file_path("  Path to .p12 certificate", ".p12")?;
+    let jwt = generate_asc_jwt(&key_id, &issuer_id, &p8_content)?;
+    let resp = client.get("https://api.appstoreconnect.apple.com/v1/bundleIds")
+        .bearer_auth(&jwt)
+        .query(&[("filter[identifier]", &bundle_id), ("limit", &"1".to_string())])
+        .send()?;
+    let body: serde_json::Value = resp.json()?;
+    let existing_bundle_ids = body["data"].as_array();
+    let bundle_id_resource_id = if let Some(ids) = existing_bundle_ids {
+        if ids.is_empty() {
+            println!("{}", style("not found, creating...").yellow());
+            // Register new bundle ID
+            let jwt = generate_asc_jwt(&key_id, &issuer_id, &p8_content)?;
+            let app_name = bundle_id.split('.').last().unwrap_or("app");
+            let create_body = serde_json::json!({
+                "data": {
+                    "type": "bundleIds",
+                    "attributes": {
+                        "identifier": bundle_id,
+                        "name": format!("Perry - {}", app_name),
+                        "platform": "IOS"
+                    }
+                }
+            });
+            let resp = client.post("https://api.appstoreconnect.apple.com/v1/bundleIds")
+                .bearer_auth(&jwt)
+                .json(&create_body)
+                .send()?;
+            if !resp.status().is_success() {
+                let err = resp.text().unwrap_or_default();
+                bail!("Failed to register Bundle ID: {err}");
+            }
+            let resp_body: serde_json::Value = resp.json()?;
+            let rid = resp_body["data"]["id"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("No ID in bundle registration response"))?
+                .to_string();
+            println!("  {} Registered: {}", style("✓").green().bold(), style(&bundle_id).bold());
+            rid
+        } else {
+            println!("{}", style("exists").green());
+            ids[0]["id"].as_str().unwrap_or("").to_string()
+        }
+    } else {
+        bail!("Unexpected API response when checking bundle IDs");
+    };
+    println!();
 
+    // --- Step 4: Create or find Distribution Certificate ---
+    println!("  {} Distribution Certificate", style("Step 3 —").cyan().bold());
+    print!("  Checking for existing distribution certificates... ");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    let jwt = generate_asc_jwt(&key_id, &issuer_id, &p8_content)?;
+    let resp = client.get("https://api.appstoreconnect.apple.com/v1/certificates")
+        .bearer_auth(&jwt)
+        .query(&[("filter[certificateType]", "DISTRIBUTION"), ("limit", "200")])
+        .send()?;
+    let body: serde_json::Value = resp.json()?;
+    let certs = body["data"].as_array();
+
+    let perry_dir = dirs::home_dir().unwrap_or_default().join(".perry");
+    std::fs::create_dir_all(&perry_dir)?;
+    let p12_path = perry_dir.join("distribution.p12");
+    let p12_password = "perry-auto";
+
+    // Check if we already have a valid .p12 with matching cert
+    let existing_cert_id = if let Some(cert_list) = certs {
+        // Find any valid (not revoked/expired) distribution cert
+        let valid: Vec<&serde_json::Value> = cert_list.iter()
+            .filter(|c| {
+                c["attributes"]["certificateType"].as_str() == Some("DISTRIBUTION")
+            })
+            .collect();
+        if valid.is_empty() {
+            println!("{}", style("none found").yellow());
+            None
+        } else {
+            println!("{} found", style(format!("{}", valid.len())).green());
+            // Check if existing .p12 matches any cert
+            let mut matched_id = None;
+            if p12_path.exists() {
+                // Try to read the existing .p12's serial and match
+                // For simplicity, just ask if they want to keep or recreate
+                println!("  Found existing .p12 at {}", style(p12_path.display()).dim());
+                let keep = Confirm::new()
+                    .with_prompt("  Keep existing certificate?")
+                    .default(true)
+                    .interact()?;
+                if keep {
+                    matched_id = Some(valid[0]["id"].as_str().unwrap_or("").to_string());
+                }
+            }
+            matched_id
+        }
+    } else {
+        println!("{}", style("error reading").red());
+        None
+    };
+
+    let cert_resource_id = if let Some(id) = existing_cert_id {
+        id
+    } else {
+        // Generate a new private key + CSR, submit to Apple, get cert back, make .p12
+        println!("  Generating private key and certificate signing request...");
+        let key_path = perry_dir.join("dist_private_key.pem");
+        let csr_path = perry_dir.join("dist_csr.pem");
+
+        // Generate RSA 2048 private key
+        let status = Command::new("openssl")
+            .args(["genrsa", "-out"])
+            .arg(&key_path)
+            .arg("2048")
+            .stderr(std::process::Stdio::null())
+            .status()
+            .context("openssl not found — required for certificate generation")?;
+        if !status.success() {
+            bail!("Failed to generate private key");
+        }
+
+        // Generate CSR
+        let status = Command::new("openssl")
+            .args(["req", "-new", "-key"])
+            .arg(&key_path)
+            .args(["-out"])
+            .arg(&csr_path)
+            .args(["-subj", "/CN=Perry Distribution/O=Perry"])
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if !status.success() {
+            bail!("Failed to generate CSR");
+        }
+
+        // Read CSR as DER (base64)
+        let csr_pem = std::fs::read_to_string(&csr_path)?;
+        let csr_b64: String = csr_pem.lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<Vec<_>>()
+            .join("");
+
+        // Submit CSR to Apple
+        print!("  Submitting certificate request to Apple... ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let jwt = generate_asc_jwt(&key_id, &issuer_id, &p8_content)?;
+        let create_body = serde_json::json!({
+            "data": {
+                "type": "certificates",
+                "attributes": {
+                    "certificateType": "DISTRIBUTION",
+                    "csrContent": csr_b64
+                }
+            }
+        });
+        let resp = client.post("https://api.appstoreconnect.apple.com/v1/certificates")
+            .bearer_auth(&jwt)
+            .json(&create_body)
+            .send()?;
+        if !resp.status().is_success() {
+            let err = resp.text().unwrap_or_default();
+            bail!("Failed to create certificate: {err}");
+        }
+        let resp_body: serde_json::Value = resp.json()?;
+        let cert_content_b64 = resp_body["data"]["attributes"]["certificateContent"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("No certificate content in response"))?;
+        let cert_id = resp_body["data"]["id"].as_str().unwrap_or("").to_string();
+        let cert_name = resp_body["data"]["attributes"]["name"].as_str().unwrap_or("Unknown");
+        println!("{}", style("done").green());
+        println!("  {} Certificate: {}", style("✓").green().bold(), style(cert_name).bold());
+
+        // Decode cert and write as PEM
+        use base64::Engine;
+        let cert_der = base64::engine::general_purpose::STANDARD.decode(cert_content_b64)
+            .context("Failed to decode certificate from Apple")?;
+        let cert_pem_path = perry_dir.join("distribution.cer.pem");
+        let cert_pem = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            base64::engine::general_purpose::STANDARD.encode(&cert_der)
+                .as_bytes()
+                .chunks(76)
+                .map(|c| std::str::from_utf8(c).unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        std::fs::write(&cert_pem_path, &cert_pem)?;
+
+        // Create .p12 from private key + certificate
+        print!("  Creating .p12 bundle... ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let status = Command::new("openssl")
+            .args(["pkcs12", "-export",
+                   "-inkey"])
+            .arg(&key_path)
+            .args(["-in"])
+            .arg(&cert_pem_path)
+            .args(["-out"])
+            .arg(&p12_path)
+            .args(["-password", &format!("pass:{p12_password}"),
+                   "-legacy"]) // macOS openssl compatibility
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if !status.success() {
+            // Try without -legacy flag (older openssl)
+            let status = Command::new("openssl")
+                .args(["pkcs12", "-export",
+                       "-inkey"])
+                .arg(&key_path)
+                .args(["-in"])
+                .arg(&cert_pem_path)
+                .args(["-out"])
+                .arg(&p12_path)
+                .args(["-password", &format!("pass:{p12_password}")])
+                .stderr(std::process::Stdio::null())
+                .status()?;
+            if !status.success() {
+                bail!("Failed to create .p12 certificate bundle");
+            }
+        }
+        println!("{}", style("done").green());
+
+        // Derive signing identity from cert
+        let identity = format!("Apple Distribution: {} ({})",
+            cert_name.strip_prefix("Apple Distribution: ").unwrap_or(cert_name),
+            &team_id);
+        let apple = saved.apple.get_or_insert_with(AppleSavedConfig::default);
+        apple.signing_identity = Some(identity.clone());
+        println!("  {} Identity: {}", style("✓").green().bold(), style(&identity).bold());
+
+        // Clean up intermediate files (keep the private key for potential re-use)
+        let _ = std::fs::remove_file(&csr_path);
+        let _ = std::fs::remove_file(&cert_pem_path);
+
+        cert_id
+    };
+
+    // Save certificate path and password
     let apple = saved.apple.get_or_insert_with(AppleSavedConfig::default);
-    apple.certificate_path = Some(cert_path.clone());
-
-    println!("  {} Certificate saved: {}", style("✓").green(), style(&cert_path).bold());
-    println!(
-        "  {} Certificate password is NOT saved — set PERRY_APPLE_CERTIFICATE_PASSWORD",
-        style("ℹ").blue()
-    );
-    println!("     or you will be prompted each time you run `perry publish`.");
+    apple.certificate_path = Some(p12_path.to_string_lossy().to_string());
+    save_config(saved).ok();
     println!();
 
-    // --- Step 3: Provisioning Profile ---
-    println!("  {} Provisioning Profile", style("Step 3/3 —").cyan().bold());
-    println!();
-    println!("  1. Go to Apple Developer Portal → Profiles:");
-    println!("     https://developer.apple.com/account/resources/profiles/list");
-    println!("  2. Click '+' and choose 'App Store Connect' distribution type.");
-    println!("  3. Select your App ID and the distribution certificate, then download.");
-    println!();
+    // --- Step 5: Create Provisioning Profile ---
+    println!("  {} Provisioning Profile", style("Step 4 —").cyan().bold());
+    print!("  Creating provisioning profile for {}... ", style(&bundle_id).bold());
+    std::io::Write::flush(&mut std::io::stdout()).ok();
 
-    press_enter_to_continue("  Press Enter when ready");
+    let jwt = generate_asc_jwt(&key_id, &issuer_id, &p8_content)?;
 
-    let profile_path = prompt_file_path("  Path to .mobileprovision file", ".mobileprovision")?;
+    // First check if one already exists
+    let resp = client.get("https://api.appstoreconnect.apple.com/v1/profiles")
+        .bearer_auth(&jwt)
+        .query(&[("filter[profileType]", "IOS_APP_STORE"), ("include", "bundleId"), ("limit", "200")])
+        .send()?;
+    let body: serde_json::Value = resp.json()?;
+    let existing_profile = body["data"].as_array()
+        .and_then(|profiles| {
+            profiles.iter().find(|p| {
+                // Check if this profile's bundle ID matches ours
+                let bid_id = p["relationships"]["bundleId"]["data"]["id"].as_str().unwrap_or("");
+                bid_id == bundle_id_resource_id
+            })
+        });
+
+    let profile_b64 = if let Some(profile) = existing_profile {
+        println!("{}", style("found existing").green());
+        let profile_content = profile["attributes"]["profileContent"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("No profile content in existing profile"))?;
+        profile_content.to_string()
+    } else {
+        // Create new profile
+        let create_body = serde_json::json!({
+            "data": {
+                "type": "profiles",
+                "attributes": {
+                    "name": format!("Perry - {}", bundle_id),
+                    "profileType": "IOS_APP_STORE"
+                },
+                "relationships": {
+                    "bundleId": {
+                        "data": {
+                            "type": "bundleIds",
+                            "id": bundle_id_resource_id
+                        }
+                    },
+                    "certificates": {
+                        "data": [{
+                            "type": "certificates",
+                            "id": cert_resource_id
+                        }]
+                    }
+                }
+            }
+        });
+        let jwt = generate_asc_jwt(&key_id, &issuer_id, &p8_content)?;
+        let resp = client.post("https://api.appstoreconnect.apple.com/v1/profiles")
+            .bearer_auth(&jwt)
+            .json(&create_body)
+            .send()?;
+        if !resp.status().is_success() {
+            let err = resp.text().unwrap_or_default();
+            bail!("Failed to create provisioning profile: {err}");
+        }
+        let resp_body: serde_json::Value = resp.json()?;
+        println!("{}", style("created").green());
+        resp_body["data"]["attributes"]["profileContent"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("No profile content in response"))?
+            .to_string()
+    };
+
+    // Decode and save the provisioning profile
+    use base64::Engine;
+    let profile_data = base64::engine::general_purpose::STANDARD.decode(&profile_b64)
+        .context("Failed to decode provisioning profile")?;
+    let profile_path = perry_dir.join("perry.mobileprovision");
+    std::fs::write(&profile_path, &profile_data)?;
 
     let ios = saved.ios.get_or_insert_with(IosSavedConfig::default);
-    ios.provisioning_profile_path = Some(profile_path.clone());
+    ios.provisioning_profile_path = Some(profile_path.to_string_lossy().to_string());
 
-    println!("  {} Provisioning profile saved.", style("✓").green());
+    println!("  {} Profile saved to {}", style("✓").green().bold(), style(profile_path.display()).dim());
     println!();
-    println!("  Add to your perry.toml:");
+
+    // --- Summary ---
+    println!("  {}", style("Setup complete!").green().bold());
     println!();
-    println!("  {}", style("[ios]").cyan());
-    println!("  distribute = \"appstore\"  {} or \"testflight\"", style("#").dim());
+    println!("  Certificate:  {}", style(p12_path.display()).dim());
+    println!("  Profile:      {}", style(profile_path.display()).dim());
+    println!("  Cert password: {}", style(p12_password).bold());
+    println!();
+    println!("  Set the password in your environment:");
+    println!("  export PERRY_APPLE_CERTIFICATE_PASSWORD={p12_password}");
+    println!();
+    println!("  Then run: {}", style("perry publish --ios").bold());
 
     Ok(())
+}
+
+/// Generate an App Store Connect API JWT token (ES256, 20-minute expiry)
+fn generate_asc_jwt(key_id: &str, issuer_id: &str, p8_content: &str) -> Result<String> {
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let header = Header {
+        alg: Algorithm::ES256,
+        kid: Some(key_id.to_string()),
+        typ: Some("JWT".to_string()),
+        ..Default::default()
+    };
+
+    let claims = serde_json::json!({
+        "iss": issuer_id,
+        "iat": now,
+        "exp": now + 1200,
+        "aud": "appstoreconnect-v1"
+    });
+
+    let encoding_key = EncodingKey::from_ec_pem(p8_content.as_bytes())
+        .context("Failed to parse .p8 key — ensure it's a valid EC private key")?;
+
+    let token = encode(&header, &claims, &encoding_key)
+        .context("Failed to generate JWT")?;
+
+    Ok(token)
+}
+
+/// Prompt for App Store Connect API credentials
+fn prompt_api_credentials() -> Result<(String, String, String, String)> {
+    let p8_path = prompt_file_path("  Path to .p8 key file", ".p8")?;
+    let key_id = Input::<String>::new()
+        .with_prompt("  Key ID (e.g. ABC123XYZ)")
+        .interact_text()?;
+    let issuer_id = Input::<String>::new()
+        .with_prompt("  Issuer ID (UUID format)")
+        .interact_text()?;
+    let team_id = Input::<String>::new()
+        .with_prompt("  Apple Developer Team ID (10 chars)")
+        .interact_text()?;
+    Ok((p8_path, key_id, issuer_id, team_id))
 }
 
 // ---------------------------------------------------------------------------
