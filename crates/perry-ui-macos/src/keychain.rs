@@ -19,6 +19,7 @@ fn str_from_header(ptr: *const u8) -> &'static str {
 extern "C" {
     fn SecItemAdd(attributes: *const c_void, result: *mut *const c_void) -> i32;
     fn SecItemCopyMatching(query: *const c_void, result: *mut *const c_void) -> i32;
+    fn SecItemUpdate(query: *const c_void, attributes_to_update: *const c_void) -> i32;
     fn SecItemDelete(query: *const c_void) -> i32;
 }
 
@@ -58,25 +59,36 @@ extern "C" {
 }
 
 /// Save a key-value pair to the keychain.
+/// Uses SecItemUpdate to preserve the ACL (avoids keychain prompts on code signature changes).
+/// Falls back to SecItemAdd if the item doesn't exist yet.
 pub fn save(key_ptr: *const u8, value_ptr: *const u8) {
     let key = str_from_header(key_ptr);
     let value = str_from_header(value_ptr);
 
     unsafe {
-        // Delete existing entry first
-        let query = make_query(key);
-        SecItemDelete(&*query as *const _ as *const c_void);
-
-        // Add new entry
-        let dict = make_query(key);
         let value_data: objc2::rc::Retained<objc2::runtime::AnyObject> = {
             let ns_str = objc2_foundation::NSString::from_str(value);
             objc2::msg_send![&*ns_str, dataUsingEncoding: 4u64] // NSUTF8StringEncoding = 4
         };
         let value_data_key: *const c_void = kSecValueData;
-        let _: () = objc2::msg_send![&*dict, setObject: &*value_data, forKey: value_data_key as *const objc2::runtime::AnyObject];
 
-        SecItemAdd(&*dict as *const _ as *const c_void, std::ptr::null_mut());
+        // Try to update existing entry first (preserves ACL)
+        let query = make_query(key);
+        let dict_cls = objc2::runtime::AnyClass::get(c"NSMutableDictionary").unwrap();
+        let update_dict: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![dict_cls, new];
+        let _: () = objc2::msg_send![&*update_dict, setObject: &*value_data, forKey: value_data_key as *const objc2::runtime::AnyObject];
+
+        let status = SecItemUpdate(
+            &*query as *const _ as *const c_void,
+            &*update_dict as *const _ as *const c_void,
+        );
+
+        // errSecItemNotFound = -25300: item doesn't exist yet, add it
+        if status == -25300 {
+            let add_dict = make_query(key);
+            let _: () = objc2::msg_send![&*add_dict, setObject: &*value_data, forKey: value_data_key as *const objc2::runtime::AnyObject];
+            SecItemAdd(&*add_dict as *const _ as *const c_void, std::ptr::null_mut());
+        }
     }
 }
 

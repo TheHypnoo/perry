@@ -360,7 +360,9 @@ pub fn match_parent_width(child_handle: i64) {
             }
             if found_stack.is_null() { return; }
             let child_width: Retained<AnyObject> = objc2::msg_send![&*child, widthAnchor];
-            let stack_width: Retained<AnyObject> = objc2::msg_send![found_stack, widthAnchor];
+            // Use layoutMarginsGuide so the constraint respects the parent's padding/edge insets
+            let margins_guide: Retained<AnyObject> = objc2::msg_send![found_stack, layoutMarginsGuide];
+            let stack_width: Retained<AnyObject> = objc2::msg_send![&*margins_guide, widthAnchor];
             let c: Retained<AnyObject> = objc2::msg_send![&*child_width, constraintEqualToAnchor: &*stack_width];
             let _: () = objc2::msg_send![&*c, setActive: true];
         }

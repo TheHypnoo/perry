@@ -361,12 +361,6 @@ pub extern "C" fn perry_ui_widget_match_parent_height(handle: i64) {
     widgets::match_parent_height(handle);
 }
 
-/// Pin a child view's leading and trailing to its superview so it fills the parent width.
-#[no_mangle]
-pub extern "C" fn perry_ui_widget_match_parent_width(handle: i64) {
-    widgets::match_parent_width(handle);
-}
-
 /// Set whether a Button has a border.
 #[no_mangle]
 pub extern "C" fn perry_ui_button_set_bordered(handle: i64, bordered: f64) {
@@ -1290,3 +1284,22 @@ pub extern "C" fn perry_on_layout_change(_callback: f64) {}
 
 #[no_mangle]
 pub extern "C" fn perry_get_device_idiom() -> f64 { 0.0 }
+
+// --- TabBar stubs (not yet implemented for macOS) ---
+
+#[no_mangle]
+pub extern "C" fn perry_ui_tabbar_create(_on_change: f64) -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_tabbar_add_tab(_handle: i64, _label_ptr: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_tabbar_set_selected(_handle: i64, _index: i64) {}
+
+// --- ScrollView refresh control stubs (not yet implemented for macOS) ---
+
+#[no_mangle]
+pub extern "C" fn perry_ui_scrollview_set_refresh_control(_handle: i64, _callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_scrollview_end_refreshing(_handle: i64) {}

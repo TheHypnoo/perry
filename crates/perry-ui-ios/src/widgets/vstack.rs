@@ -65,6 +65,7 @@ pub fn create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right:
         let insets = UIEdgeInsets { top, left, bottom, right };
         let _: () = msg_send![&*stack, setLayoutMargins: insets];
         let _: () = msg_send![&*stack, setLayoutMarginsRelativeArrangement: true];
+        let _: () = msg_send![&*stack, setInsetsLayoutMarginsFromSafeArea: false];
 
         let view: Retained<UIView> = Retained::cast_unchecked(stack);
         super::register_widget(view)

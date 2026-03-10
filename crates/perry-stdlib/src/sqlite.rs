@@ -89,7 +89,30 @@ pub unsafe extern "C" fn js_sqlite_open(filename_ptr: *const StringHeader) -> Ha
     let conn = if filename == ":memory:" {
         Connection::open_in_memory()
     } else {
-        Connection::open(&filename)
+        // On iOS/Android, resolve relative paths to a writable directory
+        // (the CWD is typically the read-only app bundle on mobile platforms)
+        let resolved = if !filename.starts_with('/') && !filename.starts_with(':') {
+            #[cfg(target_os = "ios")]
+            {
+                extern "C" {
+                    fn getenv(name: *const i8) -> *const i8;
+                }
+                let home = getenv(b"HOME\0".as_ptr() as *const i8);
+                if !home.is_null() {
+                    let home_str = std::ffi::CStr::from_ptr(home).to_str().unwrap_or("");
+                    let docs = format!("{}/Documents", home_str);
+                    let _ = std::fs::create_dir_all(&docs);
+                    format!("{}/{}", docs, filename)
+                } else {
+                    filename.clone()
+                }
+            }
+            #[cfg(not(target_os = "ios"))]
+            { filename.clone() }
+        } else {
+            filename.clone()
+        };
+        Connection::open(&resolved)
     };
 
     match conn {

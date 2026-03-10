@@ -35,12 +35,33 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
     let path = str_from_header(path_ptr);
     let _mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
     unsafe {
-        let ns_path = NSString::from_str(path);
+        // Resolve relative paths against the app bundle's resource directory
+        let resolved = if !path.starts_with('/') {
+            let bundle_cls = objc2::runtime::AnyClass::get(c"NSBundle").unwrap();
+            let main_bundle: *mut AnyObject = msg_send![bundle_cls, mainBundle];
+            let res_path: *mut AnyObject = msg_send![main_bundle, resourcePath];
+            if !res_path.is_null() {
+                let res_str: *const AnyObject = msg_send![res_path, UTF8String];
+                let c_str = std::ffi::CStr::from_ptr(res_str as *const i8);
+                format!("{}/{}", c_str.to_str().unwrap_or(""), path)
+            } else {
+                path.to_string()
+            }
+        } else {
+            path.to_string()
+        };
+        let ns_path = NSString::from_str(&resolved);
         let image_cls = objc2::runtime::AnyClass::get(c"UIImage").unwrap();
         let image: *mut AnyObject = msg_send![image_cls, imageWithContentsOfFile: &*ns_path];
         let iv_cls = objc2::runtime::AnyClass::get(c"UIImageView").unwrap();
         let obj: *mut AnyObject = msg_send![iv_cls, alloc];
         let obj: *mut AnyObject = msg_send![obj, initWithImage: image];
+        if obj.is_null() {
+            // Image not found — create an empty UIImageView instead of crashing
+            let obj: *mut AnyObject = msg_send![iv_cls, new];
+            let image_view: Retained<UIView> = Retained::retain(obj as *mut UIView).unwrap();
+            return super::register_widget(image_view);
+        }
         let image_view: Retained<UIView> = Retained::retain(obj as *mut UIView).unwrap();
         super::register_widget(image_view)
     }

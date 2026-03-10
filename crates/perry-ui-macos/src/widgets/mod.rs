@@ -570,7 +570,7 @@ pub fn set_hugging_priority(handle: i64, priority: f64) {
 /// Walks the superview chain to find the nearest NSStackView, then pins
 /// the child's widthAnchor to that stack's widthAnchor. Useful for VStack
 /// children (especially embedded NSViews) that should stretch horizontally.
-pub fn match_parent_width(child_handle: i64) {
+pub fn match_stack_width(child_handle: i64) {
     if let Some(child) = get_widget(child_handle) {
         unsafe {
             // Walk up the superview chain to find the NSStackView.

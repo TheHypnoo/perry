@@ -94,7 +94,17 @@ pub unsafe extern "C" fn js_mongodb_connect(uri_ptr: *const StringHeader) -> *mu
     };
 
     spawn_for_promise(promise as *mut u8, async move {
-        let client = Client::with_uri_str(&uri).await
+        let mut opts = mongodb::options::ClientOptions::parse(&uri).await
+            .map_err(|e| format!("Failed to parse URI: {}", e))?;
+        // Set reasonable timeouts so connect doesn't hang forever
+        let timeout = std::time::Duration::from_secs(5);
+        if opts.connect_timeout.is_none() {
+            opts.connect_timeout = Some(timeout);
+        }
+        if opts.server_selection_timeout.is_none() {
+            opts.server_selection_timeout = Some(timeout);
+        }
+        let client = Client::with_options(opts)
             .map_err(|e| format!("Failed to connect: {}", e))?;
 
         let handle = register_handle(MongoClientHandle { client });
