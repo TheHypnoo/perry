@@ -16,7 +16,7 @@ bench_*
 worker
 controls
 main
-cli
+/cli
 counter_web
 fastify
 hello_web
