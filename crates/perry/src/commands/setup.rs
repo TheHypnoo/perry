@@ -169,16 +169,17 @@ pub(crate) fn android_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!();
     println!("  Follow these steps to enable automated Play Store uploads:");
     println!();
-    println!("  1. Open Play Console → Setup → API access:");
-    println!("     https://play.google.com/console/developers/api-access");
-    println!("     Link your console to a Google Cloud project.");
+    println!("  1. Enable the Google Play Android Developer API:");
+    println!("     https://console.cloud.google.com/apis/library/androidpublisher.googleapis.com");
+    println!("     → Hit Enable.");
     println!();
     println!("  2. Create a service account + download its JSON key:");
     println!("     https://console.cloud.google.com/iam-admin/serviceaccounts");
-    println!("     → Create Service Account → Add Key → Create new key → JSON");
+    println!("     → Create Service Account → Keys tab → Add Key → JSON → download.");
     println!();
-    println!("  3. Back in Play Console → Users & Permissions → Invite user");
-    println!("     Add the service account email with Release Manager permissions.");
+    println!("  3. Grant permissions in Play Console:");
+    println!("     → Users & Permissions → Invite new users");
+    println!("     → Paste the service account email → grant Release Manager permissions.");
     println!();
     println!(
         "  {} The first release MUST be uploaded manually via Play Console before",
@@ -218,11 +219,32 @@ pub(crate) fn android_wizard(saved: &mut PerryConfig) -> Result<()> {
     let android = saved.android.get_or_insert_with(AndroidSavedConfig::default);
     android.google_play_key_path = Some(json_path);
 
-    println!();
-    println!("  Add to your perry.toml:");
-    println!();
-    println!("  {}", style("[android]").cyan());
-    println!("  distribute = \"playstore\"");
+    // Update project perry.toml with distribute = "playstore"
+    let perry_toml_path = std::env::current_dir()?.join("perry.toml");
+    if perry_toml_path.exists() {
+        match update_perry_toml_android(&perry_toml_path, &keystore_path, &key_alias) {
+            Ok(()) => {
+                println!();
+                println!(
+                    "  {} Updated perry.toml with [android] settings",
+                    style("✓").green()
+                );
+            }
+            Err(e) => {
+                println!();
+                println!("  {} Could not update perry.toml: {e}", style("!").yellow());
+                println!("  Add these manually to your perry.toml [android] section:");
+                println!("    distribute = \"playstore\"");
+            }
+        }
+    } else {
+        println!();
+        println!("  Add to your perry.toml:");
+        println!();
+        println!("  {}", style("[android]").cyan());
+        println!("  distribute = \"playstore\"");
+    }
+
     println!();
     println!("  Tip: to target a specific track, use:");
     println!("  distribute = \"playstore:beta\"  {} :internal, :alpha, :beta, :production", style("#").dim());
@@ -1573,6 +1595,33 @@ fn update_perry_toml_section_bool(
         .ok_or_else(|| anyhow::anyhow!("[{section}] in perry.toml is not a table"))?;
 
     table.insert(key.into(), toml::Value::Boolean(value));
+
+    let new_content = toml::to_string_pretty(&doc)
+        .context("Failed to serialize perry.toml")?;
+    std::fs::write(perry_toml_path, new_content)?;
+    Ok(())
+}
+
+/// Update perry.toml [android] section with keystore and distribute settings.
+fn update_perry_toml_android(
+    perry_toml_path: &std::path::Path,
+    keystore_path: &str,
+    key_alias: &str,
+) -> Result<()> {
+    let content = std::fs::read_to_string(perry_toml_path)?;
+    let mut doc = content.parse::<toml::Table>()
+        .context("Failed to parse perry.toml")?;
+
+    let android = doc.entry("android")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[android] in perry.toml is not a table"))?;
+
+    android.insert("keystore".into(), toml::Value::String(keystore_path.into()));
+    android.insert("key_alias".into(), toml::Value::String(key_alias.into()));
+    if !android.contains_key("distribute") {
+        android.insert("distribute".into(), toml::Value::String("playstore".into()));
+    }
 
     let new_content = toml::to_string_pretty(&doc)
         .context("Failed to serialize perry.toml")?;

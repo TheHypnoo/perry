@@ -201,6 +201,8 @@ struct AndroidConfig {
     target_sdk: Option<String>,
     permissions: Option<Vec<String>>,
     distribute: Option<String>,
+    keystore: Option<String>,
+    key_alias: Option<String>,
     entry: Option<String>,
 }
 
@@ -787,7 +789,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     if is_android && interactive {
         let has_keystore = args.android_keystore.is_some()
             || std::env::var("PERRY_ANDROID_KEYSTORE").is_ok()
-            || saved.android.as_ref().and_then(|a| a.keystore_path.as_deref()).is_some();
+            || saved.android.as_ref().and_then(|a| a.keystore_path.as_deref()).is_some()
+            || config.android.as_ref().and_then(|a| a.keystore.as_deref()).is_some();
         if !has_keystore {
             println!();
             println!("  {} Android not configured — running setup wizard", style("!").yellow());
@@ -798,12 +801,15 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         }
     }
 
-    // Android credentials
+    // Android credentials — check saved config first, then perry.toml [android] section
+    let toml_android_keystore = config.android.as_ref().and_then(|a| a.keystore.as_deref());
+    let toml_android_key_alias = config.android.as_ref().and_then(|a| a.key_alias.as_deref());
+
     let android_keystore_path = if is_android {
         resolve_path_credential(
             args.android_keystore.as_deref(),
             "PERRY_ANDROID_KEYSTORE",
-            saved.android.as_ref().and_then(|a| a.keystore_path.as_deref()),
+            saved.android.as_ref().and_then(|a| a.keystore_path.as_deref()).or(toml_android_keystore),
             "  Android keystore path",
             interactive,
         )
@@ -815,7 +821,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         resolve_credential(
             args.android_key_alias.as_deref(),
             "PERRY_ANDROID_KEY_ALIAS",
-            saved.android.as_ref().and_then(|a| a.key_alias.as_deref()),
+            saved.android.as_ref().and_then(|a| a.key_alias.as_deref()).or(toml_android_key_alias),
             "  Android key alias",
             false,
             interactive,
