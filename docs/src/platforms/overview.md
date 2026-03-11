@@ -1,0 +1,73 @@
+# Platform Overview
+
+Perry compiles TypeScript to native executables for 6 platforms from the same source code.
+
+## Supported Platforms
+
+| Platform | Target Flag | UI Toolkit | Status |
+|----------|-------------|------------|--------|
+| macOS | *(default)* | AppKit | Full support (127/127 FFI functions) |
+| iOS | `--target ios` / `--target ios-simulator` | UIKit | Full support (127/127) |
+| Android | `--target android` | JNI/Android SDK | Full support (112/112) |
+| Windows | `--target windows` | Win32 | Full support (112/112) |
+| Linux | `--target linux` | GTK4 | Full support (112/112) |
+| Web | `--target web` | DOM/CSS | Full support (127/127) |
+
+## Cross-Compilation
+
+```bash
+# Default: compile for current platform
+perry app.ts -o app
+
+# Compile for a specific target
+perry app.ts -o app --target ios-simulator
+perry app.ts -o app --target web
+perry app.ts -o app --target windows
+perry app.ts -o app --target linux
+perry app.ts -o app --target android
+```
+
+## Platform Detection
+
+Use the `__platform__` compile-time constant to branch by platform:
+
+```typescript
+declare const __platform__: number;
+
+// Platform constants:
+// 0 = macOS
+// 1 = iOS
+// 2 = Android
+// 3 = Windows
+// 4 = Linux
+
+if (__platform__ === 0) {
+  console.log("Running on macOS");
+} else if (__platform__ === 1) {
+  console.log("Running on iOS");
+} else if (__platform__ === 3) {
+  console.log("Running on Windows");
+}
+```
+
+`__platform__` is resolved at compile time. The compiler constant-folds comparisons and eliminates dead branches, so platform-specific code has zero runtime cost.
+
+## Platform Feature Matrix
+
+| Feature | macOS | iOS | Android | Windows | Linux | Web |
+|---------|-------|-----|---------|---------|-------|-----|
+| CLI programs | Yes | — | — | Yes | Yes | — |
+| Native UI | Yes | Yes | Yes | Yes | Yes | Yes |
+| File system | Yes | Sandboxed | Sandboxed | Yes | Yes | — |
+| Networking | Yes | Yes | Yes | Yes | Yes | Fetch |
+| System APIs | Yes | Partial | Partial | Yes | Yes | Partial |
+| Widgets (WidgetKit) | — | Yes | — | — | — | — |
+
+## Next Steps
+
+- [macOS](macos.md)
+- [iOS](ios.md)
+- [Android](android.md)
+- [Windows](windows.md)
+- [Linux (GTK4)](linux.md)
+- [Web](web.md)

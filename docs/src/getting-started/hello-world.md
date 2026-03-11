@@ -1,0 +1,109 @@
+# Hello World
+
+## Your First Program
+
+Create a file called `hello.ts`:
+
+```typescript
+console.log("Hello, Perry!");
+```
+
+Compile and run it:
+
+```bash
+perry hello.ts -o hello
+./hello
+```
+
+Output:
+
+```
+Hello, Perry!
+```
+
+That's it. Perry compiled your TypeScript to a native executable — no Node.js, no bundler, no runtime.
+
+## A Slightly Bigger Example
+
+```typescript
+function fibonacci(n: number): number {
+  if (n <= 1) return n;
+  return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+const start = Date.now();
+const result = fibonacci(40);
+const elapsed = Date.now() - start;
+
+console.log(`fibonacci(40) = ${result}`);
+console.log(`Completed in ${elapsed}ms`);
+```
+
+```bash
+perry fib.ts -o fib
+./fib
+```
+
+This runs about 2x faster than Node.js because Perry compiles to native machine code with integer specialization.
+
+## Using Variables and Functions
+
+```typescript
+const name: string = "World";
+const items: number[] = [1, 2, 3, 4, 5];
+
+const doubled = items.map((x) => x * 2);
+const sum = doubled.reduce((acc, x) => acc + x, 0);
+
+console.log(`Hello, ${name}!`);
+console.log(`Sum of doubled: ${sum}`);
+```
+
+## Async Code
+
+```typescript
+async function fetchData(): Promise<string> {
+  const response = await fetch("https://httpbin.org/get");
+  const data = await response.json();
+  return data.origin;
+}
+
+const ip = await fetchData();
+console.log(`Your IP: ${ip}`);
+```
+
+```bash
+perry fetch.ts -o fetch
+./fetch
+```
+
+Perry compiles async/await to a native async runtime backed by Tokio.
+
+## What the Compiler Produces
+
+When you run `perry file.ts -o output`, Perry:
+
+1. Parses your TypeScript with SWC
+2. Lowers the AST to an intermediate representation (HIR)
+3. Applies optimizations (inlining, closure conversion, etc.)
+4. Generates native machine code with Cranelift
+5. Links with your system's C compiler
+
+The result is a standalone executable with no external dependencies.
+
+### Binary Size
+
+| Program | Binary Size |
+|---------|-------------|
+| Hello world | ~300KB |
+| CLI with fs/path | ~3MB |
+| UI app | ~3MB |
+| Full app with stdlib | ~48MB |
+
+Perry automatically detects which runtime features you use and only links what's needed.
+
+## Next Steps
+
+- [Build a native UI app](first-app.md)
+- [Configure your project](project-config.md)
+- [Explore supported TypeScript features](../language/supported-features.md)

@@ -1,0 +1,120 @@
+# Dialogs
+
+Perry provides native dialog functions for file selection, alerts, and sheets.
+
+## File Open Dialog
+
+```typescript
+import { openFileDialog } from "perry/ui";
+
+const filePath = openFileDialog();
+if (filePath) {
+  console.log(`Selected: ${filePath}`);
+}
+```
+
+Returns the selected file path, or `null` if cancelled.
+
+## Folder Selection Dialog
+
+```typescript
+import { openFolderDialog } from "perry/ui";
+
+const folderPath = openFolderDialog();
+if (folderPath) {
+  console.log(`Selected folder: ${folderPath}`);
+}
+```
+
+## Save File Dialog
+
+```typescript
+import { saveFileDialog } from "perry/ui";
+
+const savePath = saveFileDialog();
+if (savePath) {
+  // Write file to savePath
+}
+```
+
+## Alert
+
+Display a native alert dialog:
+
+```typescript
+import { alert } from "perry/ui";
+
+alert("Operation Complete", "Your file has been saved successfully.");
+```
+
+`alert(title, message)` shows a modal alert with an OK button.
+
+## Sheets
+
+Sheets are modal panels attached to a window:
+
+```typescript
+import { Sheet, Text, Button, VStack } from "perry/ui";
+
+const sheet = Sheet(() =>
+  VStack([
+    Text("Sheet Content"),
+    Button("Close", () => {
+      sheet.dismiss();
+    }),
+  ])
+);
+
+// Show the sheet
+sheet.present();
+```
+
+## Platform Notes
+
+| Dialog | macOS | iOS | Windows | Linux | Web |
+|--------|-------|-----|---------|-------|-----|
+| File Open | NSOpenPanel | UIDocumentPicker | IFileOpenDialog | GtkFileChooserDialog | `<input type="file">` |
+| File Save | NSSavePanel | — | IFileSaveDialog | GtkFileChooserDialog | Download link |
+| Folder | NSOpenPanel | — | IFileOpenDialog | GtkFileChooserDialog | — |
+| Alert | NSAlert | UIAlertController | MessageBoxW | MessageDialog | `alert()` |
+| Sheet | NSSheet | Modal VC | Modal Dialog | Modal Window | Modal div |
+
+## Complete Example
+
+```typescript
+import { App, Text, Button, VStack, HStack, State, openFileDialog, saveFileDialog, alert } from "perry/ui";
+import { readFileSync, writeFileSync } from "perry/fs";
+
+const content = State("");
+const filePath = State("");
+
+App("Text Editor", () =>
+  VStack([
+    HStack([
+      Button("Open", () => {
+        const path = openFileDialog();
+        if (path) {
+          filePath.set(path);
+          content.set(readFileSync(path));
+        }
+      }),
+      Button("Save As", () => {
+        const path = saveFileDialog();
+        if (path) {
+          writeFileSync(path, content.get());
+          filePath.set(path);
+          alert("Saved", `File saved to ${path}`);
+        }
+      }),
+    ]),
+    Text(`File: ${filePath.get() || "No file open"}`),
+    TextField(content, "Start typing..."),
+  ])
+);
+```
+
+## Next Steps
+
+- [Menus](menus.md) — Menu bar and context menus
+- [Multi-Window](multi-window.md) — Multiple windows
+- [Events](events.md) — User interaction events

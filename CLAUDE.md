@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.174
+**Current Version:** 0.2.175
 
 ## Workflow Requirements
 
@@ -152,6 +152,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.175
+- **Documentation site**: mdBook-based docs (`docs/`) with 49 pages covering getting started, language features, UI widgets, 6 platforms, stdlib, system APIs, WidgetKit, plugins, CLI reference, and contributing; GitHub Pages CI workflow; `llms.txt` for LLM discoverability
 
 ### v0.2.174
 - **`perry/widget` module + `--target ios-widget`**: compile TypeScript widget declarations to native SwiftUI WidgetKit extensions — `Widget({kind, render, entryFields, ...})` lowers to `WidgetDecl` HIR nodes, emitted as complete SwiftUI source (Entry struct, View, TimelineProvider, WidgetBundle) via new `perry-codegen-swiftui` crate; supports Text, VStack/HStack/ZStack, Image, Spacer, conditionals, template literals, font/color/padding/frame modifiers; generates Info.plist with `com.apple.widgetkit-extension` extension point

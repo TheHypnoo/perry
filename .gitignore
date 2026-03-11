@@ -72,3 +72,6 @@ private-*
 .vscode/
 *.swp
 *.swo
+
+# mdBook output
+docs/book/
