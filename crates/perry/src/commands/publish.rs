@@ -160,6 +160,8 @@ struct MacosConfig {
     key_id: Option<String>,
     issuer_id: Option<String>,
     p8_key_path: Option<String>,
+    /// If true, adds ITSAppUsesNonExemptEncryption=NO to Info.plist
+    encryption_exempt: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -310,6 +312,8 @@ struct BuildManifest {
     ios_encryption_exempt: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     macos_distribute: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    macos_encryption_exempt: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     android_min_sdk: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -488,8 +492,16 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         }
     }
 
-    // Auto-increment build_number for iOS/Android (used as CFBundleVersion / versionCode)
-    let build_number = if is_ios || is_android {
+    // Extract macos distribute early — needed for build_number auto-increment decision
+    let macos_distribute = config.macos.as_ref().and_then(|m| m.distribute.clone());
+
+    // Auto-increment build_number for targets that need monotonic build numbers
+    let is_macos = !is_ios && !is_android && !is_linux;
+    let macos_needs_upload = is_macos && matches!(
+        macos_distribute.as_deref(),
+        Some("appstore") | Some("testflight")
+    );
+    let build_number = if is_ios || is_android || macos_needs_upload {
         let n = toml_build_number + 1;
         if let Ok(content) = fs::read_to_string(&perry_toml_path) {
             let updated = if content.contains("build_number =") {
@@ -533,7 +545,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let category = config.macos.as_ref().and_then(|m| m.category.clone());
     let minimum_os = config.macos.as_ref().and_then(|m| m.minimum_os.clone());
     let entitlements = config.macos.as_ref().and_then(|m| m.entitlements.clone());
-    let macos_distribute = config.macos.as_ref().and_then(|m| m.distribute.clone());
+    // macos_distribute already extracted above (before build_number auto-increment)
     let macos_signing_identity = config.macos.as_ref().and_then(|m| m.signing_identity.clone());
 
     // iOS-specific config from perry.toml
@@ -545,6 +557,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let ios_capabilities = config.ios.as_ref().and_then(|i| i.capabilities.clone());
     let ios_distribute = config.ios.as_ref().and_then(|i| i.distribute.clone());
     let ios_encryption_exempt = config.ios.as_ref().and_then(|i| i.encryption_exempt);
+    let macos_encryption_exempt = config.macos.as_ref().and_then(|m| m.encryption_exempt);
 
     // Android-specific config from perry.toml
     let android_min_sdk = config.android.as_ref().and_then(|a| a.min_sdk.clone());
@@ -1075,6 +1088,93 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         }
     }
 
+    // Pre-flight validation for macOS App Store / TestFlight
+    if is_macos {
+        let distribute = macos_distribute.as_deref().unwrap_or("");
+        if distribute == "appstore" || distribute == "testflight" {
+            let mut warnings: Vec<String> = Vec::new();
+            let mut errors: Vec<String> = Vec::new();
+
+            // 1. Check for app icon
+            if icon.is_none() {
+                warnings.push(
+                    "No app icon configured. App Store requires an icon.\n\
+                     \x20\x20  Add [app.icons] source = \"assets/icon.png\" to perry.toml"
+                    .into()
+                );
+            } else if let Some(ref icon_path) = icon {
+                let full_icon_path = project_dir.join(icon_path);
+                if !full_icon_path.exists() {
+                    errors.push(format!(
+                        "App icon not found: {}\n\
+                         \x20\x20  Ensure the icon file exists at the specified path",
+                        icon_path
+                    ));
+                }
+            }
+
+            // 2. Validate version string
+            let version_parts: Vec<&str> = version.split('.').collect();
+            if version_parts.len() < 2 || version_parts.len() > 3
+                || !version_parts.iter().all(|p| p.parse::<u32>().is_ok())
+            {
+                warnings.push(format!(
+                    "Version \"{}\" may not be valid for App Store.\n\
+                     \x20\x20  Use: MAJOR.MINOR or MAJOR.MINOR.PATCH (e.g., 1.2.0)",
+                    version
+                ));
+            }
+
+            // 3. Validate build number is positive
+            if build_number == 0 {
+                errors.push(
+                    "Build number must be positive for App Store submission.".into()
+                );
+            }
+
+            // 4. Check signing certificate
+            if apple_certificate_p12_b64.is_none() {
+                errors.push(
+                    "No distribution certificate (.p12) provided. Required for App Store signing.\n\
+                     \x20\x20  Add certificate to [macos] in perry.toml or pass --certificate\n\
+                     \x20\x20  Run `perry setup macos` to configure automatically"
+                    .into()
+                );
+            }
+
+            // 5. Warn if encryption_exempt is not set
+            if macos_encryption_exempt.is_none() {
+                warnings.push(
+                    "encryption_exempt not set in [macos] of perry.toml.\n\
+                     \x20\x20  Without it, App Store Connect will prompt about export compliance on every upload.\n\
+                     \x20\x20  If your app only uses HTTPS (no custom encryption), add:\n\
+                     \x20\x20  encryption_exempt = true"
+                    .into()
+                );
+            }
+
+            // Print warnings and errors
+            if !warnings.is_empty() || !errors.is_empty() {
+                println!();
+                println!("  {} Pre-flight check results:", style("→").cyan().bold());
+                for w in &warnings {
+                    println!("  {} {}", style("⚠").yellow().bold(), w);
+                }
+                for e in &errors {
+                    println!("  {} {}", style("✗").red().bold(), e);
+                }
+                println!();
+            }
+
+            if !errors.is_empty() {
+                bail!(
+                    "Pre-flight validation failed with {} error(s). Fix the issues above before publishing.",
+                    errors.len()
+                );
+            }
+        }
+    }
+
     // --- Show summary and confirm ---
     if let OutputFormat::Text = format {
         println!("  Version:   {version}");
@@ -1087,9 +1187,11 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         if android_distribute.as_deref() == Some("playstore") {
             println!("  Distribute: Google Play");
         } else if ios_distribute.as_deref() == Some("appstore") || ios_distribute.as_deref() == Some("testflight")
-            || macos_distribute.as_deref() == Some("appstore")
+            || matches!(macos_distribute.as_deref(), Some("appstore") | Some("testflight"))
         {
-            println!("  Distribute: App Store Connect");
+            println!("  Distribute: App Store Connect (TestFlight)");
+        } else if macos_distribute.as_deref() == Some("notarize") {
+            println!("  Distribute: Notarized DMG");
         }
         println!();
     }
@@ -1137,9 +1239,9 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     }
 
     // Build manifest
-    // For iOS/Android: version = build_number (CFBundleVersion/versionCode), short_version = marketing version
-    // For macOS/Linux: version = marketing version string, short_version = None
-    let (manifest_version, manifest_short_version) = if is_ios || is_android {
+    // For iOS/Android/macOS-appstore: version = build_number (CFBundleVersion), short_version = marketing version
+    // For macOS-notarize/Linux: version = marketing version string, short_version = None
+    let (manifest_version, manifest_short_version) = if is_ios || is_android || macos_needs_upload {
         (build_number.to_string(), Some(version.clone()))
     } else {
         (version.clone(), None)
@@ -1161,7 +1263,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         ios_capabilities: if is_ios { ios_capabilities } else { None },
         ios_distribute: if is_ios { ios_distribute } else { None },
         ios_encryption_exempt: if is_ios { ios_encryption_exempt } else { None },
-        macos_distribute: if !is_ios && !is_android && !is_linux { macos_distribute } else { None },
+        macos_distribute: if is_macos { macos_distribute } else { None },
+        macos_encryption_exempt: if is_macos { macos_encryption_exempt } else { None },
         android_min_sdk: if is_android { android_min_sdk } else { None },
         android_target_sdk: if is_android { android_target_sdk } else { None },
         android_permissions: if is_android { android_permissions } else { None },
@@ -2092,17 +2195,22 @@ fn validate_credentials_for_distribute(
         }
     }
 
-    // macOS + appstore
+    // macOS + appstore/testflight/notarize
     if is_macos {
         let distribute = macos_distribute.unwrap_or("");
-        if distribute == "appstore" {
+        if distribute == "appstore" || distribute == "testflight" || distribute == "notarize" {
             let mut missing = Vec::new();
             if apple_key_id.is_none() { missing.push("Key ID (--apple-key-id / PERRY_APPLE_KEY_ID)"); }
             if apple_issuer_id.is_none() { missing.push("Issuer ID (--apple-issuer-id / PERRY_APPLE_ISSUER_ID)"); }
             if p8_key_content.is_none() { missing.push(".p8 key (--apple-p8-key / PERRY_APPLE_P8_KEY)"); }
             if !missing.is_empty() {
+                let purpose = if distribute == "notarize" {
+                    "notarization"
+                } else {
+                    "App Store Connect upload"
+                };
                 bail!(
-                    "macos.distribute = \"appstore\" requires App Store Connect API credentials.\n\
+                    "macos.distribute = \"{distribute}\" requires App Store Connect API credentials for {purpose}.\n\
                      Missing: {}\n\
                      Run `perry setup macos` or pass the missing flags.",
                     missing.join(", ")
@@ -2434,6 +2542,30 @@ mod tests {
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("App Store Connect API credentials"), "{msg}");
         assert!(msg.contains("perry setup macos"), "{msg}");
+    }
+
+    #[test]
+    fn test_validate_macos_testflight_requires_creds() {
+        let result = validate_credentials_for_distribute(
+            false, None, None,
+            false, None, None, None, None,
+            true, Some("testflight"), // macos testflight, no creds
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("App Store Connect API credentials"), "{msg}");
+    }
+
+    #[test]
+    fn test_validate_macos_notarize_requires_creds() {
+        let result = validate_credentials_for_distribute(
+            false, None, None,
+            false, None, None, None, None,
+            true, Some("notarize"), // macos notarize, no creds
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("notarization"), "{msg}");
     }
 
     #[test]

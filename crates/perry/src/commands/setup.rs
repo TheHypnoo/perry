@@ -845,26 +845,36 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!("  {} Mac Distribution Certificate", style("Step 2/2 —").cyan().bold());
     println!();
 
-    let cert_types = &["Mac App Store (submit to App Store)", "Developer ID (direct distribution / notarize)"];
+    let cert_types = &[
+        "TestFlight (macOS beta testing via App Store Connect)",
+        "Mac App Store (submit to App Store)",
+        "Developer ID (direct distribution / notarize)",
+    ];
     let cert_type_idx = Select::new()
         .with_prompt("  Distribution method")
         .items(cert_types)
         .default(0)
         .interact()?;
-    let is_appstore = cert_type_idx == 0;
+
+    let distribute_value = match cert_type_idx {
+        0 => "testflight",
+        1 => "appstore",
+        _ => "notarize",
+    };
+    let is_notarize = distribute_value == "notarize";
 
     println!();
-    if is_appstore {
-        println!("  To create a Mac App Store distribution certificate:");
-        println!("  1. Open Xcode → Settings → Accounts → select your Apple ID.");
-        println!("  2. Click 'Manage Certificates'.");
-        println!("  3. Create a 'Mac App Distribution' certificate.");
-        println!("  4. Right-click → Export Certificate → save as .p12.");
-    } else {
+    if is_notarize {
         println!("  To create a Developer ID Application certificate:");
         println!("  1. Open Xcode → Settings → Accounts → select your Apple ID.");
         println!("  2. Click 'Manage Certificates'.");
         println!("  3. Create a 'Developer ID Application' certificate.");
+        println!("  4. Right-click → Export Certificate → save as .p12.");
+    } else {
+        println!("  To create a Mac App Store distribution certificate:");
+        println!("  1. Open Xcode → Settings → Accounts → select your Apple ID.");
+        println!("  2. Click 'Manage Certificates'.");
+        println!("  3. Create a 'Mac App Distribution' certificate.");
         println!("  4. Right-click → Export Certificate → save as .p12.");
     }
     println!();
@@ -873,8 +883,13 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
 
     let cert_path = prompt_file_path("  Path to .p12 certificate", ".p12")?;
 
+    let identity_example = if is_notarize {
+        "Developer ID Application: ..."
+    } else {
+        "Apple Distribution: ..."
+    };
     let signing_identity = Input::<String>::new()
-        .with_prompt("  Signing identity string (optional, e.g. 'Developer ID Application: ...')")
+        .with_prompt(format!("  Signing identity string (optional, e.g. '{identity_example}')"))
         .allow_empty(true)
         .interact_text()?;
 
@@ -885,15 +900,66 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     );
     println!();
 
-    let distribute_value = if is_appstore { "appstore" } else { "notarize" };
-    println!("  Add to your perry.toml:");
-    println!();
-    println!("  {}", style("[macos]").cyan());
-    println!("  distribute = \"{distribute_value}\"");
-    println!("  certificate = \"{}\"", cert_path);
-    if !signing_identity.is_empty() {
-        println!("  signing_identity = \"{}\"", signing_identity);
+    // --- Save project-specific credentials to perry.toml ---
+    let perry_toml_path = std::env::current_dir()?.join("perry.toml");
+    if perry_toml_path.exists() {
+        match update_perry_toml_macos(
+            &perry_toml_path,
+            distribute_value,
+            &cert_path,
+            if signing_identity.is_empty() { None } else { Some(&signing_identity) },
+        ) {
+            Ok(()) => {
+                println!("  {} macOS credentials saved to {}", style("✓").green().bold(),
+                    style(perry_toml_path.display()).dim());
+            }
+            Err(e) => {
+                println!("  {} Could not update perry.toml: {e}", style("!").yellow());
+                println!("  Add these manually to your perry.toml [macos] section:");
+                println!("  distribute = \"{distribute_value}\"");
+                println!("  certificate = \"{}\"", cert_path);
+            }
+        }
+    } else {
+        println!("  Add to your perry.toml:");
+        println!();
+        println!("  {}", style("[macos]").cyan());
+        println!("  distribute = \"{distribute_value}\"");
+        println!("  certificate = \"{}\"", cert_path);
+        if !signing_identity.is_empty() {
+            println!("  signing_identity = \"{}\"", signing_identity);
+        }
     }
+
+    // --- Export compliance (for App Store / TestFlight) ---
+    if !is_notarize {
+        println!();
+        println!("  {} Export Compliance", style("→").cyan().bold());
+        println!("  Most apps only use HTTPS and don't need custom encryption declarations.");
+        let encryption_exempt = Confirm::new()
+            .with_prompt("  Does your app ONLY use standard HTTPS? (no custom encryption)")
+            .default(true)
+            .interact()?;
+        if perry_toml_path.exists() {
+            if let Err(e) = update_perry_toml_section_bool(&perry_toml_path, "macos", "encryption_exempt", encryption_exempt) {
+                println!("  {} Could not update perry.toml: {e}", style("!").yellow());
+                println!("  Add manually to [macos]: encryption_exempt = {encryption_exempt}");
+            }
+        } else {
+            println!("  Add to your perry.toml [macos] section:");
+            println!("  encryption_exempt = {encryption_exempt}");
+        }
+    }
+    println!();
+
+    // --- Summary ---
+    println!("  {}", style("Setup complete!").green().bold());
+    println!();
+    println!("  Certificate:  {}", style(&cert_path).dim());
+    println!("  Distribute:   {}", style(distribute_value).bold());
+    println!("  Cert password: set PERRY_APPLE_CERTIFICATE_PASSWORD");
+    println!();
+    println!("  Then run: {}", style("perry publish --macos").bold());
 
     Ok(())
 }
@@ -969,16 +1035,54 @@ fn update_perry_toml_encryption_exempt(
     perry_toml_path: &std::path::Path,
     encryption_exempt: bool,
 ) -> Result<()> {
+    update_perry_toml_section_bool(perry_toml_path, "ios", "encryption_exempt", encryption_exempt)
+}
+
+/// Update a boolean field in a named section of perry.toml.
+fn update_perry_toml_section_bool(
+    perry_toml_path: &std::path::Path,
+    section: &str,
+    key: &str,
+    value: bool,
+) -> Result<()> {
     let content = std::fs::read_to_string(perry_toml_path)?;
     let mut doc = content.parse::<toml::Table>()
         .context("Failed to parse perry.toml")?;
 
-    let ios = doc.entry("ios")
+    let table = doc.entry(section)
         .or_insert_with(|| toml::Value::Table(toml::Table::new()))
         .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("[ios] in perry.toml is not a table"))?;
+        .ok_or_else(|| anyhow::anyhow!("[{section}] in perry.toml is not a table"))?;
 
-    ios.insert("encryption_exempt".into(), toml::Value::Boolean(encryption_exempt));
+    table.insert(key.into(), toml::Value::Boolean(value));
+
+    let new_content = toml::to_string_pretty(&doc)
+        .context("Failed to serialize perry.toml")?;
+    std::fs::write(perry_toml_path, new_content)?;
+    Ok(())
+}
+
+/// Update perry.toml [macos] section with project-specific signing credentials.
+fn update_perry_toml_macos(
+    perry_toml_path: &std::path::Path,
+    distribute: &str,
+    certificate: &str,
+    signing_identity: Option<&str>,
+) -> Result<()> {
+    let content = std::fs::read_to_string(perry_toml_path)?;
+    let mut doc = content.parse::<toml::Table>()
+        .context("Failed to parse perry.toml")?;
+
+    let macos = doc.entry("macos")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[macos] in perry.toml is not a table"))?;
+
+    macos.insert("distribute".into(), toml::Value::String(distribute.into()));
+    macos.insert("certificate".into(), toml::Value::String(certificate.into()));
+    if let Some(identity) = signing_identity {
+        macos.insert("signing_identity".into(), toml::Value::String(identity.into()));
+    }
 
     let new_content = toml::to_string_pretty(&doc)
         .context("Failed to serialize perry.toml")?;
