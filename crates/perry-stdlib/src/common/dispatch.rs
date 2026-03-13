@@ -212,6 +212,14 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
             "body" => {
                 crate::fastify::js_fastify_req_json(handle)
             }
+            "rawBody" | "text" => {
+                let ptr = crate::fastify::js_fastify_req_body(handle);
+                if ptr.is_null() {
+                    f64::from_bits(0x7FFC_0000_0000_0001)
+                } else {
+                    f64::from_bits(JSValue::string_ptr(ptr).bits())
+                }
+            }
             "headers" => {
                 // Returns NaN-boxed JS object (parsed from JSON), use bits directly
                 let bits = crate::fastify::js_fastify_req_headers(handle);
