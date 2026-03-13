@@ -2,4 +2,7 @@
 <resources>
     <style name="Theme.Perry" parent="android:Theme.Material.Light.NoActionBar">
     </style>
+    <style name="Theme.Perry.Splash" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_background</item>
+    </style>
 </resources>

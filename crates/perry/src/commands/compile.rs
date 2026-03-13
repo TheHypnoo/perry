@@ -3594,9 +3594,119 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         };
         fs::write(app_dir.join("Info.plist"), info_plist)?;
 
-        // Write a minimal compiled LaunchScreen storyboard so iPadOS treats
-        // the app as native iPad (not iPhone compatibility mode).
-        let launch_sb_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+        // Read splash screen config from package.json perry.splash section
+        let splash_config: Option<(Option<std::path::PathBuf>, String, Option<std::path::PathBuf>)> = (|| -> Option<(Option<std::path::PathBuf>, String, Option<std::path::PathBuf>)> {
+            let mut dir = args.input.canonicalize().ok()?;
+            for _ in 0..5 {
+                dir = dir.parent()?.to_path_buf();
+                let pkg = dir.join("package.json");
+                if pkg.exists() {
+                    let data = fs::read_to_string(&pkg).ok()?;
+                    let pkg_val: serde_json::Value = serde_json::from_str(&data).ok()?;
+                    let splash = pkg_val.get("perry")?.get("splash")?;
+
+                    // Check for custom storyboard override first
+                    if let Some(sb_path) = splash.get("ios").and_then(|i| i.get("storyboard")).and_then(|v| v.as_str()) {
+                        let abs = dir.join(sb_path);
+                        if abs.exists() {
+                            return Some((None, "#FFFFFF".into(), Some(abs)));
+                        }
+                    }
+
+                    // Resolve image: splash.ios.image -> splash.image
+                    let image_path = splash.get("ios").and_then(|i| i.get("image")).and_then(|v| v.as_str())
+                        .or_else(|| splash.get("image").and_then(|v| v.as_str()))
+                        .map(|p| dir.join(p))
+                        .filter(|p| p.exists());
+
+                    // Resolve background: splash.ios.background -> splash.background -> "#FFFFFF"
+                    let background = splash.get("ios").and_then(|i| i.get("background")).and_then(|v| v.as_str())
+                        .or_else(|| splash.get("background").and_then(|v| v.as_str()))
+                        .unwrap_or("#FFFFFF")
+                        .to_string();
+
+                    if image_path.is_some() || background != "#FFFFFF" {
+                        return Some((image_path, background, None));
+                    }
+                    return None;
+                }
+            }
+            None
+        })();
+
+        // Write a compiled LaunchScreen storyboard — with splash image if configured,
+        // otherwise a minimal blank storyboard so iPadOS treats the app as native iPad.
+        let launch_sb_xml = if let Some((ref image_path, ref bg_hex, ref custom_sb)) = splash_config {
+            if let Some(custom) = custom_sb {
+                // Custom storyboard: copy as-is
+                fs::read_to_string(custom).unwrap_or_default()
+            } else {
+                // Copy splash image into bundle
+                if let Some(img) = image_path {
+                    let _ = fs::copy(img, app_dir.join("splash_image.png"));
+                }
+
+                // Parse hex color to RGB floats
+                let hex = bg_hex.trim_start_matches('#');
+                let (r, g, b) = if hex.len() == 6 {
+                    let rv = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255) as f64 / 255.0;
+                    let gv = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255) as f64 / 255.0;
+                    let bv = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255) as f64 / 255.0;
+                    (rv, gv, bv)
+                } else {
+                    (1.0, 1.0, 1.0)
+                };
+
+                let image_views = if image_path.is_some() {
+                    format!(r#"
+                        <subviews>
+                            <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleAspectFit" image="splash_image" translatesAutoresizingMaskIntoConstraints="NO" id="img-splash-1">
+                                <rect key="frame" x="132.5" y="362" width="128" height="128"/>
+                                <constraints>
+                                    <constraint firstAttribute="width" constant="128" id="img-w-1"/>
+                                    <constraint firstAttribute="height" constant="128" id="img-h-1"/>
+                                </constraints>
+                            </imageView>
+                        </subviews>
+                        <constraints>
+                            <constraint firstItem="img-splash-1" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="cx-1"/>
+                            <constraint firstItem="img-splash-1" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" id="cy-1"/>
+                        </constraints>"#)
+                } else {
+                    String::new()
+                };
+
+                let resources = if image_path.is_some() {
+                    r#"
+    <resources>
+        <image name="splash_image" width="128" height="128"/>
+    </resources>"#.to_string()
+                } else {
+                    String::new()
+                };
+
+                format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21701" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
+    <scenes>
+        <scene sceneID="EHf-IW-A2E">
+            <objects>
+                <viewController id="01J-lp-oVM" sceneMemberID="viewController">
+                    <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
+                        <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+                        <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                        <color key="backgroundColor" red="{r}" green="{g}" blue="{b}" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>{image_views}
+                    </view>
+                </viewController>
+                <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" userLabel="First Responder" sceneMemberID="firstResponder"/>
+            </objects>
+            <point key="canvasLocation" x="0" y="0"/>
+        </scene>
+    </scenes>{resources}
+</document>"#)
+            }
+        } else {
+            // No splash config — minimal blank storyboard for iPadOS compatibility
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21701" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
     <scenes>
         <scene sceneID="EHf-IW-A2E">
@@ -3613,7 +3723,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             <point key="canvasLocation" x="0" y="0"/>
         </scene>
     </scenes>
-</document>"#;
+</document>"#.to_string()
+        };
+
         let sb_source = app_dir.join("_LaunchScreen.storyboard");
         fs::write(&sb_source, launch_sb_xml)?;
         let storyboardc = app_dir.join("Base.lproj").join("LaunchScreen.storyboardc");
