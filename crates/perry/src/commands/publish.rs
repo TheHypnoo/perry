@@ -147,6 +147,7 @@ struct ProjectConfig {
     bundle_id: Option<String>,
     description: Option<String>,
     entry: Option<String>,
+    icons: Option<IconsConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -407,8 +408,28 @@ struct CredentialsPayload {
 }
 
 pub fn run(args: PublishArgs, format: OutputFormat, use_color: bool, _verbose: u8) -> Result<()> {
+    if !check_beta_consent("publish") {
+        bail!("Aborted.");
+    }
+
+    let target_hint = if args.ios {
+        Some("ios")
+    } else if args.android {
+        Some("android")
+    } else if args.linux {
+        Some("linux")
+    } else {
+        Some("macos")
+    };
+
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(run_async(args, format, use_color))
+    let result = rt.block_on(run_async(args, format, use_color));
+
+    if let Err(ref e) = result {
+        report_beta_error("publish", &format!("{e:#}"), target_hint);
+    }
+
+    result
 }
 
 async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> Result<()> {
@@ -662,7 +683,60 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             .unwrap_or_else(|| format!("com.perry.{}", app_name.to_lowercase().replace(' ', "-")))
     };
 
-    let icon = config.app.as_ref().and_then(|a| a.icons.as_ref()).and_then(|i| i.source.clone());
+    let mut icon = config.project.as_ref().and_then(|p| p.icons.as_ref()).and_then(|i| i.source.clone())
+        .or_else(|| config.app.as_ref().and_then(|a| a.icons.as_ref()).and_then(|i| i.source.clone()));
+
+    // Prompt for icon if missing and building for a platform that needs one
+    let needs_icon = is_ios || is_android
+        || (is_macos && matches!(macos_distribute.as_deref(), Some("appstore") | Some("both")));
+    if icon.is_none() && interactive && needs_icon {
+        println!();
+        println!("  {} No app icon configured.", style("!").yellow().bold());
+        println!("  App Store requires a 1024\u{00d7}1024 PNG icon.");
+        if let Some(path_str) = prompt_input(
+            "  Path to icon image (or Enter to skip)",
+            None,
+        ) {
+            let src_path = Path::new(&path_str);
+            if !src_path.exists() {
+                println!("  {} Icon file not found: {}", style("!").yellow(), path_str);
+            } else {
+                // Copy to assets/icon.png in the project
+                let assets_dir = project_dir.join("assets");
+                if !assets_dir.exists() {
+                    fs::create_dir_all(&assets_dir).ok();
+                }
+                let dest = assets_dir.join("icon.png");
+                if let Err(e) = fs::copy(src_path, &dest) {
+                    println!("  {} Failed to copy icon: {}", style("!").yellow(), e);
+                } else {
+                    // Update perry.toml
+                    let icon_rel = "assets/icon.png";
+                    if let Ok(content) = fs::read_to_string(&perry_toml_path) {
+                        let updated = if content.contains("[project]") {
+                            // Insert icons line after [project] section header
+                            content.replace(
+                                "[project]",
+                                &format!("[project]\nicons = {{ source = \"{}\" }}", icon_rel),
+                            )
+                        } else {
+                            // Add [project] section with icons
+                            format!(
+                                "{}\n[project]\nicons = {{ source = \"{}\" }}\n",
+                                content.trim_end(),
+                                icon_rel
+                            )
+                        };
+                        fs::write(&perry_toml_path, &updated).ok();
+                    }
+                    icon = Some(icon_rel.to_string());
+                    println!("  {} Icon saved to {} and perry.toml updated.",
+                        style("✓").green().bold(), icon_rel);
+                }
+            }
+        }
+    }
+
     let category = config.macos.as_ref().and_then(|m| m.category.clone());
     let minimum_os = config.macos.as_ref().and_then(|m| m.minimum_os.clone());
     let entitlements = config.macos.as_ref().and_then(|m| m.entitlements.clone());
@@ -1258,11 +1332,12 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
                 );
             }
 
-            // 2. Check for app icon
+            // 2. Check for app icon (required for App Store)
             if icon.is_none() {
-                warnings.push(
+                errors.push(
                     "No app icon configured. App Store requires a 1024×1024 icon.\n\
-                     \x20\x20  Add [app.icons] source = \"assets/icon.png\" to perry.toml"
+                     \x20\x20  Add to [project] in perry.toml:\n\
+                     \x20\x20  icons = { source = \"assets/icon.png\" }"
                     .into()
                 );
             } else if let Some(ref icon_path) = icon {
@@ -1345,11 +1420,12 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             let mut warnings: Vec<String> = Vec::new();
             let mut errors: Vec<String> = Vec::new();
 
-            // 1. Check for app icon
+            // 1. Check for app icon (required for App Store)
             if icon.is_none() {
-                warnings.push(
-                    "No app icon configured. App Store requires an icon.\n\
-                     \x20\x20  Add [app.icons] source = \"assets/icon.png\" to perry.toml"
+                errors.push(
+                    "No app icon configured. App Store requires a 1024×1024 icon.\n\
+                     \x20\x20  Add to [project] in perry.toml:\n\
+                     \x20\x20  icons = { source = \"assets/icon.png\" }"
                     .into()
                 );
             } else if let Some(ref icon_path) = icon {
@@ -2163,6 +2239,15 @@ fn create_project_tarball(project_dir: &Path) -> Result<Vec<u8>> {
 
 // --- Saved config (~/.perry/config.toml) ---
 
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BetaConfig {
+    /// User has seen and acknowledged the public beta notice
+    pub(crate) acknowledged: bool,
+    /// User opted in to automatic error reporting for beta commands
+    #[serde(default)]
+    pub(crate) report_errors: bool,
+}
+
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub(crate) struct PerryConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2179,6 +2264,8 @@ pub(crate) struct PerryConfig {
     pub(crate) android: Option<AndroidSavedConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) telemetry: Option<crate::telemetry::TelemetryConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) beta: Option<BetaConfig>,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -2238,6 +2325,117 @@ pub(crate) fn save_config(config: &PerryConfig) -> Result<()> {
 
 pub(crate) fn is_interactive() -> bool {
     atty::is(atty::Stream::Stdin) && atty::is(atty::Stream::Stdout)
+}
+
+/// Show a one-time public beta notice for publish/verify commands.
+/// Returns true if the user acknowledges (or has previously acknowledged).
+/// Non-interactive sessions skip the prompt and proceed.
+pub(crate) fn check_beta_consent(command: &str) -> bool {
+    let mut config = load_config();
+
+    // Already acknowledged — nothing to do
+    if let Some(ref beta) = config.beta {
+        if beta.acknowledged {
+            return true;
+        }
+    }
+
+    // Non-interactive: proceed without prompting (errors won't be reported)
+    if !is_interactive() {
+        return true;
+    }
+
+    eprintln!();
+    eprintln!(
+        "  {} perry {} is in {}.",
+        style("NOTE").yellow().bold(),
+        command,
+        style("public beta").yellow().bold(),
+    );
+    eprintln!("  It should work, but if you encounter issues please let us know.");
+    eprintln!(
+        "  Report issues: {}",
+        style("https://github.com/PerryTS/perry/issues").cyan().underlined()
+    );
+    eprintln!();
+
+    let report = Confirm::new()
+        .with_prompt("  Automatically report errors to help us fix issues faster?")
+        .default(true)
+        .interact()
+        .unwrap_or(false);
+
+    let proceed = Confirm::new()
+        .with_prompt("  Continue?")
+        .default(true)
+        .interact()
+        .unwrap_or(false);
+
+    if !proceed {
+        return false;
+    }
+
+    config.beta = Some(BetaConfig {
+        acknowledged: true,
+        report_errors: report,
+    });
+    let _ = save_config(&config);
+
+    true
+}
+
+/// Send a sanitized error report for a beta command failure.
+/// Fire-and-forget on a background thread. No credentials or file paths are included.
+pub(crate) fn report_beta_error(command: &str, error: &str, target: Option<&str>) {
+    let config = load_config();
+    let should_report = config
+        .beta
+        .as_ref()
+        .map_or(false, |b| b.acknowledged && b.report_errors);
+
+    if !should_report {
+        return;
+    }
+
+    // Sanitize: strip anything that looks like a file path or credential
+    let sanitized = sanitize_error_for_report(error);
+
+    crate::telemetry::send_event(
+        &format!("beta_error_{}", command),
+        &[
+            ("error", &sanitized),
+            ("target", target.unwrap_or("unknown")),
+            ("version", env!("CARGO_PKG_VERSION")),
+            ("platform", std::env::consts::OS),
+        ],
+    );
+}
+
+/// Strip file paths, tokens, and other potentially sensitive data from error messages.
+fn sanitize_error_for_report(error: &str) -> String {
+    let mut result = String::new();
+    for word in error.split_whitespace() {
+        if !result.is_empty() {
+            result.push(' ');
+        }
+        // Redact absolute file paths
+        if word.starts_with('/') || (word.len() >= 3 && word.as_bytes()[1] == b':' && word.as_bytes()[2] == b'\\') {
+            result.push_str("<path>");
+        // Redact long alphanumeric strings (tokens, keys, base64 blobs)
+        } else if word.len() >= 32 && word.chars().all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '=') {
+            result.push_str("<redacted>");
+        } else {
+            result.push_str(word);
+        }
+    }
+
+    // Truncate to 500 chars max
+    if result.len() > 500 {
+        result.truncate(500);
+        result.push_str("...");
+    }
+
+    result
 }
 
 /// Prompt user for text input with an optional default value.

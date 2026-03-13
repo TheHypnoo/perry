@@ -3227,7 +3227,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("-llog");
     } else if is_linux {
         // Linux system libraries (cross-compile target)
-        cmd.arg("-lm")
+        // Allow multiple definitions: perry-jsruntime embeds perry-runtime symbols,
+        // and we also link perry-runtime directly for symbols DCE'd from jsruntime.
+        // macOS Mach-O uses first-definition-wins natively; ELF linkers need this flag.
+        cmd.arg("-Wl,--allow-multiple-definition")
+           .arg("-lm")
            .arg("-lpthread")
            .arg("-ldl");
 

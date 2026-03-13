@@ -260,8 +260,14 @@ fn display_verify_results(status: &VerifyStatusResponse) {
 
 /// Entry point for `perry verify` command
 pub fn run(args: VerifyArgs, format: OutputFormat, _use_color: bool) -> Result<()> {
+    if !crate::commands::publish::check_beta_consent("verify") {
+        bail!("Aborted.");
+    }
+
+    let target_hint = args.target.clone();
+
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
+    let result = rt.block_on(async {
         // Run audit first if requested
         if let Some(ref audit_path) = args.audit {
             let path = std::path::PathBuf::from(audit_path);
@@ -315,5 +321,11 @@ pub fn run(args: VerifyArgs, format: OutputFormat, _use_color: bool) -> Result<(
             }
             (Err(e), _) => Err(anyhow::anyhow!("{}", e)),
         }
-    })
+    });
+
+    if let Err(ref e) = result {
+        crate::commands::publish::report_beta_error("verify", &format!("{e:#}"), Some(&target_hint));
+    }
+
+    result
 }
