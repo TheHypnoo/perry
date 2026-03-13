@@ -4634,6 +4634,9 @@ pub(crate) fn compile_expr(
                             false
                         }
                     }
+                    // IndexGet (e.g., arr[i], this.items[i]) returns NaN-boxed values
+                    // that need js_jsvalue_to_string for correct string concatenation
+                    Expr::IndexGet { .. } => true,
                     _ => false,
                 }
             }
@@ -16678,15 +16681,57 @@ pub(crate) fn compile_expr(
                         let len_i32 = builder.inst_results(len_call)[0];
                         return Ok(builder.ins().fcvt_from_sint(types::F64, len_i32));
                     } else if !arg_vals.is_empty() {
-                        // Single element push
+                        // Single element push — capture new pointer (push may reallocate)
                         let val = ensure_f64(builder, arg_vals[0]);
                         let func = extern_funcs.get("js_array_push_f64")
                             .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
                         let func_ref = module.declare_func_in_func(*func, builder.func);
-                        builder.ins().call(func_ref, &[arr_ptr, val]);
+                        let call = builder.ins().call(func_ref, &[arr_ptr, val]);
+                        let new_arr_ptr = builder.inst_results(call)[0];
+
+                        // Write back the new pointer to the receiver if it's a field access.
+                        // js_array_push_f64 may reallocate, so the old pointer in the field is stale.
+                        if let Expr::PropertyGet { object: nested_obj, property: field_name } = obj_expr.as_ref() {
+                            match nested_obj.as_ref() {
+                                Expr::This => {
+                                    if let Some(this) = this_ctx {
+                                        if let Some(&field_idx) = this.class_meta.field_indices.get(field_name) {
+                                            let this_ptr = builder.use_var(this.this_var);
+                                            let new_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr);
+                                            let field_offset = 24 + (field_idx as i32) * 8;
+                                            builder.ins().store(MemFlags::new(), new_f64, this_ptr, field_offset);
+                                        }
+                                    }
+                                }
+                                Expr::LocalGet(local_id) => {
+                                    if let Some(info) = locals.get(local_id) {
+                                        let var_val = builder.use_var(info.var);
+                                        let obj_ptr = ensure_i64(builder, var_val);
+                                        if let Some(ref class_name) = info.class_name {
+                                            if let Some(class_meta) = classes.get(class_name) {
+                                                if let Some(&field_idx) = class_meta.field_indices.get(field_name) {
+                                                    let new_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr);
+                                                    let field_offset = 24 + (field_idx as i32) * 8;
+                                                    builder.ins().store(MemFlags::new(), new_f64, obj_ptr, field_offset);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // Return the new length using the new pointer
+                        let len_func = extern_funcs.get("js_array_length")
+                            .ok_or_else(|| anyhow!("js_array_length not declared"))?;
+                        let len_ref = module.declare_func_in_func(*len_func, builder.func);
+                        let len_call = builder.ins().call(len_ref, &[new_arr_ptr]);
+                        let len_i32 = builder.inst_results(len_call)[0];
+                        return Ok(builder.ins().fcvt_from_sint(types::F64, len_i32));
                     }
 
-                    // Return the new length
+                    // Return the new length (fallback for no args)
                     let len_func = extern_funcs.get("js_array_length")
                         .ok_or_else(|| anyhow!("js_array_length not declared"))?;
                     let len_ref = module.declare_func_in_func(*len_func, builder.func);
@@ -17378,6 +17423,7 @@ pub(crate) fn compile_expr(
                 ("perry/system", false, "keychainDelete") => "perry_system_keychain_delete",
                 ("perry/system", false, "notificationSend") => "perry_system_notification_send",
                 ("perry/system", false, "requestLocation") => "perry_system_request_location",
+                ("perry/system", false, "getDeviceIdiom") => "perry_get_device_idiom",
 
                 // ========================================================================
                 // Perry Plugin System
@@ -19323,7 +19369,7 @@ pub(crate) fn compile_expr(
                             }
                             args
                         }
-                        "isDarkMode" => vec![],
+                        "isDarkMode" | "getDeviceIdiom" => vec![],
                         "keychainSave" => {
                             // keychainSave(key, value) - both strings
                             let mut args = Vec::new();
@@ -19676,6 +19722,10 @@ pub(crate) fn compile_expr(
                         "isDarkMode" => {
                             // Returns i64, convert to f64
                             Ok(builder.ins().fcvt_from_sint(types::F64, result))
+                        }
+                        "getDeviceIdiom" => {
+                            // Returns f64 directly (0.0=phone, 1.0=pad)
+                            Ok(result)
                         }
                         "preferencesGet" => {
                             // Returns f64 directly (number value from UserDefaults)
