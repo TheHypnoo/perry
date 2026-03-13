@@ -257,8 +257,9 @@ async fn remote_build_and_launch(
     });
 
     // Build credentials — device builds need signing
+    let ios_toml = read_perry_toml_ios(&project_root);
     let credentials = if target == "ios" {
-        build_device_credentials(&config, &bundle_id)?
+        build_device_credentials(&config, &bundle_id, ios_toml.as_ref())?
     } else {
         serde_json::json!({
             "apple_team_id": null,
@@ -642,61 +643,150 @@ fn find_project_root(start: &Path) -> PathBuf {
 
 /// Read app name and bundle ID from package.json
 fn read_app_metadata(project_root: &Path, input: &Path) -> (String, String) {
+    // Check perry.toml first (has [ios].bundle_id, [project].name)
+    let toml_path = project_root.join("perry.toml");
+    let toml_config = std::fs::read_to_string(&toml_path)
+        .ok()
+        .and_then(|s| s.parse::<toml::Value>().ok());
+
+    let toml_name = toml_config
+        .as_ref()
+        .and_then(|t| t.get("project"))
+        .and_then(|p| p.get("name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let toml_bundle_id = toml_config
+        .as_ref()
+        .and_then(|t| {
+            // Check [ios].bundle_id, then top-level bundle_id
+            t.get("ios")
+                .and_then(|i| i.get("bundle_id"))
+                .or_else(|| t.get("bundle_id"))
+        })
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Then check package.json
     let pkg_path = project_root.join("package.json");
-    if let Ok(content) = std::fs::read_to_string(&pkg_path) {
-        if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
-            let name = pkg
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("app")
-                .to_string();
-            let bundle_id = pkg
-                .get("bundleId")
-                .or_else(|| pkg.get("perry").and_then(|p| p.get("bundleId")))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("com.perry.{}", name));
-            return (name, bundle_id);
-        }
-    }
-    let stem = input
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("app");
-    (stem.to_string(), format!("com.perry.{}", stem))
+    let pkg = std::fs::read_to_string(&pkg_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+
+    let pkg_name = pkg
+        .as_ref()
+        .and_then(|p| p.get("name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let pkg_bundle_id = pkg
+        .as_ref()
+        .and_then(|p| {
+            p.get("bundleId")
+                .or_else(|| p.get("perry").and_then(|pp| pp.get("bundleId")))
+        })
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let name = toml_name
+        .or(pkg_name)
+        .unwrap_or_else(|| {
+            input.file_stem().and_then(|s| s.to_str()).unwrap_or("app").to_string()
+        });
+
+    let bundle_id = toml_bundle_id
+        .or(pkg_bundle_id)
+        .unwrap_or_else(|| format!("com.perry.{}", name));
+
+    (name, bundle_id)
+}
+
+/// Read iOS-specific config from perry.toml
+fn read_perry_toml_ios(project_root: &Path) -> Option<toml::Value> {
+    let toml_path = project_root.join("perry.toml");
+    let content = std::fs::read_to_string(&toml_path).ok()?;
+    let config: toml::Value = content.parse().ok()?;
+    config.get("ios").cloned()
 }
 
 /// Build signing credentials for physical iOS device builds.
-/// Loads from saved config (~/.perry/config.toml), auto-exports .p12 from Keychain,
-/// and finds provisioning profile in ~/.perry/.
+/// Priority: perry.toml [ios] → ~/.perry/config.toml → Keychain auto-detect
 fn build_device_credentials(
     config: &super::publish::PerryConfig,
     bundle_id: &str,
+    ios_toml: Option<&toml::Value>,
 ) -> Result<serde_json::Value> {
     use base64::Engine;
 
     let apple = config.apple.as_ref();
+
+    // Signing identity: perry.toml [ios].signing_identity → Keychain auto-detect
+    let signing_identity = ios_toml
+        .and_then(|t| t.get("signing_identity"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(detect_signing_identity);
+
+    // Team ID from global config
     let team_id = apple.and_then(|a| a.team_id.clone());
     let key_id = apple.and_then(|a| a.key_id.clone());
     let issuer_id = apple.and_then(|a| a.issuer_id.clone());
 
-    // Read .p8 key if path is saved
+    // .p8 key from global config
     let p8_key = apple
         .and_then(|a| a.p8_key_path.as_ref())
         .and_then(|p| std::fs::read_to_string(p).ok());
 
-    // Auto-detect signing identity from Keychain
-    let signing_identity = detect_signing_identity();
+    // Certificate: perry.toml [ios].certificate path → Keychain auto-export
+    let (cert_b64, cert_password) = {
+        let toml_cert_path = ios_toml
+            .and_then(|t| t.get("certificate"))
+            .and_then(|v| v.as_str());
 
-    // Auto-export .p12 from Keychain
-    let (cert_b64, cert_password) = if let Some(ref identity) = signing_identity {
-        auto_export_p12(identity)
-    } else {
-        (None, None)
+        if let Some(cert_path) = toml_cert_path {
+            let path = Path::new(cert_path);
+            if path.exists() {
+                let data = std::fs::read(path).ok();
+                let b64 = data.map(|d| base64::engine::general_purpose::STANDARD.encode(&d));
+                // Password: check env, then use "perry-auto" for ~/.perry/ certs
+                let password = std::env::var("PERRY_APPLE_CERTIFICATE_PASSWORD")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        if cert_path.contains("/.perry/") {
+                            Some("perry-auto".to_string())
+                        } else {
+                            None
+                        }
+                    });
+                (b64, password)
+            } else {
+                auto_export_p12(signing_identity.as_deref())
+            }
+        } else {
+            auto_export_p12(signing_identity.as_deref())
+        }
     };
 
-    // Find provisioning profile in ~/.perry/
-    let profile_b64 = find_provisioning_profile(bundle_id);
+    // Provisioning profile: perry.toml [ios].provisioning_profile → ~/.perry/ search
+    let profile_b64 = {
+        let toml_profile_path = ios_toml
+            .and_then(|t| t.get("provisioning_profile"))
+            .and_then(|v| v.as_str());
+
+        if let Some(profile_path) = toml_profile_path {
+            let path = Path::new(profile_path);
+            if path.exists() {
+                std::fs::read(path)
+                    .ok()
+                    .map(|d| base64::engine::general_purpose::STANDARD.encode(&d))
+            } else {
+                find_provisioning_profile(bundle_id)
+            }
+        } else {
+            find_provisioning_profile(bundle_id)
+        }
+    };
 
     if signing_identity.is_none() {
         bail!(
@@ -747,7 +837,11 @@ fn detect_signing_identity() -> Option<String> {
 }
 
 /// Auto-export a .p12 from Keychain for the given identity
-fn auto_export_p12(identity: &str) -> (Option<String>, Option<String>) {
+fn auto_export_p12(identity: Option<&str>) -> (Option<String>, Option<String>) {
+    let identity = match identity {
+        Some(id) => id,
+        None => return (None, None),
+    };
     use base64::Engine;
 
     let password = "perry-run-auto";
