@@ -1732,6 +1732,123 @@ fn compile_for_web(ctx: &CompilationContext, args: &CompileArgs, format: OutputF
     })
 }
 
+/// Compile for WebAssembly target: emit WASM binary + JS runtime bridge
+fn compile_for_wasm(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
+    match format {
+        OutputFormat::Text => println!("Generating WebAssembly..."),
+        OutputFormat::Json => {}
+    }
+
+    let entry_path = args.input.canonicalize().unwrap_or_else(|_| args.input.clone());
+
+    // Build topologically sorted module list (same as web target)
+    let mut sorted_paths: Vec<PathBuf> = Vec::new();
+    {
+        let mut path_to_deps: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for (path, hir_module) in &ctx.native_modules {
+            let mut deps = Vec::new();
+            for import in &hir_module.imports {
+                if let Some(ref resolved) = import.resolved_path {
+                    let resolved_path = PathBuf::from(resolved);
+                    if ctx.native_modules.contains_key(&resolved_path) {
+                        deps.push(resolved_path);
+                    }
+                }
+            }
+            path_to_deps.insert(path.clone(), deps);
+        }
+
+        let mut visited_set: HashSet<PathBuf> = HashSet::new();
+        let mut visiting_set: HashSet<PathBuf> = HashSet::new();
+
+        fn topo_visit_wasm(
+            path: &PathBuf,
+            deps: &HashMap<PathBuf, Vec<PathBuf>>,
+            visited: &mut HashSet<PathBuf>,
+            visiting: &mut HashSet<PathBuf>,
+            sorted: &mut Vec<PathBuf>,
+        ) {
+            if visited.contains(path) || visiting.contains(path) { return; }
+            visiting.insert(path.clone());
+            if let Some(module_deps) = deps.get(path) {
+                for dep in module_deps {
+                    topo_visit_wasm(dep, deps, visited, visiting, sorted);
+                }
+            }
+            visiting.remove(path);
+            visited.insert(path.clone());
+            sorted.push(path.clone());
+        }
+
+        let mut all: Vec<PathBuf> = ctx.native_modules.keys().cloned().collect();
+        all.sort();
+        for path in &all {
+            topo_visit_wasm(path, &path_to_deps, &mut visited_set, &mut visiting_set, &mut sorted_paths);
+        }
+    }
+
+    // Ensure entry module is last
+    if let Some(pos) = sorted_paths.iter().position(|p| *p == entry_path) {
+        sorted_paths.remove(pos);
+    }
+    sorted_paths.push(entry_path.clone());
+
+    let modules: Vec<(String, perry_hir::Module)> = sorted_paths.iter()
+        .filter_map(|path| {
+            ctx.native_modules.get(path).map(|m| (m.name.clone(), m.clone()))
+        })
+        .collect();
+
+    let title = args.input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Perry App");
+
+    let minify = args.minify;
+
+    // Determine output format: .html (default) or .wasm (raw binary)
+    let output_path = if let Some(ref out) = args.output {
+        if out.extension().map_or(false, |e| e == "wasm") {
+            out.clone()
+        } else if out.extension().is_none() {
+            out.with_extension("html")
+        } else {
+            out.clone()
+        }
+    } else {
+        let stem = args.input.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+        PathBuf::from(format!("{}.html", stem))
+    };
+
+    if output_path.extension().map_or(false, |e| e == "wasm") {
+        // Raw WASM binary output
+        let wasm = perry_codegen_wasm::compile_modules_to_wasm(&modules)?;
+        fs::write(&output_path, &wasm)?;
+    } else {
+        // HTML with embedded WASM
+        let html = perry_codegen_wasm::compile_modules_to_wasm_html(&modules, title, minify)?;
+        fs::write(&output_path, &html)?;
+    }
+
+    let file_size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+    match format {
+        OutputFormat::Text => {
+            println!("WASM output: {} ({:.1} KB)", output_path.display(), file_size as f64 / 1024.0);
+        }
+        OutputFormat::Json => {
+            println!("{{\"output\": \"{}\", \"size\": {}, \"target\": \"wasm\"}}",
+                output_path.display(), file_size);
+        }
+    }
+
+    Ok(CompileResult {
+        output_path,
+        target: "wasm".to_string(),
+        bundle_id: None,
+        is_dylib: false,
+    })
+}
+
 pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: u8) -> Result<CompileResult> {
     match format {
         OutputFormat::Text => println!("Collecting modules..."),
@@ -1830,7 +1947,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     let mut visited = HashSet::new();
     let mut next_class_id: perry_hir::ClassId = 1; // Start at 1, 0 is reserved for "no parent"
-    let skip_transforms = args.target.as_deref() == Some("web");
+    let skip_transforms = matches!(args.target.as_deref(), Some("web") | Some("wasm"));
 
     collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format, args.target.as_deref(), &mut next_class_id, skip_transforms)?;
 
@@ -1914,6 +2031,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // --- Web target: emit JavaScript instead of native code ---
     if args.target.as_deref() == Some("web") {
         return compile_for_web(&ctx, &args, format);
+    }
+
+    // --- WebAssembly target: emit WASM binary + JS runtime bridge ---
+    if args.target.as_deref() == Some("wasm") {
+        return compile_for_wasm(&ctx, &args, format);
     }
 
     // --- iOS Widget target: emit SwiftUI + native timeline ---
@@ -3258,8 +3380,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("-framework").arg("Security")
            .arg("-framework").arg("CoreFoundation")
            .arg("-framework").arg("SystemConfiguration")
+           .arg("-framework").arg("QuartzCore")
            .arg("-liconv")
-           .arg("-lresolv");
+           .arg("-lresolv")
+           .arg("-ldispatch");
     } else if is_android {
         // Android system libraries
         cmd.arg("-Wl,--allow-multiple-definition")

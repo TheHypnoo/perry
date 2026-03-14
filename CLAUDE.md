@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.182
+**Current Version:** 0.2.183
 
 ## Workflow Requirements
 
@@ -152,6 +152,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.183
+- **WebAssembly target (`--target wasm`)**: new `perry-codegen-wasm` crate compiles HIR directly to WASM bytecode using `wasm-encoder`; NaN-boxing scheme matches native perry-runtime (f64 values with STRING_TAG/POINTER_TAG); JS runtime bridge for strings, console, Math, type operations; outputs self-contained HTML (base64-embedded WASM) or raw `.wasm` binary; supports functions, control flow, string literals, numeric ops, console.log
 
 ### v0.2.182
 - **Web target minification/obfuscation**: `--target web` now auto-minifies output — Rust-native JS minifier (`minify.rs`) strips comments and collapses whitespace; emitter-level name mangling (`gen_short_name`) obfuscates local variables, parameters, and non-exported functions (a,b,c,...); web runtime compressed from 3,337 lines to ~177; `--minify` CLI flag

@@ -3040,6 +3040,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
+name = "leb128fmt"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
+
+[[package]]
 name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3977,7 +3983,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perry"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "anyhow",
  "atty",
@@ -3995,6 +4001,7 @@ dependencies = [
  "perry-codegen",
  "perry-codegen-js",
  "perry-codegen-swiftui",
+ "perry-codegen-wasm",
  "perry-diagnostics",
  "perry-hir",
  "perry-parser",
@@ -4016,7 +4023,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "anyhow",
  "cranelift",
@@ -4035,7 +4042,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-js"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4044,7 +4051,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-swiftui"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4052,8 +4059,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "perry-codegen-wasm"
+version = "0.2.183"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "perry-codegen-js",
+ "perry-hir",
+ "perry-types",
+ "wasm-encoder",
+]
+
+[[package]]
 name = "perry-diagnostics"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "serde",
  "serde_json",
@@ -4061,7 +4080,7 @@ dependencies = [
 
 [[package]]
 name = "perry-hir"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -4073,7 +4092,7 @@ dependencies = [
 
 [[package]]
 name = "perry-jsruntime"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "anyhow",
  "deno_core",
@@ -4092,7 +4111,7 @@ dependencies = [
 
 [[package]]
 name = "perry-parser"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -4104,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "perry-runtime"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -4124,7 +4143,7 @@ dependencies = [
 
 [[package]]
 name = "perry-stdlib"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4184,7 +4203,7 @@ dependencies = [
 
 [[package]]
 name = "perry-transform"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4194,7 +4213,7 @@ dependencies = [
 
 [[package]]
 name = "perry-types"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "anyhow",
  "thiserror 1.0.69",
@@ -4202,11 +4221,11 @@ dependencies = [
 
 [[package]]
 name = "perry-ui"
-version = "0.2.182"
+version = "0.2.183"
 
 [[package]]
 name = "perry-ui-android"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "itoa",
  "jni",
@@ -4220,7 +4239,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-gtk4"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "cairo-rs",
  "gtk4",
@@ -4231,7 +4250,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-ios"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "block2",
  "libc",
@@ -4245,7 +4264,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-macos"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "libc",
  "objc2",
@@ -4261,7 +4280,7 @@ version = "0.1.0"
 
 [[package]]
 name = "perry-ui-windows"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "perry-runtime",
  "perry-ui",
@@ -7291,6 +7310,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f01b580c9ac74c8d8f0c0e4afb04eeef2acf145458e52c03845ee9cd23e3d12"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-encoder"
+version = "0.245.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9dca005e69bf015e45577e415b9af8c67e8ee3c0e38b5b0add5aa92581ed5c"
+dependencies = [
+ "leb128fmt",
+ "wasmparser",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.245.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f08c9adee0428b7bddf3890fc27e015ac4b761cc608c822667102b8bfd6995e"
+dependencies = [
+ "bitflags 2.10.0",
+ "indexmap",
+ "semver 1.0.27",
 ]
 
 [[package]]
