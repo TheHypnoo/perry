@@ -570,6 +570,9 @@ async fn remote_build_and_launch(
         } else {
             launch_ios_device(&app_dir, &bundle_id, udid, format)
         }
+    } else if target == "android" {
+        let serial = device_udid.ok_or_else(|| anyhow!("No Android device serial — use perry run --android with a connected device or emulator"))?;
+        install_and_launch_android(&dest, &bundle_id, &serial, format)
     } else {
         // Native binary
         launch_native(&dest, program_args, format)
@@ -1824,6 +1827,74 @@ fn launch_ios_device(
         return Err(anyhow!("App exited with error on device"));
     }
     Ok(())
+}
+
+/// Install and launch an APK on an Android device/emulator via adb
+fn install_and_launch_android(
+    apk_path: &Path,
+    bundle_id: &str,
+    serial: &str,
+    format: OutputFormat,
+) -> Result<()> {
+    if let OutputFormat::Text = format {
+        println!();
+        println!("Installing on {}...", serial);
+    }
+
+    let install = Command::new("adb")
+        .args(["-s", serial, "install", "-r"])
+        .arg(apk_path)
+        .status()
+        .map_err(|e| anyhow!("Failed to run adb install: {}", e))?;
+
+    if !install.success() {
+        return Err(anyhow!("Failed to install APK on device {}", serial));
+    }
+
+    if let OutputFormat::Text = format {
+        println!("Launching {}...", bundle_id);
+        println!();
+    }
+
+    // Android activity name: use .PerryActivity (from the perry-ui-android template)
+    let component = format!("{}/com.perry.app.PerryActivity", bundle_id);
+
+    let launch = Command::new("adb")
+        .args(["-s", serial, "shell", "am", "start", "-n", &component])
+        .status()
+        .map_err(|e| anyhow!("Failed to run adb shell am start: {}", e))?;
+
+    if !launch.success() {
+        return Err(anyhow!("Failed to launch app on device {}", serial));
+    }
+
+    if let OutputFormat::Text = format {
+        println!("App launched. Streaming logs (Ctrl+C to stop)...");
+        println!();
+    }
+
+    // Stream logcat filtered to the app's PID
+    let _ = Command::new("adb")
+        .args(["-s", serial, "logcat", "--pid"])
+        .arg(get_android_pid(serial, bundle_id))
+        .status();
+
+    Ok(())
+}
+
+/// Get the PID of a running Android app
+fn get_android_pid(serial: &str, bundle_id: &str) -> String {
+    // Give the app a moment to start
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let output = Command::new("adb")
+        .args(["-s", serial, "shell", "pidof", bundle_id])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        }
+        _ => "0".to_string(), // fallback: show all logs
+    }
 }
 
 /// Launch a web build: open HTML in browser
