@@ -4,6 +4,7 @@
 //! Produces a self-contained HTML file with embedded JS runtime.
 
 pub mod emit;
+pub mod minify;
 
 use anyhow::Result;
 use perry_hir::ir::{Module, Stmt};
@@ -14,8 +15,8 @@ const WEB_RUNTIME_JS: &str = include_str!("web_runtime.js");
 
 /// Compile a single HIR module to JavaScript source code.
 /// Returns (js_source, exported_names).
-pub fn compile_module_to_js(module: &Module) -> (String, BTreeSet<String>) {
-    let emitter = emit::JsEmitter::new(&module.name);
+pub fn compile_module_to_js(module: &Module, minify_names: bool) -> (String, BTreeSet<String>) {
+    let emitter = emit::JsEmitter::new(&module.name, minify_names);
 
     // Collect names that have runtime values (not type-only exports)
     let mut runtime_names = BTreeSet::new();
@@ -58,9 +59,11 @@ pub fn compile_module_to_js(module: &Module) -> (String, BTreeSet<String>) {
 ///
 /// Modules are emitted in topological order (dependency order).
 /// The entry module is the last one in the list.
+/// When `minify` is true, applies name mangling and whitespace stripping.
 pub fn compile_modules_to_html(
     modules: &[(String, Module)],  // (module_name, hir_module)
     title: &str,
+    minify: bool,
 ) -> Result<String> {
     let mut all_js = String::with_capacity(32768);
     let mut declared_names = BTreeSet::new();
@@ -71,11 +74,13 @@ pub fn compile_modules_to_html(
     for (i, (mod_name, module)) in modules.iter().enumerate() {
         let is_entry = i == entry_idx;
 
-        let (js, exported_names) = compile_module_to_js(module);
+        let (js, exported_names) = compile_module_to_js(module, minify);
 
         if is_entry {
             // Entry module: emit directly (no IIFE wrapper)
-            all_js.push_str("// --- Entry module ---\n");
+            if !minify {
+                all_js.push_str("// --- Entry module ---\n");
+            }
             all_js.push_str(&js);
         } else if !exported_names.is_empty() {
             // Non-entry module with exports: wrap in IIFE
@@ -114,6 +119,18 @@ pub fn compile_modules_to_html(
         all_js.push('\n');
     }
 
+    // Apply whitespace minification to both user code and web runtime
+    let runtime_js = if minify {
+        minify::minify_js(WEB_RUNTIME_JS)
+    } else {
+        WEB_RUNTIME_JS.to_string()
+    };
+    let final_js = if minify {
+        minify::minify_js(&all_js)
+    } else {
+        all_js
+    };
+
     // Build HTML
     let html = format!(
         r#"<!DOCTYPE html>
@@ -131,16 +148,16 @@ pub fn compile_modules_to_html(
 <body>
   <div id="perry-root"></div>
   <script>
-{WEB_RUNTIME_JS}
+{runtime_js}
   </script>
   <script>
-{all_js}
+{final_js}
   </script>
 </body>
 </html>"#,
         title = html_escape(title),
-        WEB_RUNTIME_JS = WEB_RUNTIME_JS,
-        all_js = all_js,
+        runtime_js = runtime_js,
+        final_js = final_js,
     );
 
     Ok(html)

@@ -27,10 +27,14 @@ pub struct JsEmitter {
     module_name: String,
     /// Exported names from this module
     exported_names: BTreeSet<String>,
+    /// Whether to mangle (obfuscate) variable and function names
+    minify: bool,
+    /// Counter for generating short mangled names
+    mangle_counter: usize,
 }
 
 impl JsEmitter {
-    pub fn new(module_name: &str) -> Self {
+    pub fn new(module_name: &str, minify: bool) -> Self {
         Self {
             output: String::with_capacity(8192),
             indent: 0,
@@ -41,6 +45,8 @@ impl JsEmitter {
             used_names: BTreeSet::new(),
             module_name: module_name.to_string(),
             exported_names: BTreeSet::new(),
+            minify,
+            mangle_counter: 0,
         }
     }
 
@@ -74,9 +80,24 @@ impl JsEmitter {
             }
         }
 
+        // When minifying, reserve class and enum names to prevent mangled name collisions
+        if self.minify {
+            for class in &module.classes {
+                self.used_names.insert(class.name.clone());
+            }
+            for en in &module.enums {
+                self.used_names.insert(en.name.clone());
+            }
+        }
+
         // Pre-register global names
         for global in &module.globals {
-            let name = self.sanitize_name(&global.name);
+            let name = if self.minify && !self.exported_names.contains(&global.name) {
+                self.next_mangled_name()
+            } else {
+                self.sanitize_name(&global.name)
+            };
+            self.used_names.insert(name.clone());
             self.global_names.insert(global.id, name);
         }
 
@@ -169,18 +190,22 @@ impl JsEmitter {
         if let Some(existing) = self.local_names.get(&id) {
             return existing.clone();
         }
-        let base = self.sanitize_name(name);
-        let final_name = if self.used_names.contains(&base) {
-            let mut n = base.clone();
-            let mut counter = 2;
-            loop {
-                n = format!("{}_{}", base, counter);
-                if !self.used_names.contains(&n) { break; }
-                counter += 1;
-            }
-            n
+        let final_name = if self.minify && !self.exported_names.contains(name) {
+            self.next_mangled_name()
         } else {
-            base
+            let base = self.sanitize_name(name);
+            if self.used_names.contains(&base) {
+                let mut n = base.clone();
+                let mut counter = 2;
+                loop {
+                    n = format!("{}_{}", base, counter);
+                    if !self.used_names.contains(&n) { break; }
+                    counter += 1;
+                }
+                n
+            } else {
+                base
+            }
         };
         self.used_names.insert(final_name.clone());
         self.local_names.insert(id, final_name.clone());
@@ -203,19 +228,37 @@ impl JsEmitter {
         if let Some(existing) = self.func_names.get(&id) {
             return existing.clone();
         }
-        let base = self.sanitize_name(name);
-        let final_name = if self.used_names.contains(&base) {
-            format!("{}_{}", base, id)
+        let final_name = if self.minify && !self.exported_names.contains(name) {
+            self.next_mangled_name()
         } else {
-            base
+            let base = self.sanitize_name(name);
+            if self.used_names.contains(&base) {
+                format!("{}_{}", base, id)
+            } else {
+                base
+            }
         };
         self.used_names.insert(final_name.clone());
         final_name
     }
 
     fn fresh_temp(&mut self) -> String {
+        if self.minify {
+            return self.next_mangled_name();
+        }
         self.temp_counter += 1;
         format!("_t{}", self.temp_counter)
+    }
+
+    /// Generate the next short mangled name, skipping collisions and reserved words.
+    fn next_mangled_name(&mut self) -> String {
+        loop {
+            let candidate = gen_short_name(self.mangle_counter);
+            self.mangle_counter += 1;
+            if !self.used_names.contains(&candidate) && !is_js_reserved(&candidate) {
+                return candidate;
+            }
+        }
     }
 
     // --- Enum emission ---
@@ -2478,4 +2521,37 @@ fn is_valid_identifier(s: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+/// Generate a short variable name from a counter value.
+///
+/// Produces: a, b, ..., z, A, ..., Z, aa, ab, ..., az, aA, ..., aZ, ba, ...
+/// Uses bijective base-52 encoding (a-z, A-Z).
+fn gen_short_name(n: usize) -> String {
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let base = CHARS.len(); // 52
+    let mut result = Vec::new();
+    let mut val = n;
+    loop {
+        result.push(CHARS[val % base] as char);
+        if val < base {
+            break;
+        }
+        val = val / base - 1;
+    }
+    result.reverse();
+    result.into_iter().collect()
+}
+
+/// Check if a string is a JavaScript reserved word.
+fn is_js_reserved(s: &str) -> bool {
+    matches!(
+        s,
+        "do" | "if" | "in" | "for" | "let" | "new" | "try" | "var" | "case" | "else"
+        | "enum" | "null" | "this" | "true" | "void" | "with" | "break" | "catch"
+        | "class" | "const" | "false" | "super" | "throw" | "while" | "yield"
+        | "delete" | "export" | "import" | "return" | "switch" | "typeof"
+        | "default" | "extends" | "finally" | "continue" | "debugger"
+        | "function" | "arguments" | "instanceof" | "of"
+    )
 }

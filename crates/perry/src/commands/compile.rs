@@ -69,6 +69,11 @@ pub struct CompileArgs {
     /// Requires: npm install -g @typescript/native-preview
     #[arg(long)]
     pub type_check: bool,
+
+    /// Minify and obfuscate JavaScript output (name mangling + whitespace removal).
+    /// Automatically enabled for --target web.
+    #[arg(long)]
+    pub minify: bool,
 }
 
 /// Information about a JavaScript module that will be interpreted at runtime
@@ -1690,7 +1695,9 @@ fn compile_for_web(ctx: &CompilationContext, args: &CompileArgs, format: OutputF
         .and_then(|s| s.to_str())
         .unwrap_or("Perry App");
 
-    let html = perry_codegen_js::compile_modules_to_html(&modules, title)?;
+    // Minify by default for web target (--minify flag is auto-enabled)
+    let minify = true;
+    let html = perry_codegen_js::compile_modules_to_html(&modules, title, minify)?;
 
     // Determine output path
     let output_path = if let Some(ref out) = args.output {

@@ -120,6 +120,7 @@ pub fn run(args: RunArgs, format: OutputFormat, use_color: bool, verbose: u8) ->
         output_type: "executable".to_string(),
         bundle_extensions: None,
         type_check: args.type_check,
+        minify: target.as_deref() == Some("web"),
     };
 
     let result = super::compile::run(compile_args, format, use_color, verbose)?;
