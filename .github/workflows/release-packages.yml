@@ -352,3 +352,28 @@ jobs:
           git add -A
           git commit -m "perry ${{ steps.release.outputs.version }}"
           git push
+
+  # ---------------------------------------------------------------------------
+  # Notify build workers to update perry
+  # ---------------------------------------------------------------------------
+  update-workers:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get release version
+        id: release
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger worker perry update
+        env:
+          HUB_ADMIN_SECRET: ${{ secrets.HUB_ADMIN_SECRET }}
+        run: |
+          echo "Triggering perry update on build workers (expected: ${{ steps.release.outputs.version }})..."
+          RESPONSE=$(curl -sf -X POST "https://hub.perryts.com/api/v1/admin/update-perry" \
+            -H "Authorization: Bearer ${HUB_ADMIN_SECRET}" \
+            -H "Content-Type: application/json" \
+            -d "{\"expected_version\": \"${{ steps.release.outputs.version }}\"}" 2>&1) || true
+          echo "Hub response: ${RESPONSE}"
