@@ -551,6 +551,10 @@ async fn remote_build_and_launch(
         let app_dir = extract_app_from_ipa(&dest, &dist_dir)?;
         let udid = device_udid.ok_or_else(|| anyhow!("No device UDID for iOS launch"))?;
 
+        // Bundle resource files from the project into the .app
+        // (the hub may not include logo/, assets/, etc.)
+        bundle_project_resources(&app_dir, &project_root);
+
         // Embed app icon from project source if missing from the bundle
         embed_app_icon(&app_dir, &project_root);
 
@@ -575,6 +579,34 @@ async fn remote_build_and_launch(
 /// Embed app icon into the .app bundle if missing.
 /// Reads icon path from perry.toml [project].icons.source or package.json perry.icon,
 /// converts to the required iOS icon sizes using sips, and adds CFBundleIcons to Info.plist.
+/// Copy resource directories (logo/, assets/, resources/, images/) from the project
+/// into the .app bundle so ImageFile() references resolve at runtime.
+fn bundle_project_resources(app_dir: &Path, project_root: &Path) {
+    for dir_name in &["logo", "assets", "resources", "images"] {
+        let src = project_root.join(dir_name);
+        if src.is_dir() {
+            let dest = app_dir.join(dir_name);
+            let _ = copy_dir_recursive(&src, &dest);
+        }
+    }
+}
+
+/// Recursively copy a directory
+fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dest_path)?;
+        } else {
+            std::fs::copy(&src_path, &dest_path)?;
+        }
+    }
+    Ok(())
+}
+
 fn embed_app_icon(app_dir: &Path, project_root: &Path) {
     // Skip if icons already exist
     if app_dir.join("AppIcon60x60@2x.png").exists() || app_dir.join("Assets.car").exists() {
