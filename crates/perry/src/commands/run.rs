@@ -784,7 +784,7 @@ fn find_system_dev_profile(bundle_id: &str, team_id: &str) -> Option<PathBuf> {
                     if output.status.success() {
                         let c = String::from_utf8_lossy(&output.stdout);
                         let is_dev = c.contains("<key>ProvisionedDevices</key>")
-                            || (c.contains("get-task-allow") && c.contains("<true/>"));
+                            || c.contains("<key>get-task-allow</key>\n\t\t<true/>");
                         let matches = (c.contains(bundle_id) || c.contains(&format!("{team_id}.*")))
                             && c.contains(team_id);
                         if is_dev && matches {
@@ -1310,7 +1310,7 @@ fn is_development_profile(path: &Path) -> bool {
             // Development profiles have get-task-allow = true
             // Also check for ProvisionedDevices (dev profiles list specific devices)
             stdout.contains("<key>ProvisionedDevices</key>")
-                || (stdout.contains("get-task-allow") && stdout.contains("<true/>"))
+                || stdout.contains("<key>get-task-allow</key>\n\t\t<true/>")
         }
         _ => false,
     }
