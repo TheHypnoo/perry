@@ -674,12 +674,13 @@ async fn resign_for_development(
         ),
     };
 
-    let team_id = identity
-        .rfind('(')
-        .and_then(|start| identity.rfind(')').filter(|&end| end > start)
-            .map(|end| identity[start + 1..end].to_string()))
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("Could not extract team ID from: {identity}"))?;
+    // Use team ID from saved config (NOT from the identity name — the parenthesized
+    // part in "Apple Development: Name (XXXXX)" is a personal cert ID, not the team ID)
+    let team_id = config.apple.as_ref()
+        .and_then(|a| a.team_id.clone())
+        .ok_or_else(|| anyhow!(
+            "No Apple team ID in ~/.perry/config.toml — run `perry setup ios` first"
+        ))?;
 
     if let OutputFormat::Text = format {
         println!(
