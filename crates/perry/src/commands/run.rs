@@ -674,27 +674,60 @@ fn resign_for_development(app_dir: &Path, format: OutputFormat) -> Result<()> {
         println!("Re-signing with: {}", style(&identity).dim());
     }
 
+    // Extract team ID from identity name, e.g. "Apple Development: Name (TEAMID)"
+    let team_id = identity
+        .rfind('(')
+        .and_then(|start| {
+            identity.rfind(')').map(|end| {
+                if end > start {
+                    identity[start + 1..end].to_string()
+                } else {
+                    String::new()
+                }
+            })
+        })
+        .filter(|s| !s.is_empty());
+
+    // Read bundle ID from Info.plist
+    let bundle_id = read_bundle_id_from_app(app_dir)
+        .unwrap_or_else(|| "com.perry.app".to_string());
+
     // Remove existing code signature
     let _ = std::fs::remove_dir_all(app_dir.join("_CodeSignature"));
 
-    // Remove embedded (distribution) provisioning profile — codesign will embed
-    // the correct one if available, or device can still install without it for
-    // free/personal team development
+    // Remove embedded (distribution) provisioning profile
     let _ = std::fs::remove_file(app_dir.join("embedded.mobileprovision"));
 
-    // Update entitlements to allow debugging (get-task-allow = true)
+    // Build entitlements with application-identifier (required for device installs)
+    let app_identifier = if let Some(ref tid) = team_id {
+        format!("{tid}.{bundle_id}")
+    } else {
+        bundle_id.clone()
+    };
+
     let entitlements = std::env::temp_dir().join("perry_run_entitlements.plist");
     std::fs::write(
         &entitlements,
-        r#"<?xml version="1.0" encoding="UTF-8"?>
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>application-identifier</key>
+    <string>{app_identifier}</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>{team_id_str}</string>
     <key>get-task-allow</key>
     <true/>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>{app_identifier}</string>
+    </array>
 </dict>
 </plist>
 "#,
+            team_id_str = team_id.as_deref().unwrap_or(""),
+        ),
     )?;
 
     // Re-sign with development identity
@@ -720,6 +753,20 @@ fn resign_for_development(app_dir: &Path, format: OutputFormat) -> Result<()> {
 }
 
 /// Find project root by walking up from a directory
+/// Read CFBundleIdentifier from an .app's Info.plist
+fn read_bundle_id_from_app(app_dir: &Path) -> Option<String> {
+    let output = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Print :CFBundleIdentifier"])
+        .arg(app_dir.join("Info.plist"))
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
 fn find_project_root(start: &Path) -> PathBuf {
     let mut dir = start.to_path_buf();
     for _ in 0..10 {
