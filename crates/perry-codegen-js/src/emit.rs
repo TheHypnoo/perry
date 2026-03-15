@@ -1312,6 +1312,12 @@ impl JsEmitter {
                 }
                 self.output.push(')');
             }
+            Expr::BufferFill { buffer, value, .. } => {
+                self.emit_expr(buffer);
+                self.output.push_str(".fill(");
+                self.emit_expr(value);
+                self.output.push(')');
+            }
             Expr::BufferCopy { source, target, target_start, source_start, source_end } => {
                 self.emit_expr(target);
                 self.output.push_str(".set(");

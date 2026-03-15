@@ -56,7 +56,10 @@ pub fn compile_modules_to_wasm_html(
 {runtime_js}{async_inject}
   </script>
   <script>
-bootPerryWasm("{wasm_b64}");
+bootPerryWasm("{wasm_b64}").catch(e => {{
+  document.getElementById("perry-root").textContent = "WASM Error: " + e.message;
+  console.error("Boot error:", e);
+}});
   </script>
 </body>
 </html>"#,

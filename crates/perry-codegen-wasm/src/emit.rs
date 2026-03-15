@@ -1,7 +1,8 @@
 //! HIR → WebAssembly bytecode emitter
 //!
 //! Translates HIR modules to WebAssembly binary format using wasm-encoder.
-//! All JSValues are represented as f64 using NaN-boxing (matching perry-runtime).
+//! All JSValues are represented as i64 using NaN-boxing bit patterns.
+//! Arithmetic operations temporarily convert to f64 and back.
 //! Runtime operations (strings, console, objects) are imported from a JS bridge.
 
 use perry_hir::ir::*;
@@ -24,7 +25,8 @@ fn f64_const(val: f64) -> Instruction<'static> {
     Instruction::F64Const(Ieee64::from(val))
 }
 
-/// Helper: create an F64Const instruction from NaN-boxed tag bits
+/// Helper: create an F64Const instruction from NaN-boxed tag bits (kept for potential future use)
+#[allow(dead_code)]
 fn f64_const_bits(bits: u64) -> Instruction<'static> {
     Instruction::F64Const(Ieee64::from(f64::from_bits(bits)))
 }
@@ -37,7 +39,9 @@ const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
 const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
 
 /// Import function indices (must match the order imports are added)
+/// Most fields are unused directly but their indices define the WASM import order.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 struct RuntimeImports {
     string_new: u32,
     console_log: u32,
@@ -275,6 +279,198 @@ struct RuntimeImports {
     promise_resolve: u32,
     promise_then: u32,
     await_promise: u32,
+    // Bridge via WASM memory — Firefox canonicalizes NaN in function params,
+    // so we write f64 args to memory (preserves NaN bits) and pass only plain numbers.
+    mem_call: u32,   // (func_name_id, arg_count) -> result; args at mem[ARG_BASE..]
+    mem_call_i32: u32, // (func_name_id, arg_count) -> i32; for is_truthy, string_eq, etc.
+}
+
+/// Map perry/ui and perry/system method names to bridge function names.
+/// Mirrors the mapping in perry-codegen-js's emit_ui_method_call.
+fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
+    match method {
+        // Widget creation
+        "App" | "app_create" => "perry_ui_app_create",
+        "VStack" | "vstack_create" => "perry_ui_vstack_create",
+        "HStack" | "hstack_create" => "perry_ui_hstack_create",
+        "ZStack" | "zstack_create" => "perry_ui_zstack_create",
+        "Text" | "text_create" => "perry_ui_text_create",
+        "Button" | "button_create" => "perry_ui_button_create",
+        "TextField" | "textfield_create" => "perry_ui_textfield_create",
+        "SecureField" | "securefield_create" => "perry_ui_securefield_create",
+        "Toggle" | "toggle_create" => "perry_ui_toggle_create",
+        "Slider" | "slider_create" => "perry_ui_slider_create",
+        "ScrollView" | "scrollview_create" => "perry_ui_scrollview_create",
+        "Spacer" | "spacer_create" => "perry_ui_spacer_create",
+        "Divider" | "divider_create" => "perry_ui_divider_create",
+        "ProgressView" | "progressview_create" => "perry_ui_progressview_create",
+        "Image" | "image_create" => "perry_ui_image_create",
+        "Picker" | "picker_create" => "perry_ui_picker_create",
+        "Form" | "form_create" => "perry_ui_form_create",
+        "Section" | "section_create" => "perry_ui_section_create",
+        "NavigationStack" | "navigationstack_create" => "perry_ui_navigationstack_create",
+        "Canvas" | "canvas_create" => "perry_ui_canvas_create",
+        "Table" | "table_create" => "perry_ui_table_create",
+        "LazyVStack" | "lazyvstack_create" => "perry_ui_lazyvstack_create",
+        "TextArea" | "textarea_create" => "perry_ui_textarea_create",
+        "VStackWithInsets" => "perry_ui_vstack_create_with_insets",
+        "HStackWithInsets" => "perry_ui_hstack_create_with_insets",
+        // Child management
+        "addChild" | "widget_add_child" => "perry_ui_widget_add_child",
+        "removeAllChildren" | "widget_remove_all_children" => "perry_ui_widget_remove_all_children",
+        "widgetAddChild" => "perry_ui_widget_add_child",
+        "widgetRemoveChild" => "perry_ui_widget_remove_child",
+        "widgetReorderChild" => "perry_ui_widget_reorder_child",
+        "widgetClearChildren" => "perry_ui_widget_remove_all_children",
+        "widgetAddOverlay" => "perry_ui_widget_add_overlay",
+        "widgetSetOverlayFrame" => "perry_ui_widget_set_overlay_frame",
+        // Styling
+        "setBackground" | "set_background" | "widgetSetBackgroundColor" => "perry_ui_set_background",
+        "setForeground" | "set_foreground" | "textSetColor" => "perry_ui_set_foreground",
+        "setFontSize" | "set_font_size" | "textSetFontSize" => "perry_ui_set_font_size",
+        "setFontWeight" | "set_font_weight" | "textSetFontWeight" => "perry_ui_set_font_weight",
+        "setFontFamily" | "set_font_family" | "textSetFontFamily" => "perry_ui_set_font_family",
+        "setPadding" | "set_padding" => "perry_ui_set_padding",
+        "setFrame" | "set_frame" => "perry_ui_set_frame",
+        "setCornerRadius" | "set_corner_radius" => "perry_ui_set_corner_radius",
+        "setBorder" | "set_border" => "perry_ui_set_border",
+        "setOpacity" | "set_opacity" => "perry_ui_set_opacity",
+        "setEnabled" | "set_enabled" => "perry_ui_set_enabled",
+        "setTooltip" | "set_tooltip" => "perry_ui_set_tooltip",
+        "setControlSize" | "set_control_size" => "perry_ui_set_control_size",
+        "widgetSetWidth" => "perry_ui_widget_set_width",
+        "widgetSetHeight" => "perry_ui_widget_set_height",
+        "widgetSetHugging" => "perry_ui_widget_set_hugging",
+        "widgetSetHidden" => "perry_ui_set_widget_hidden",
+        "widgetMatchParentWidth" => "perry_ui_widget_match_parent_width",
+        "widgetMatchParentHeight" => "perry_ui_widget_match_parent_height",
+        "widgetSetEdgeInsets" => "perry_ui_widget_set_edge_insets",
+        "stackSetDetachesHidden" => "perry_ui_stack_set_detaches_hidden",
+        "stackSetDistribution" => "perry_ui_stack_set_distribution",
+        // Animations
+        "animateOpacity" | "animate_opacity" => "perry_ui_animate_opacity",
+        "animatePosition" | "animate_position" => "perry_ui_animate_position",
+        // Events
+        "setOnClick" | "set_on_click" => "perry_ui_set_on_click",
+        "setOnHover" | "set_on_hover" => "perry_ui_set_on_hover",
+        "setOnDoubleClick" | "set_on_double_click" => "perry_ui_set_on_double_click",
+        // State
+        "create" | "createState" | "state_create" => "perry_ui_state_create",
+        "get" if class_name.map_or(false, |c| c == "State") => "perry_ui_state_get",
+        "set" if class_name.map_or(false, |c| c == "State") => "perry_ui_state_set",
+        "value" if class_name.map_or(false, |c| c == "State") => "perry_ui_state_get",
+        "onChange" | "state_on_change" => "perry_ui_state_on_change",
+        // State bindings
+        "bindText" | "state_bind_text" => "perry_ui_state_bind_text",
+        "bindTextNumeric" | "state_bind_text_numeric" => "perry_ui_state_bind_text_numeric",
+        "bindSlider" | "state_bind_slider" => "perry_ui_state_bind_slider",
+        "bindToggle" | "state_bind_toggle" => "perry_ui_state_bind_toggle",
+        "bindVisibility" | "state_bind_visibility" => "perry_ui_state_bind_visibility",
+        "bindForEach" | "state_bind_foreach" => "perry_ui_state_bind_foreach",
+        // Text/Button/TextField ops
+        "textSetString" => "perry_ui_text_set_string",
+        "textSetWraps" => "perry_ui_text_set_wraps",
+        "buttonSetBordered" => "perry_ui_button_set_bordered",
+        "buttonSetTitle" => "perry_ui_button_set_title",
+        "buttonSetTextColor" => "perry_ui_button_set_text_color",
+        "buttonSetImage" => "perry_ui_button_set_image",
+        "buttonSetContentTintColor" => "perry_ui_button_set_content_tint_color",
+        "buttonSetImagePosition" => "perry_ui_button_set_image_position",
+        "textfieldFocus" => "perry_ui_textfield_focus",
+        "textfieldSetString" => "perry_ui_textfield_set_string",
+        "textfieldGetString" => "perry_ui_textfield_get_string",
+        "textfieldBlurAll" => "perry_ui_textfield_blur_all",
+        "textfieldSetOnSubmit" => "perry_ui_textfield_set_on_submit",
+        "textfieldSetOnFocus" => "perry_ui_textfield_set_on_focus",
+        // ScrollView
+        "scrollViewSetChild" => "perry_ui_scrollview_set_child",
+        "scrollViewScrollTo" => "perry_ui_scrollview_scroll_to",
+        "scrollViewGetOffset" => "perry_ui_scrollview_get_offset",
+        "scrollViewSetOffset" => "perry_ui_scrollview_set_offset",
+        // Canvas
+        "fillRect" | "canvas_fill_rect" => "perry_ui_canvas_fill_rect",
+        "strokeRect" | "canvas_stroke_rect" => "perry_ui_canvas_stroke_rect",
+        "clearRect" | "canvas_clear_rect" => "perry_ui_canvas_clear_rect",
+        "setFillColor" | "canvas_set_fill_color" => "perry_ui_canvas_set_fill_color",
+        "setStrokeColor" | "canvas_set_stroke_color" => "perry_ui_canvas_set_stroke_color",
+        "beginPath" | "canvas_begin_path" => "perry_ui_canvas_begin_path",
+        "moveTo" | "canvas_move_to" => "perry_ui_canvas_move_to",
+        "lineTo" | "canvas_line_to" => "perry_ui_canvas_line_to",
+        "arc" | "canvas_arc" => "perry_ui_canvas_arc",
+        "closePath" | "canvas_close_path" => "perry_ui_canvas_close_path",
+        "fill" | "canvas_fill" => "perry_ui_canvas_fill",
+        "stroke" | "canvas_stroke" => "perry_ui_canvas_stroke",
+        "setLineWidth" | "canvas_set_line_width" => "perry_ui_canvas_set_line_width",
+        "fillText" | "canvas_fill_text" => "perry_ui_canvas_fill_text",
+        "setFont" | "canvas_set_font" => "perry_ui_canvas_set_font",
+        // Navigation
+        "navstackPush" => "perry_ui_navstack_push",
+        "navstackPop" => "perry_ui_navstack_pop",
+        // Picker
+        "pickerAddItem" => "perry_ui_picker_add_item",
+        "pickerSetSelected" => "perry_ui_picker_set_selected",
+        "pickerGetSelected" => "perry_ui_picker_get_selected",
+        // Image
+        "imageSetSize" => "perry_ui_image_set_size",
+        "imageSetTint" => "perry_ui_image_set_tint",
+        // Menu
+        "menuCreate" | "menu_create" => "perry_ui_menu_create",
+        "menuAddItem" | "menu_add_item" => "perry_ui_menu_add_item",
+        "menuAddSeparator" | "menu_add_separator" => "perry_ui_menu_add_separator",
+        "menuAddSubmenu" | "menu_add_submenu" => "perry_ui_menu_add_submenu",
+        "menuBarCreate" | "menubar_create" => "perry_ui_menubar_create",
+        "menuBarAddMenu" | "menubar_add_menu" => "perry_ui_menubar_add_menu",
+        "menuBarAttach" | "menubar_attach" => "perry_ui_menubar_attach",
+        "widgetSetContextMenu" => "perry_ui_widget_set_context_menu",
+        // Dialog
+        "openFileDialog" => "perry_ui_open_file_dialog",
+        "openFolderDialog" => "perry_ui_open_folder_dialog",
+        "saveFileDialog" => "perry_ui_save_file_dialog",
+        "alert" => "perry_ui_alert",
+        // Clipboard
+        "clipboardRead" => "perry_ui_clipboard_read",
+        "clipboardWrite" => "perry_ui_clipboard_write",
+        // Keyboard
+        "addKeyboardShortcut" => "perry_ui_add_keyboard_shortcut",
+        // Sheet
+        "sheetCreate" => "perry_ui_sheet_create",
+        "sheetPresent" => "perry_ui_sheet_present",
+        "sheetDismiss" => "perry_ui_sheet_dismiss",
+        // Toolbar
+        "toolbarCreate" => "perry_ui_toolbar_create",
+        "toolbarAddItem" => "perry_ui_toolbar_add_item",
+        "toolbarAttach" => "perry_ui_toolbar_attach",
+        // Window
+        "windowCreate" => "perry_ui_window_create",
+        "windowSetBody" => "perry_ui_window_set_body",
+        "windowShow" => "perry_ui_window_show",
+        "windowClose" => "perry_ui_window_close",
+        // App lifecycle
+        "run" | "app_run" => "perry_ui_app_run",
+        "appSetBody" => "perry_ui_app_set_body",
+        "appSetMinSize" => "perry_ui_app_set_min_size",
+        "appSetMaxSize" => "perry_ui_app_set_max_size",
+        "appOnActivate" => "perry_ui_app_on_activate",
+        "appOnTerminate" => "perry_ui_app_on_terminate",
+        "appSetTimer" => "perry_ui_app_set_timer",
+        // Table
+        "tableSetColumnHeader" => "perry_ui_table_set_column_header",
+        "tableSetColumnWidth" => "perry_ui_table_set_column_width",
+        "tableUpdateRowCount" => "perry_ui_table_update_row_count",
+        "tableSetOnRowSelect" => "perry_ui_table_set_on_row_select",
+        "tableGetSelectedRow" => "perry_ui_table_get_selected_row",
+        // System (perry/system module)
+        "openURL" | "open_url" => "perry_system_open_url",
+        "isDarkMode" | "is_dark_mode" => "perry_system_is_dark_mode",
+        "preferencesGet" | "preferences_get" => "perry_system_preferences_get",
+        "preferencesSet" | "preferences_set" => "perry_system_preferences_set",
+        "keychainSave" | "keychain_save" => "perry_system_keychain_save",
+        "keychainGet" | "keychain_get" => "perry_system_keychain_get",
+        "keychainDelete" | "keychain_delete" => "perry_system_keychain_delete",
+        "notificationSend" | "notification_send" => "perry_system_notification_send",
+        // Fallback: prefix with perry_ui_
+        _ => return "perry_ui_unknown",
+    }
 }
 
 /// Output from WASM compilation: binary + extra JS for async functions.
@@ -326,6 +522,8 @@ struct WasmModuleEmitter {
     class_parent_map: BTreeMap<String, String>,
     /// Enum member values: (enum_name, member_name) → numeric value or string
     enum_values: BTreeMap<(String, String), EnumResolvedValue>,
+    /// Global index for NaN-safe temp storage (global.set/get may preserve NaN in Firefox)
+    nan_temp_global: u32,
     /// Async function names (compiled to JS, not WASM)
     async_func_imports: Vec<(String, u32, usize)>, // (name, import_idx, param_count)
     /// Generated JS code for async functions
@@ -352,6 +550,7 @@ impl WasmModuleEmitter {
             func_name_map: BTreeMap::new(),
             class_parent_map: BTreeMap::new(),
             enum_values: BTreeMap::new(),
+            nan_temp_global: 0, // set during compile()
             async_func_imports: Vec::new(),
             async_js_code: Vec::new(),
         }
@@ -394,22 +593,22 @@ impl WasmModuleEmitter {
         // All imports use f64 for JSValues
         let t_void = self.get_type_idx(vec![], vec![]);
         let t_i32_i32_void = self.get_type_idx(vec![ValType::I32, ValType::I32], vec![]);
-        let t_f64_void = self.get_type_idx(vec![ValType::F64], vec![]);
-        let t_f64_f64_f64 = self.get_type_idx(vec![ValType::F64, ValType::F64], vec![ValType::F64]);
-        let t_f64_f64_i32 = self.get_type_idx(vec![ValType::F64, ValType::F64], vec![ValType::I32]);
-        let t_f64_f64 = self.get_type_idx(vec![ValType::F64], vec![ValType::F64]);
-        let t_f64_i32 = self.get_type_idx(vec![ValType::F64], vec![ValType::I32]);
-        let t_void_f64 = self.get_type_idx(vec![], vec![ValType::F64]);
+        let t_f64_void = self.get_type_idx(vec![ValType::I64], vec![]);
+        let t_f64_f64_f64 = self.get_type_idx(vec![ValType::I64, ValType::I64], vec![ValType::I64]);
+        let t_f64_f64_i32 = self.get_type_idx(vec![ValType::I64, ValType::I64], vec![ValType::I32]);
+        let t_f64_f64 = self.get_type_idx(vec![ValType::I64], vec![ValType::I64]);
+        let t_f64_i32 = self.get_type_idx(vec![ValType::I64], vec![ValType::I32]);
+        let t_void_f64 = self.get_type_idx(vec![], vec![ValType::I64]);
 
         // Add runtime imports (order matters — defines function indices)
         let mut import_idx: u32 = 0;
         let mut next_import = || { let i = import_idx; import_idx += 1; i };
 
         // Additional type signatures needed for Phase 1+
-        let t_f64_f64_void = self.get_type_idx(vec![ValType::F64, ValType::F64], vec![]);
-        let t_f64_f64_f64_void = self.get_type_idx(vec![ValType::F64, ValType::F64, ValType::F64], vec![]);
-        let t_f64_f64_f64_f64 = self.get_type_idx(vec![ValType::F64, ValType::F64, ValType::F64], vec![ValType::F64]);
-        let t_f64_f64_f64_f64_f64 = self.get_type_idx(vec![ValType::F64, ValType::F64, ValType::F64, ValType::F64], vec![ValType::F64]);
+        let t_f64_f64_void = self.get_type_idx(vec![ValType::I64, ValType::I64], vec![]);
+        let t_f64_f64_f64_void = self.get_type_idx(vec![ValType::I64, ValType::I64, ValType::I64], vec![]);
+        let t_f64_f64_f64_f64 = self.get_type_idx(vec![ValType::I64, ValType::I64, ValType::I64], vec![ValType::I64]);
+        let t_f64_f64_f64_f64_f64 = self.get_type_idx(vec![ValType::I64, ValType::I64, ValType::I64, ValType::I64], vec![ValType::I64]);
 
         let rt = RuntimeImports {
             string_new: next_import(),
@@ -648,6 +847,9 @@ impl WasmModuleEmitter {
             promise_resolve: next_import(),
             promise_then: next_import(),
             await_promise: next_import(),
+            // Memory-based bridge (Firefox NaN canonicalization workaround)
+            mem_call: next_import(),
+            mem_call_i32: next_import(),
         };
         self.num_imports = import_idx;
         self.rt = Some(rt);
@@ -876,7 +1078,7 @@ impl WasmModuleEmitter {
             ("response_url", t_f64_f64),                   // (handle) -> str
             // Buffer extras
             ("buffer_copy", {
-                let t = self.get_type_idx(vec![ValType::F64; 5], vec![ValType::F64]);
+                let t = self.get_type_idx(vec![ValType::I64; 5], vec![ValType::I64]);
                 t
             }),
             ("buffer_write", t_f64_f64_f64_f64),           // (handle, str, offset, encoding) -> number
@@ -897,6 +1099,13 @@ impl WasmModuleEmitter {
             ("promise_resolve", t_f64_f64_void),           // (promise_handle, value) -> void
             ("promise_then", t_f64_f64_f64),               // (promise_handle, closure_handle) -> promise_handle
             ("await_promise", t_f64_f64),                  // (value) -> resolved_value_or_value
+            // Memory-based bridge: args written to WASM memory at 0xFF00, only plain numbers as params
+            ("mem_call", {
+                self.get_type_idx(vec![ValType::F64, ValType::F64, ValType::I32], vec![ValType::F64])
+            }),                                            // (func_name_id, arg_count, base_addr) -> f64 dummy
+            ("mem_call_i32", {
+                self.get_type_idx(vec![ValType::F64, ValType::F64, ValType::I32], vec![ValType::I32])
+            }),                                            // (func_name_id, arg_count, base_addr) -> i32
         ];
 
         // Collect all closures from all modules (they need function indices too)
@@ -942,8 +1151,8 @@ impl WasmModuleEmitter {
             for func in &module.functions {
                 if func.is_async {
                     let param_count = func.params.len();
-                    let params = vec![ValType::F64; param_count];
-                    let results = vec![ValType::F64]; // returns promise handle
+                    let params = vec![ValType::I64; param_count];
+                    let results = vec![ValType::I64]; // returns promise handle
                     let type_idx = self.get_type_idx(params, results);
                     let _ = type_idx;
                     self.func_map.insert(func.id, async_import_idx);
@@ -973,9 +1182,9 @@ impl WasmModuleEmitter {
                     continue; // already registered as bridge import
                 }
                 let param_count = func.params.len();
-                let params = vec![ValType::F64; param_count];
+                let params = vec![ValType::I64; param_count];
                 let results = if func.body.iter().any(|s| has_return(s)) || func.name == "main" {
-                    vec![ValType::F64]
+                    vec![ValType::I64]
                 } else {
                     vec![]
                 };
@@ -998,8 +1207,8 @@ impl WasmModuleEmitter {
                 // Constructor: params = this + declared params, returns f64 (this)
                 if let Some(ctor) = &class.constructor {
                     let param_count = 1 + ctor.params.len();
-                    let params = vec![ValType::F64; param_count];
-                    let results = vec![ValType::F64];
+                    let params = vec![ValType::I64; param_count];
+                    let results = vec![ValType::I64];
                     let type_idx = self.get_type_idx(params, results);
                     let _ = type_idx;
                     self.class_ctor_map.insert(class.name.clone(), user_func_idx);
@@ -1008,8 +1217,8 @@ impl WasmModuleEmitter {
                 // Instance methods: params = this + declared params
                 for method in &class.methods {
                     let param_count = 1 + method.params.len();
-                    let params = vec![ValType::F64; param_count];
-                    let results = vec![ValType::F64];
+                    let params = vec![ValType::I64; param_count];
+                    let results = vec![ValType::I64];
                     let type_idx = self.get_type_idx(params, results);
                     let _ = type_idx;
                     self.class_method_map
@@ -1021,8 +1230,8 @@ impl WasmModuleEmitter {
                 // Static methods: no this param
                 for method in &class.static_methods {
                     let param_count = method.params.len();
-                    let params = vec![ValType::F64; param_count];
-                    let results = vec![ValType::F64];
+                    let params = vec![ValType::I64; param_count];
+                    let results = vec![ValType::I64];
                     let type_idx = self.get_type_idx(params, results);
                     let _ = type_idx;
                     self.class_static_map
@@ -1035,8 +1244,8 @@ impl WasmModuleEmitter {
                 }
                 // Getters: like methods with 0 params + this
                 for (name, getter) in &class.getters {
-                    let params = vec![ValType::F64]; // just this
-                    let results = vec![ValType::F64];
+                    let params = vec![ValType::I64]; // just this
+                    let results = vec![ValType::I64];
                     let type_idx = self.get_type_idx(params, results);
                     let _ = type_idx;
                     self.class_method_map
@@ -1048,8 +1257,8 @@ impl WasmModuleEmitter {
                 }
                 // Setters: this + value
                 for (name, setter) in &class.setters {
-                    let params = vec![ValType::F64; 2]; // this + value
-                    let results = vec![ValType::F64];
+                    let params = vec![ValType::I64; 2]; // this + value
+                    let results = vec![ValType::I64];
                     let type_idx = self.get_type_idx(params, results);
                     let _ = type_idx;
                     self.class_method_map
@@ -1067,11 +1276,11 @@ impl WasmModuleEmitter {
             if !self.func_map.contains_key(func_id) {
                 // Closure params: captures first (as f64), then declared params
                 let total_params = captures.len() + mutable_captures.len() + params.len();
-                let wasm_params = vec![ValType::F64; total_params];
+                let wasm_params = vec![ValType::I64; total_params];
                 let results = if body.iter().any(|s| has_return(s)) {
-                    vec![ValType::F64]
+                    vec![ValType::I64]
                 } else {
-                    vec![ValType::F64] // closures always return f64
+                    vec![ValType::I64] // closures always return i64
                 };
                 let type_idx = self.get_type_idx(wasm_params, results);
                 let _ = type_idx;
@@ -1092,6 +1301,10 @@ impl WasmModuleEmitter {
                 self.num_globals += 1;
             }
         }
+
+        // Add a NaN-safe temp global for mem_store_slot (Firefox canonicalizes locals)
+        self.nan_temp_global = self.num_globals;
+        self.num_globals += 1;
 
         // Build the WASM module
         let mut wasm_module = Module::new();
@@ -1114,8 +1327,8 @@ impl WasmModuleEmitter {
         // Add async function imports
         let async_import_entries: Vec<(String, u32)> = self.async_func_imports.iter().map(|(name, _idx, param_count)| {
             let import_name = format!("__async_{}", name);
-            let params = vec![ValType::F64; *param_count];
-            let results = vec![ValType::F64];
+            let params = vec![ValType::I64; *param_count];
+            let results = vec![ValType::I64];
             let key = (params, results);
             let type_idx = self.type_map.get(&key).copied().unwrap_or(0);
             (import_name, type_idx)
@@ -1134,9 +1347,9 @@ impl WasmModuleEmitter {
             for func in &module.functions {
                 if func.is_async { continue; }
                 let param_count = func.params.len();
-                let params = vec![ValType::F64; param_count];
+                let params = vec![ValType::I64; param_count];
                 let results = if func.body.iter().any(|s| has_return(s)) || func.name == "main" {
-                    vec![ValType::F64]
+                    vec![ValType::I64]
                 } else {
                     vec![]
                 };
@@ -1149,34 +1362,34 @@ impl WasmModuleEmitter {
             for class in &module.classes {
                 if let Some(ctor) = &class.constructor {
                     let param_count = 1 + ctor.params.len();
-                    let params = vec![ValType::F64; param_count];
-                    let results = vec![ValType::F64];
+                    let params = vec![ValType::I64; param_count];
+                    let results = vec![ValType::I64];
                     let type_idx = self.get_type_idx(params, results);
                     func_section.function(type_idx);
                 }
                 for method in &class.methods {
                     let param_count = 1 + method.params.len();
-                    let params = vec![ValType::F64; param_count];
-                    let results = vec![ValType::F64];
+                    let params = vec![ValType::I64; param_count];
+                    let results = vec![ValType::I64];
                     let type_idx = self.get_type_idx(params, results);
                     func_section.function(type_idx);
                 }
                 for method in &class.static_methods {
                     let param_count = method.params.len();
-                    let params = vec![ValType::F64; param_count];
-                    let results = vec![ValType::F64];
+                    let params = vec![ValType::I64; param_count];
+                    let results = vec![ValType::I64];
                     let type_idx = self.get_type_idx(params, results);
                     func_section.function(type_idx);
                 }
                 for (_name, _getter) in &class.getters {
-                    let params = vec![ValType::F64];
-                    let results = vec![ValType::F64];
+                    let params = vec![ValType::I64];
+                    let results = vec![ValType::I64];
                     let type_idx = self.get_type_idx(params, results);
                     func_section.function(type_idx);
                 }
                 for (_name, _setter) in &class.setters {
-                    let params = vec![ValType::F64; 2];
-                    let results = vec![ValType::F64];
+                    let params = vec![ValType::I64; 2];
+                    let results = vec![ValType::I64];
                     let type_idx = self.get_type_idx(params, results);
                     func_section.function(type_idx);
                 }
@@ -1186,8 +1399,8 @@ impl WasmModuleEmitter {
         for (func_id, params, body, captures, mutable_captures) in &closure_funcs {
             if self.func_map.contains_key(func_id) {
                 let total_params = captures.len() + mutable_captures.len() + params.len();
-                let wasm_params = vec![ValType::F64; total_params];
-                let results = vec![ValType::F64]; // closures always return f64
+                let wasm_params = vec![ValType::I64; total_params];
+                let results = vec![ValType::I64]; // closures always return f64
                 let type_idx = self.get_type_idx(wasm_params, results);
                 func_section.function(type_idx);
             }
@@ -1257,7 +1470,7 @@ impl WasmModuleEmitter {
 
         // --- Memory section ---
         let mut mem_section = MemorySection::new();
-        let pages = ((self.string_data.len() + 65535) / 65536).max(1) as u64;
+        let pages = ((self.string_data.len() + 65535) / 65536).max(2) as u64; // min 2 pages for 0xFF00 mem_call region
         mem_section.memory(MemoryType {
             minimum: pages,
             maximum: None,
@@ -1267,18 +1480,23 @@ impl WasmModuleEmitter {
         });
         wasm_module.section(&mem_section);
 
-        // --- Global section (mutable f64 globals for module-level variables) ---
+        // --- Global section ---
         if self.num_globals > 0 {
             let mut global_section = GlobalSection::new();
-            for _ in 0..self.num_globals {
-                global_section.global(
-                    GlobalType {
-                        val_type: ValType::F64,
-                        mutable: true,
-                        shared: false,
-                    },
-                    &wasm_encoder::ConstExpr::f64_const(Ieee64::from(f64::from_bits(TAG_UNDEFINED))),
-                );
+            for g in 0..self.num_globals {
+                if g == self.nan_temp_global {
+                    // Stack pointer for arg buffer (i32, initialized to 0x10000)
+                    global_section.global(
+                        GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+                        &wasm_encoder::ConstExpr::i32_const(0x10000),
+                    );
+                } else {
+                    // Regular i64 global for module-level variables (NaN-boxed)
+                    global_section.global(
+                        GlobalType { val_type: ValType::I64, mutable: true, shared: false },
+                        &wasm_encoder::ConstExpr::i64_const(TAG_UNDEFINED as i64),
+                    );
+                }
             }
             wasm_module.section(&global_section);
         }
@@ -1373,12 +1591,10 @@ impl WasmModuleEmitter {
                 collect_locals(&module.init, &mut init_locals, &mut extra_count, 0);
             }
 
-            let num_locals = init_locals.len();
-            let locals = if num_locals > 0 {
-                vec![(num_locals as u32, ValType::F64)]
-            } else {
-                vec![]
-            };
+            let num_locals = init_locals.len() as u32;
+            let start_temp_local = num_locals;
+            let start_temp_i32 = num_locals + 1;
+            let locals = vec![(num_locals + 1, ValType::I64), (1, ValType::I32)];
             let mut func = Function::new(locals);
 
             // Call __init_strings first
@@ -1388,13 +1604,14 @@ impl WasmModuleEmitter {
             for (_, module) in modules {
                 for global in &module.globals {
                     if let Some(init) = &global.init {
-                        let mut ctx = FuncEmitCtx::new(self, &init_locals);
+                        let mut ctx = FuncEmitCtx::new(self, &init_locals, start_temp_local, start_temp_i32);
                         ctx.emit_expr(&mut func, init);
                         let gidx = self.global_map[&global.id];
                         func.instruction(&Instruction::GlobalSet(gidx));
                     } else if global.name == "__platform__" {
                         // Web platform ID = 5
                         func.instruction(&f64_const(5.0));
+                        func.instruction(&Instruction::I64ReinterpretF64);
                         let gidx = self.global_map[&global.id];
                         func.instruction(&Instruction::GlobalSet(gidx));
                     }
@@ -1414,10 +1631,22 @@ impl WasmModuleEmitter {
                             let method_name_id = self.string_map.get(real_name).copied().unwrap_or(0);
                             let method_bits = (STRING_TAG << 48) | (method_name_id as u64);
                             let table_idx = self.func_to_table_idx.get(&func_idx).copied().unwrap_or(func_idx);
-                            func.instruction(&f64_const(f64::from_bits(class_bits)));
-                            func.instruction(&f64_const(f64::from_bits(method_bits)));
-                            func.instruction(&f64_const(table_idx as f64));
-                            func.instruction(&Instruction::Call(rt.class_set_method));
+                            // Store args to memory for mem_call (Firefox NaN-safe: use I64Store)
+                            func.instruction(&Instruction::I32Const(0xFF00));
+                            func.instruction(&Instruction::I64Const(class_bits as i64));
+                            func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                            func.instruction(&Instruction::I32Const(0xFF08));
+                            func.instruction(&Instruction::I64Const(method_bits as i64));
+                            func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                            func.instruction(&Instruction::I32Const(0xFF10));
+                            func.instruction(&Instruction::I64Const((table_idx as f64).to_bits() as i64));
+                            func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                            let csm_id = self.string_map.get("class_set_method").copied().unwrap_or(0);
+                            func.instruction(&f64_const(csm_id as f64));
+                            func.instruction(&f64_const(3.0));
+                            func.instruction(&Instruction::I32Const(0xFF00));
+                            func.instruction(&Instruction::Call(rt.mem_call));
+                            func.instruction(&Instruction::Drop);
                         }
                     }
 
@@ -1425,9 +1654,18 @@ impl WasmModuleEmitter {
                     if let Some(parent_name) = &class.extends_name {
                         let parent_name_id = self.string_map.get(parent_name.as_str()).copied().unwrap_or(0);
                         let parent_bits = (STRING_TAG << 48) | (parent_name_id as u64);
-                        func.instruction(&f64_const(f64::from_bits(class_bits)));
-                        func.instruction(&f64_const(f64::from_bits(parent_bits)));
-                        func.instruction(&Instruction::Call(rt.class_set_parent));
+                        func.instruction(&Instruction::I32Const(0xFF00));
+                        func.instruction(&Instruction::I64Const(class_bits as i64));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        func.instruction(&Instruction::I32Const(0xFF08));
+                        func.instruction(&Instruction::I64Const(parent_bits as i64));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        let csp_id = self.string_map.get("class_set_parent").copied().unwrap_or(0);
+                        func.instruction(&f64_const(csp_id as f64));
+                        func.instruction(&f64_const(2.0));
+                        func.instruction(&Instruction::I32Const(0xFF00));
+                        func.instruction(&Instruction::Call(rt.mem_call));
+                        func.instruction(&Instruction::Drop);
                     }
 
                     // Register static fields
@@ -1435,11 +1673,29 @@ impl WasmModuleEmitter {
                         if let Some(init) = &field.init {
                             let field_name_id = self.string_map.get(field.name.as_str()).copied().unwrap_or(0);
                             let field_bits = (STRING_TAG << 48) | (field_name_id as u64);
-                            func.instruction(&f64_const(f64::from_bits(class_bits)));
-                            func.instruction(&f64_const(f64::from_bits(field_bits)));
-                            let mut ctx = FuncEmitCtx::new(self, &init_locals);
+                            // Store class name
+                            func.instruction(&Instruction::I32Const(0xFF00));
+                            func.instruction(&Instruction::I64Const(class_bits as i64));
+                            func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                            // Store field name
+                            func.instruction(&Instruction::I32Const(0xFF08));
+                            func.instruction(&Instruction::I64Const(field_bits as i64));
+                            func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                            // Store value
+                            let mut ctx = FuncEmitCtx::new(self, &init_locals, start_temp_local, start_temp_i32);
                             ctx.emit_expr(&mut func, init);
-                            func.instruction(&Instruction::Call(rt.class_set_static));
+                            // Use temp local to store the value
+                            func.instruction(&Instruction::LocalSet(start_temp_local));
+                            func.instruction(&Instruction::I32Const(0xFF10));
+                            func.instruction(&Instruction::LocalGet(start_temp_local));
+                            // Value is already i64, no conversion needed
+                            func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                            let css_id = self.string_map.get("class_set_static").copied().unwrap_or(0);
+                            func.instruction(&f64_const(css_id as f64));
+                            func.instruction(&f64_const(3.0));
+                            func.instruction(&Instruction::I32Const(0xFF00));
+                            func.instruction(&Instruction::Call(rt.mem_call));
+                            func.instruction(&Instruction::Drop);
                         }
                     }
                 }
@@ -1447,7 +1703,7 @@ impl WasmModuleEmitter {
 
             // Execute init statements from all modules
             for (_, module) in modules {
-                let mut ctx = FuncEmitCtx::new(self, &init_locals);
+                let mut ctx = FuncEmitCtx::new(self, &init_locals, start_temp_local, start_temp_i32);
                 for stmt in &module.init {
                     ctx.emit_stmt(&mut func, stmt, false);
                 }
@@ -1483,15 +1739,13 @@ impl WasmModuleEmitter {
         let mut extra_locals = 0u32;
         collect_locals(&hir_func.body, &mut local_map, &mut extra_locals, param_count);
 
-        let locals = if extra_locals > 0 {
-            vec![(extra_locals, ValType::F64)]
-        } else {
-            vec![]
-        };
+        let temp_local_idx = param_count + extra_locals;
+        let temp_i32_idx = temp_local_idx + 1;
+        let locals = vec![(extra_locals + 1, ValType::I64), (1, ValType::I32)];
         let mut func = Function::new(locals);
 
         let has_ret = hir_func.body.iter().any(|s| has_return(s));
-        let mut ctx = FuncEmitCtx::new(self, &local_map);
+        let mut ctx = FuncEmitCtx::new(self, &local_map, temp_local_idx, temp_i32_idx);
 
         for stmt in &hir_func.body {
             ctx.emit_stmt(&mut func, stmt, has_ret);
@@ -1500,7 +1754,7 @@ impl WasmModuleEmitter {
         // If function should return but doesn't always, add a default return
         if has_ret {
             // Push undefined as default return
-            func.instruction(&f64_const_bits(TAG_UNDEFINED));
+            func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
         }
 
         func.instruction(&Instruction::End);
@@ -1528,14 +1782,12 @@ impl WasmModuleEmitter {
         let mut extra_locals = 0u32;
         collect_locals(body, &mut local_map, &mut extra_locals, param_idx);
 
-        let locals = if extra_locals > 0 {
-            vec![(extra_locals, ValType::F64)]
-        } else {
-            vec![]
-        };
+        let temp_local_idx = param_idx + extra_locals;
+        let temp_i32_idx = temp_local_idx + 1;
+        let locals = vec![(extra_locals + 1, ValType::I64), (1, ValType::I32)];
         let mut func = Function::new(locals);
 
-        let mut ctx = FuncEmitCtx::new(self, &local_map);
+        let mut ctx = FuncEmitCtx::new(self, &local_map, temp_local_idx, temp_i32_idx);
         let has_ret = body.iter().any(|s| has_return(s));
 
         for stmt in body {
@@ -1543,7 +1795,7 @@ impl WasmModuleEmitter {
         }
 
         // Default return undefined
-        func.instruction(&f64_const_bits(TAG_UNDEFINED));
+        func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
         func.instruction(&Instruction::End);
         func
     }
@@ -1561,29 +1813,38 @@ impl WasmModuleEmitter {
         let mut extra_locals = 0u32;
         collect_locals(&ctor.body, &mut local_map, &mut extra_locals, param_count as u32);
 
-        let locals = if extra_locals > 0 {
-            vec![(extra_locals, ValType::F64)]
-        } else {
-            vec![]
-        };
+        let temp_local_idx = param_count as u32 + extra_locals;
+        let temp_i32_idx = temp_local_idx + 1;
+        let locals = vec![(extra_locals + 1, ValType::I64), (1, ValType::I32)];
         let mut func = Function::new(locals);
-        let rt = self.rt.as_ref().unwrap();
+        let _rt = self.rt.as_ref().unwrap();
 
-        // Emit field initializers: class_set_field(this, field_name, value)
+        // Emit field initializers: class_set_field(this, field_name, value) via mem_call
         for field in &class.fields {
             if let Some(init) = &field.init {
+                let mut ctx = FuncEmitCtx::new(self, &local_map, temp_local_idx, temp_i32_idx);
+                ctx.emit_frame_begin(&mut func, 3);
+                // Store this handle to slot 0
+                func.instruction(&Instruction::LocalGet(temp_i32_idx));
                 func.instruction(&Instruction::LocalGet(0)); // this
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                // Store field name to slot 1
                 let field_id = self.string_map.get(field.name.as_str()).copied().unwrap_or(0);
                 let field_bits = (STRING_TAG << 48) | (field_id as u64);
-                func.instruction(&f64_const(f64::from_bits(field_bits)));
-                let mut ctx = FuncEmitCtx::new(self, &local_map);
-                ctx.emit_expr(&mut func, init);
-                func.instruction(&Instruction::Call(rt.class_set_field));
+                func.instruction(&Instruction::LocalGet(temp_i32_idx));
+                func.instruction(&Instruction::I32Const(8));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::I64Const(field_bits as i64));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                // Store value to slot 2
+                ctx.emit_store_arg(&mut func, 2, init);
+                // Call via mem_call
+                ctx.emit_memcall_void(&mut func, "class_set_field", 3);
             }
         }
 
         // Emit constructor body
-        let mut ctx = FuncEmitCtx::new(self, &local_map);
+        let mut ctx = FuncEmitCtx::new(self, &local_map, temp_local_idx, temp_i32_idx);
         ctx.current_class = Some(class.name.clone());
         for stmt in &ctor.body {
             ctx.emit_stmt(&mut func, stmt, false);
@@ -1606,21 +1867,19 @@ impl WasmModuleEmitter {
         let mut extra_locals = 0u32;
         collect_locals(&method.body, &mut local_map, &mut extra_locals, param_count as u32);
 
-        let locals = if extra_locals > 0 {
-            vec![(extra_locals, ValType::F64)]
-        } else {
-            vec![]
-        };
+        let temp_local_idx = param_count as u32 + extra_locals;
+        let temp_i32_idx = temp_local_idx + 1;
+        let locals = vec![(extra_locals + 1, ValType::I64), (1, ValType::I32)];
         let mut func = Function::new(locals);
         let has_ret = method.body.iter().any(|s| has_return(s));
-        let mut ctx = FuncEmitCtx::new(self, &local_map);
+        let mut ctx = FuncEmitCtx::new(self, &local_map, temp_local_idx, temp_i32_idx);
 
         for stmt in &method.body {
             ctx.emit_stmt(&mut func, stmt, true); // methods always return f64
         }
 
         // Always push default return (method type is always -> f64)
-        func.instruction(&f64_const_bits(TAG_UNDEFINED));
+        func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
         func.instruction(&Instruction::End);
         func
     }
@@ -1918,7 +2177,7 @@ impl WasmModuleEmitter {
                 let e = self.emit_js_expr(else_expr, locals);
                 format!("(toJsValue({}) ? {} : {})", c, t, e)
             }
-            Expr::NativeMethodCall { module, method, object, args, .. } => {
+            Expr::NativeMethodCall { module, method, object, args, class_name } => {
                 let normalized = module.strip_prefix("node:").unwrap_or(module);
                 match normalized {
                     "console" => {
@@ -1943,6 +2202,20 @@ impl WasmModuleEmitter {
                                 format!("fromJsValue(JSON.stringify(toJsValue({})))", a)
                             }
                             _ => "u64ToF64(TAG_UNDEFINED)".to_string(),
+                        }
+                    }
+                    "perry/ui" | "perry/system" => {
+                        let bridge_name = map_ui_method(method, class_name.as_deref());
+                        let args_js: Vec<String> = args.iter()
+                            .map(|a| self.emit_js_expr(a, locals))
+                            .collect();
+                        if let Some(obj) = object {
+                            let obj_js = self.emit_js_expr(obj, locals);
+                            let mut all_args = vec![obj_js];
+                            all_args.extend(args_js);
+                            format!("__perryUi.{}({})", bridge_name, all_args.join(", "))
+                        } else {
+                            format!("__perryUi.{}({})", bridge_name, args_js.join(", "))
                         }
                     }
                     _ => {
@@ -2076,6 +2349,77 @@ impl WasmModuleEmitter {
         self.intern_string("POST");
         self.intern_string("GET");
         self.intern_string("");
+
+        // Pre-intern ALL bridge function names for mem_call dispatch
+        let bridge_names = [
+            "console_log", "console_warn", "console_error",
+            "string_concat", "js_add", "string_eq", "string_len",
+            "jsvalue_to_string", "is_truthy", "js_strict_eq",
+            "math_floor", "math_ceil", "math_round", "math_abs", "math_sqrt",
+            "math_pow", "math_random", "math_log", "date_now",
+            "js_typeof", "math_min", "math_max", "parse_int", "parse_float",
+            "js_mod", "is_null_or_undefined",
+            "object_new", "object_set", "object_get", "object_get_dynamic",
+            "object_set_dynamic", "object_delete", "object_delete_dynamic",
+            "object_keys", "object_values", "object_entries",
+            "object_has_property", "object_assign",
+            "array_new", "array_push", "array_pop", "array_get", "array_set",
+            "array_length", "array_slice", "array_splice", "array_shift",
+            "array_unshift", "array_join", "array_index_of", "array_includes",
+            "array_concat", "array_reverse", "array_flat", "array_is_array",
+            "array_from", "array_push_spread",
+            "string_charAt", "string_substring", "string_indexOf", "string_slice",
+            "string_toLowerCase", "string_toUpperCase", "string_trim",
+            "string_includes", "string_startsWith", "string_endsWith",
+            "string_replace", "string_split", "string_fromCharCode",
+            "string_padStart", "string_padEnd", "string_repeat", "string_match",
+            "math_log2", "math_log10",
+            "closure_new", "closure_set_capture",
+            "closure_call_0", "closure_call_1", "closure_call_2", "closure_call_3",
+            "closure_call_spread",
+            "array_map", "array_filter", "array_forEach", "array_reduce",
+            "array_find", "array_find_index", "array_sort", "array_some", "array_every",
+            "class_new", "class_set_method", "class_call_method",
+            "class_get_field", "class_set_field",
+            "class_set_static", "class_get_static", "class_instanceof",
+            "json_parse", "json_stringify",
+            "map_new", "map_set", "map_get", "map_has", "map_delete",
+            "map_size", "map_clear", "map_entries", "map_keys", "map_values",
+            "set_new", "set_new_from_array", "set_add", "set_has", "set_delete",
+            "set_size", "set_clear", "set_values",
+            "date_new_val", "date_get_time", "date_to_iso_string",
+            "date_get_full_year", "date_get_month", "date_get_date",
+            "date_get_hours", "date_get_minutes", "date_get_seconds", "date_get_milliseconds",
+            "error_new", "error_message",
+            "regexp_new", "regexp_test",
+            "number_coerce", "is_nan", "is_finite",
+            "console_log_multi",
+            "class_set_parent",
+            "try_start", "try_end", "throw_value", "has_exception", "get_exception",
+            "url_parse", "url_get_href", "url_get_pathname", "url_get_hostname",
+            "url_get_port", "url_get_search", "url_get_hash", "url_get_origin",
+            "url_get_protocol", "url_get_search_params",
+            "searchparams_get", "searchparams_has", "searchparams_set",
+            "searchparams_append", "searchparams_delete", "searchparams_to_string",
+            "crypto_random_uuid", "crypto_random_bytes",
+            "path_join", "path_dirname", "path_basename", "path_extname",
+            "path_resolve", "path_is_absolute",
+            "os_platform", "process_argv", "process_cwd",
+            "buffer_alloc", "buffer_from_string", "buffer_to_string",
+            "buffer_get", "buffer_set", "buffer_length", "buffer_slice", "buffer_concat",
+            "uint8array_new", "uint8array_from", "uint8array_length",
+            "uint8array_get", "uint8array_set",
+            "set_timeout", "set_interval", "clear_timeout", "clear_interval",
+            "response_status", "response_ok", "response_headers_get", "response_url",
+            "buffer_copy", "buffer_write", "buffer_equals", "buffer_is_buffer",
+            "buffer_byte_length",
+            "crypto_sha256", "crypto_md5",
+            "fetch_url", "fetch_with_options", "response_json", "response_text",
+            "promise_new", "promise_resolve", "promise_then", "await_promise",
+        ];
+        for name in &bridge_names {
+            self.intern_string(name);
+        }
 
         for func in &module.functions {
             self.collect_strings_in_stmts(&func.body);
@@ -2230,8 +2574,15 @@ impl WasmModuleEmitter {
             Expr::Closure { body, .. } => {
                 self.collect_strings_in_stmts(body);
             }
-            Expr::NativeMethodCall { args, .. } => {
+            Expr::NativeMethodCall { module, method, args, class_name, object } => {
                 for a in args { self.collect_strings_in_expr(a); }
+                if let Some(obj) = object { self.collect_strings_in_expr(obj); }
+                // Pre-intern bridge name for UI calls
+                let normalized = module.strip_prefix("node:").unwrap_or(module);
+                if normalized == "perry/ui" || normalized == "perry/system" {
+                    let bridge_name = map_ui_method(method, class_name.as_deref());
+                    self.intern_string(bridge_name);
+                }
             }
             Expr::Array(elems) => {
                 for e in elems { self.collect_strings_in_expr(e); }
@@ -2451,10 +2802,18 @@ struct FuncEmitCtx<'a> {
     block_depth: u32,
     /// Current class name (set when compiling class methods/constructors)
     current_class: Option<String>,
+    /// Index of a temp i64 local
+    temp_local: u32,
+    /// Index of a temp i32 local (for mem_call base address)
+    temp_local_i32: u32,
+    /// Current frame size for emit_store_arg address computation
+    current_frame_size: u32,
+    /// Stack of saved frame sizes for nested frame support
+    frame_stack: Vec<u32>,
 }
 
 impl<'a> FuncEmitCtx<'a> {
-    fn new(emitter: &'a WasmModuleEmitter, local_map: &'a BTreeMap<LocalId, u32>) -> Self {
+    fn new(emitter: &'a WasmModuleEmitter, local_map: &'a BTreeMap<LocalId, u32>, temp_local: u32, temp_local_i32: u32) -> Self {
         Self {
             emitter,
             local_map,
@@ -2462,6 +2821,10 @@ impl<'a> FuncEmitCtx<'a> {
             loop_depth: Vec::new(),
             block_depth: 0,
             current_class: None,
+            temp_local,
+            temp_local_i32,
+            current_frame_size: 0,
+            frame_stack: Vec::new(),
         }
     }
 
@@ -2469,253 +2832,423 @@ impl<'a> FuncEmitCtx<'a> {
         self.emitter.rt.as_ref().unwrap()
     }
 
+    // emit_nan_safe_const removed - all values are i64 now, NaN canonicalization is not an issue.
+
+    /// Advance the sp and record the frame size for emit_store_arg.
+    fn emit_frame_begin(&mut self, func: &mut Function, frame_size: u32) {
+        let sp = self.emitter.nan_temp_global;
+        self.frame_stack.push(self.current_frame_size);
+        self.current_frame_size = frame_size;
+        func.instruction(&Instruction::GlobalGet(sp));
+        func.instruction(&Instruction::I32Const((frame_size * 8) as i32));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::GlobalSet(sp));
+    }
+
+    /// Compute memory address for a slot in the current frame.
+    /// Address = sp - (current_frame_size - slot) * 8
+    /// This works correctly across nested calls because sp was advanced by emit_frame_begin.
+    fn emit_slot_addr(&self, func: &mut Function, slot: u32) {
+        let sp = self.emitter.nan_temp_global;
+        let offset_from_sp = (self.current_frame_size - slot) * 8;
+        func.instruction(&Instruction::GlobalGet(sp));
+        func.instruction(&Instruction::I32Const(offset_from_sp as i32));
+        func.instruction(&Instruction::I32Sub);
+    }
+
+    /// Store an expression's result to memory at the current frame's slot.
+    fn emit_store_arg(&mut self, func: &mut Function, slot: u32, expr: &Expr) {
+        match expr {
+            Expr::String(s) => {
+                let string_id = self.emitter.string_map.get(s.as_str()).copied().unwrap_or(0);
+                let bits = (STRING_TAG << 48) | (string_id as u64);
+                self.emit_slot_addr(func, slot);
+                func.instruction(&Instruction::I64Const(bits as i64));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+            }
+            _ => {
+                self.emit_slot_addr(func, slot);
+                self.emit_expr(func, expr);
+                // Values are already i64, no conversion needed
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+            }
+        }
+    }
+
+    fn emit_store_const(&self, func: &mut Function, slot: u32, val: f64) {
+        let bits = val.to_bits();
+        self.emit_slot_addr(func, slot);
+        func.instruction(&Instruction::I64Const(bits as i64));
+        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+    }
+
+    /// Emit a bridge function call via WASM memory (Firefox NaN-safe, reentrant-safe).
+    /// Call pattern: emit_store_arg(0, ..), emit_store_arg(1, ..), ..., emit_memcall(name, N).
+    /// Handles stack pointer save/advance/restore automatically.
+    /// Call a bridge function. Frame must already be set up via emit_frame_begin + emit_store_arg.
+    /// Returns f64 result, then restores sp.
+    fn emit_memcall(&mut self, func: &mut Function, bridge_fn_name: &str, arg_count: u32) {
+        let sp = self.emitter.nan_temp_global;
+        let func_name_id = self.emitter.string_map.get(bridge_fn_name).copied().unwrap_or(0);
+        let frame_bytes = (self.current_frame_size * 8) as i32;
+        // base_addr = sp - frame_size * 8
+        func.instruction(&f64_const(func_name_id as f64));
+        func.instruction(&f64_const(arg_count as f64));
+        func.instruction(&Instruction::GlobalGet(sp));
+        func.instruction(&Instruction::I32Const(frame_bytes));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::Call(self.rt().mem_call));
+        func.instruction(&Instruction::Drop);
+        // Read result from base_addr via i64, then convert to f64.
+        // NOTE: F64ReinterpretI64 canonicalizes NaN in Firefox, so NaN-boxed
+        // bridge results lose their payload here. This is acceptable for values
+        // that go to locals/arithmetic. For values that go to emit_store_arg,
+        // the store will re-read from memory via the slot address.
+        func.instruction(&Instruction::GlobalGet(sp));
+        func.instruction(&Instruction::I32Const(frame_bytes));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+        // Result is already i64, no conversion needed
+        // Restore sp and frame size
+        func.instruction(&Instruction::GlobalGet(sp));
+        func.instruction(&Instruction::I32Const(frame_bytes));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::GlobalSet(sp));
+        self.current_frame_size = self.frame_stack.pop().unwrap_or(0);
+    }
+
+    fn emit_memcall_void(&mut self, func: &mut Function, bridge_fn_name: &str, arg_count: u32) {
+        let sp = self.emitter.nan_temp_global;
+        let func_name_id = self.emitter.string_map.get(bridge_fn_name).copied().unwrap_or(0);
+        let frame_bytes = (self.current_frame_size * 8) as i32;
+        func.instruction(&f64_const(func_name_id as f64));
+        func.instruction(&f64_const(arg_count as f64));
+        func.instruction(&Instruction::GlobalGet(sp));
+        func.instruction(&Instruction::I32Const(frame_bytes));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::Call(self.rt().mem_call));
+        func.instruction(&Instruction::Drop);
+        // Restore sp and frame size
+        func.instruction(&Instruction::GlobalGet(sp));
+        func.instruction(&Instruction::I32Const(frame_bytes));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::GlobalSet(sp));
+        self.current_frame_size = self.frame_stack.pop().unwrap_or(0);
+    }
+
+    fn emit_memcall_i32(&mut self, func: &mut Function, bridge_fn_name: &str, arg_count: u32) {
+        let sp = self.emitter.nan_temp_global;
+        let func_name_id = self.emitter.string_map.get(bridge_fn_name).copied().unwrap_or(0);
+        let frame_bytes = (self.current_frame_size * 8) as i32;
+        func.instruction(&f64_const(func_name_id as f64));
+        func.instruction(&f64_const(arg_count as f64));
+        func.instruction(&Instruction::GlobalGet(sp));
+        func.instruction(&Instruction::I32Const(frame_bytes));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::Call(self.rt().mem_call_i32));
+        // Restore sp and frame size
+        func.instruction(&Instruction::GlobalGet(sp));
+        func.instruction(&Instruction::I32Const(frame_bytes));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::GlobalSet(sp));
+        self.current_frame_size = self.frame_stack.pop().unwrap_or(0);
+    }
+
+
+
+
+
     /// Try to emit a method call on an object expression.
     /// Returns true if handled, false if not recognized.
+    /// All bridge calls go through WASM memory to avoid Firefox NaN canonicalization.
     fn emit_method_call(&mut self, func: &mut Function, object: &Expr, method: &str, args: &[Expr]) -> bool {
         match method {
             // String methods
             "charAt" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().string_char_at));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall(func, "string_charAt", 2);
                 true
             }
             "substring" if args.len() >= 2 => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                self.emit_expr(func, &args[1]);
-                func.instruction(&Instruction::Call(self.rt().string_substring));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_store_arg(func, 2, &args[1]);
+                self.emit_memcall(func, "string_substring", 3);
                 true
             }
             "indexOf" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().string_index_of));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall(func, "string_indexOf", 2);
                 true
             }
             "slice" if args.len() >= 2 => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                self.emit_expr(func, &args[1]);
-                func.instruction(&Instruction::Call(self.rt().string_slice));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_store_arg(func, 2, &args[1]);
+                self.emit_memcall(func, "string_slice", 3);
                 true
             }
             "toLowerCase" if args.is_empty() => {
-                self.emit_expr(func, object);
-                func.instruction(&Instruction::Call(self.rt().string_to_lower_case));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, object);
+                self.emit_memcall(func, "string_toLowerCase", 1);
                 true
             }
             "toUpperCase" if args.is_empty() => {
-                self.emit_expr(func, object);
-                func.instruction(&Instruction::Call(self.rt().string_to_upper_case));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, object);
+                self.emit_memcall(func, "string_toUpperCase", 1);
                 true
             }
             "trim" if args.is_empty() => {
-                self.emit_expr(func, object);
-                func.instruction(&Instruction::Call(self.rt().string_trim));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, object);
+                self.emit_memcall(func, "string_trim", 1);
                 true
             }
             "includes" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().string_includes));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall_i32(func, "string_includes", 2);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
                 true
             }
             "startsWith" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().string_starts_with));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall_i32(func, "string_startsWith", 2);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
                 true
             }
             "endsWith" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().string_ends_with));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall_i32(func, "string_endsWith", 2);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
                 true
             }
             "replace" if args.len() >= 2 => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                self.emit_expr(func, &args[1]);
-                func.instruction(&Instruction::Call(self.rt().string_replace));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_store_arg(func, 2, &args[1]);
+                self.emit_memcall(func, "string_replace", 3);
                 true
             }
             "split" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().string_split));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall(func, "string_split", 2);
                 true
             }
             "repeat" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().string_repeat));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall(func, "string_repeat", 2);
                 true
             }
             "padStart" if args.len() >= 2 => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                self.emit_expr(func, &args[1]);
-                func.instruction(&Instruction::Call(self.rt().string_pad_start));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_store_arg(func, 2, &args[1]);
+                self.emit_memcall(func, "string_padStart", 3);
                 true
             }
             "padEnd" if args.len() >= 2 => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                self.emit_expr(func, &args[1]);
-                func.instruction(&Instruction::Call(self.rt().string_pad_end));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_store_arg(func, 2, &args[1]);
+                self.emit_memcall(func, "string_padEnd", 3);
                 true
             }
             // Array methods
             "push" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().array_push));
-                func.instruction(&Instruction::Call(self.rt().array_length));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall(func, "array_push", 2);
+                // result is the handle; now get length
+                self.emit_frame_begin(func, 1);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "array_length", 1);
                 true
             }
             "pop" => {
-                self.emit_expr(func, object);
-                func.instruction(&Instruction::Call(self.rt().array_pop));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, object);
+                self.emit_memcall(func, "array_pop", 1);
                 true
             }
             "shift" => {
-                self.emit_expr(func, object);
-                func.instruction(&Instruction::Call(self.rt().array_shift));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, object);
+                self.emit_memcall(func, "array_shift", 1);
                 true
             }
             "join" => {
-                self.emit_expr(func, object);
+                self.emit_store_arg(func, 0, object);
                 if !args.is_empty() {
-                    self.emit_expr(func, &args[0]);
+                    self.emit_store_arg(func, 1, &args[0]);
                 } else {
                     let comma_id = self.emitter.string_map.get(",").copied().unwrap_or(0);
                     let bits = (STRING_TAG << 48) | (comma_id as u64);
-                    func.instruction(&f64_const(f64::from_bits(bits)));
+                    self.emit_frame_begin(func, 2);
+                    self.emit_store_const(func, 1, f64::from_bits(bits));
                 }
-                func.instruction(&Instruction::Call(self.rt().array_join));
+                self.emit_memcall(func, "array_join", 2);
                 true
             }
             "map" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().array_map));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall(func, "array_map", 2);
                 true
             }
             "filter" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().array_filter));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall(func, "array_filter", 2);
                 true
             }
             "forEach" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().array_for_each));
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall_void(func, "array_forEach", 2);
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 true
             }
             "find" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().array_find));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall(func, "array_find", 2);
                 true
             }
             "findIndex" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().array_find_index));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall(func, "array_find_index", 2);
                 true
             }
             "reduce" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
                 if args.len() >= 2 {
-                    self.emit_expr(func, &args[1]);
+                    self.emit_store_arg(func, 2, &args[1]);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    self.emit_slot_addr(func, 2);
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
                 }
-                func.instruction(&Instruction::Call(self.rt().array_reduce));
+                self.emit_memcall(func, "array_reduce", 3);
                 true
             }
             "sort" => {
-                self.emit_expr(func, object);
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
                 if !args.is_empty() {
-                    self.emit_expr(func, &args[0]);
+                    self.emit_store_arg(func, 1, &args[0]);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    self.emit_slot_addr(func, 1);
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
                 }
-                func.instruction(&Instruction::Call(self.rt().array_sort));
+                self.emit_memcall(func, "array_sort", 2);
                 true
             }
             "reverse" => {
-                self.emit_expr(func, object);
-                func.instruction(&Instruction::Call(self.rt().array_reverse));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, object);
+                self.emit_memcall(func, "array_reverse", 1);
                 true
             }
             "concat" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().array_concat));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall(func, "array_concat", 2);
                 true
             }
             "flat" => {
-                self.emit_expr(func, object);
-                func.instruction(&Instruction::Call(self.rt().array_flat));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, object);
+                self.emit_memcall(func, "array_flat", 1);
                 true
             }
             "toString" => {
-                self.emit_expr(func, object);
-                func.instruction(&Instruction::Call(self.rt().jsvalue_to_string));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, object);
+                self.emit_memcall(func, "jsvalue_to_string", 1);
                 true
             }
             // Array some/every (return i32 → convert to boolean)
             "some" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().array_some));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall_i32(func, "array_some", 2);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
                 true
             }
             "every" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().array_every));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall_i32(func, "array_every", 2);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
                 true
             }
             // RegExp test
             "test" if !args.is_empty() => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, &args[0]);
-                func.instruction(&Instruction::Call(self.rt().regexp_test));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, &args[0]);
+                self.emit_memcall_i32(func, "regexp_test", 2);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
                 true
             }
@@ -2726,11 +3259,14 @@ impl<'a> FuncEmitCtx<'a> {
     /// Emit a binary bitwise operation with proper i32 truncation
     fn emit_bitwise_binary(&mut self, func: &mut Function, left: &Expr, right: &Expr, op: Instruction<'static>) {
         self.emit_expr(func, left);
+        func.instruction(&Instruction::F64ReinterpretI64);
         func.instruction(&Instruction::I32TruncF64S);
         self.emit_expr(func, right);
+        func.instruction(&Instruction::F64ReinterpretI64);
         func.instruction(&Instruction::I32TruncF64S);
         func.instruction(&op);
         func.instruction(&Instruction::F64ConvertI32S);
+        func.instruction(&Instruction::I64ReinterpretF64);
     }
 
     fn emit_stmt(&mut self, func: &mut Function, stmt: &Stmt, in_returning_func: bool) {
@@ -2740,7 +3276,7 @@ impl<'a> FuncEmitCtx<'a> {
                     self.emit_expr(func, init_expr);
                 } else {
                     // Default: undefined
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
                 if let Some(&idx) = self.local_map.get(id) {
                     func.instruction(&Instruction::LocalSet(idx));
@@ -2760,14 +3296,15 @@ impl<'a> FuncEmitCtx<'a> {
                 if let Some(e) = expr {
                     self.emit_expr(func, e);
                 } else if in_returning_func {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
                 func.instruction(&Instruction::Return);
             }
             Stmt::If { condition, then_branch, else_branch } => {
-                self.emit_expr(func, condition);
                 // Convert to i32 boolean via is_truthy
-                func.instruction(&Instruction::Call(self.rt().is_truthy));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, condition);
+                self.emit_memcall_i32(func, "is_truthy", 1);
                 func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
                 self.block_depth += 1;
                 for s in then_branch {
@@ -2803,8 +3340,9 @@ impl<'a> FuncEmitCtx<'a> {
                 let continue_depth = self.block_depth;
                 self.loop_depth.push(continue_depth);
 
-                self.emit_expr(func, condition);
-                func.instruction(&Instruction::Call(self.rt().is_truthy));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, condition);
+                self.emit_memcall_i32(func, "is_truthy", 1);
                 func.instruction(&Instruction::I32Eqz);
                 func.instruction(&Instruction::BrIf(1)); // break to outer block
 
@@ -2845,8 +3383,9 @@ impl<'a> FuncEmitCtx<'a> {
                 self.loop_depth.push(self.block_depth);
 
                 if let Some(cond) = condition {
-                    self.emit_expr(func, cond);
-                    func.instruction(&Instruction::Call(self.rt().is_truthy));
+                    self.emit_frame_begin(func, 1);
+                    self.emit_store_arg(func, 0, cond);
+                    self.emit_memcall_i32(func, "is_truthy", 1);
                     func.instruction(&Instruction::I32Eqz);
                     func.instruction(&Instruction::BrIf(1));
                 }
@@ -2882,10 +3421,11 @@ impl<'a> FuncEmitCtx<'a> {
             }
             Stmt::Throw(expr) => {
                 // Set exception in bridge and return
-                self.emit_expr(func, expr);
-                func.instruction(&Instruction::Call(self.rt().throw_value));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, expr);
+                self.emit_memcall_void(func, "throw_value", 1);
                 if in_returning_func {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                     func.instruction(&Instruction::Return);
                 }
             }
@@ -2894,23 +3434,27 @@ impl<'a> FuncEmitCtx<'a> {
                 // try_start(); <try body>; try_end();
                 // if has_exception(): <bind catch param>; <catch body>
                 // <finally body>
-                func.instruction(&Instruction::Call(self.rt().try_start));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall_void(func, "try_start", 0);
 
                 for s in body {
                     self.emit_stmt(func, s, in_returning_func);
                 }
 
-                func.instruction(&Instruction::Call(self.rt().try_end));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall_void(func, "try_end", 0);
 
                 // Check for exception and execute catch block
                 if let Some(catch_clause) = catch {
-                    func.instruction(&Instruction::Call(self.rt().has_exception));
+                    self.emit_frame_begin(func, 0);
+                    self.emit_memcall_i32(func, "has_exception", 0);
                     func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
                     self.block_depth += 1;
 
                     // Bind catch parameter
                     if let Some((param_id, _)) = &catch_clause.param {
-                        func.instruction(&Instruction::Call(self.rt().get_exception));
+                        self.emit_frame_begin(func, 0);
+                        self.emit_memcall(func, "get_exception", 0);
                         if let Some(&local_idx) = self.local_map.get(param_id) {
                             func.instruction(&Instruction::LocalSet(local_idx));
                         } else {
@@ -2918,7 +3462,8 @@ impl<'a> FuncEmitCtx<'a> {
                         }
                     } else {
                         // No param, just clear the exception
-                        func.instruction(&Instruction::Call(self.rt().get_exception));
+                        self.emit_frame_begin(func, 0);
+                        self.emit_memcall(func, "get_exception", 0);
                         func.instruction(&Instruction::Drop);
                     }
 
@@ -2956,9 +3501,10 @@ impl<'a> FuncEmitCtx<'a> {
                 for case in cases {
                     if let Some(test) = &case.test {
                         // case <test>:
-                        self.emit_expr(func, discriminant);
-                        self.emit_expr(func, test);
-                        func.instruction(&Instruction::Call(self.rt().js_strict_eq));
+                        self.emit_frame_begin(func, 2);
+                        self.emit_store_arg(func, 0, discriminant);
+                        self.emit_store_arg(func, 1, test);
+                        self.emit_memcall_i32(func, "js_strict_eq", 2);
                         func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
                         self.block_depth += 1;
                         for s in &case.body {
@@ -2988,28 +3534,30 @@ impl<'a> FuncEmitCtx<'a> {
             // --- Literals ---
             Expr::Number(n) => {
                 func.instruction(&f64_const(*n));
+                func.instruction(&Instruction::I64ReinterpretF64);
             }
             Expr::Integer(i) => {
                 func.instruction(&f64_const(*i as f64));
+                func.instruction(&Instruction::I64ReinterpretF64);
             }
             Expr::Bool(true) => {
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
             }
             Expr::Bool(false) => {
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
             }
             Expr::Undefined => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::Null => {
-                func.instruction(&f64_const_bits(TAG_NULL));
+                func.instruction(&Instruction::I64Const(TAG_NULL as i64));
             }
             Expr::String(s) => {
                 let string_id = self.emitter.string_map.get(s.as_str())
                     .copied().unwrap_or(0);
-                // NaN-box: (STRING_TAG << 48) | string_id
+                // All values are i64 now. i64.const preserves all bits.
                 let bits = (STRING_TAG << 48) | (string_id as u64);
-                func.instruction(&f64_const(f64::from_bits(bits)));
+                func.instruction(&Instruction::I64Const(bits as i64));
             }
 
             // --- Variables ---
@@ -3018,7 +3566,7 @@ impl<'a> FuncEmitCtx<'a> {
                     func.instruction(&Instruction::LocalGet(idx));
                 } else {
                     // Unknown local — push undefined
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
             }
             Expr::LocalSet(id, val) => {
@@ -3032,7 +3580,7 @@ impl<'a> FuncEmitCtx<'a> {
                 if let Some(&idx) = self.emitter.global_map.get(id) {
                     func.instruction(&Instruction::GlobalGet(idx));
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
             }
             Expr::GlobalSet(id, val) => {
@@ -3050,28 +3598,33 @@ impl<'a> FuncEmitCtx<'a> {
                 if let Some(&idx) = self.local_map.get(id) {
                     if *prefix {
                         // ++x: increment then return new value
+                        // local is i64, convert to f64, add 1, convert back
                         func.instruction(&Instruction::LocalGet(idx));
+                        func.instruction(&Instruction::F64ReinterpretI64);
                         func.instruction(&f64_const(1.0));
                         match op {
                             UpdateOp::Increment => { func.instruction(&Instruction::F64Add); }
                             UpdateOp::Decrement => { func.instruction(&Instruction::F64Sub); }
                         };
+                        func.instruction(&Instruction::I64ReinterpretF64);
                         func.instruction(&Instruction::LocalTee(idx));
                     } else {
                         // x++: return old value, then increment
                         func.instruction(&Instruction::LocalGet(idx));
                         // Compute new value
                         func.instruction(&Instruction::LocalGet(idx));
+                        func.instruction(&Instruction::F64ReinterpretI64);
                         func.instruction(&f64_const(1.0));
                         match op {
                             UpdateOp::Increment => { func.instruction(&Instruction::F64Add); }
                             UpdateOp::Decrement => { func.instruction(&Instruction::F64Sub); }
                         };
+                        func.instruction(&Instruction::I64ReinterpretF64);
                         func.instruction(&Instruction::LocalSet(idx));
-                        // Old value is still on stack
+                        // Old value (i64) is still on stack
                     }
                 } else {
-                    func.instruction(&f64_const(f64::NAN));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
             }
 
@@ -3080,9 +3633,10 @@ impl<'a> FuncEmitCtx<'a> {
                 match op {
                     BinaryOp::Add => {
                         // Use js_add for dynamic dispatch (handles string+number etc.)
-                        self.emit_expr(func, left);
-                        self.emit_expr(func, right);
-                        func.instruction(&Instruction::Call(self.rt().js_add));
+                        self.emit_frame_begin(func, 2);
+                        self.emit_store_arg(func, 0, left);
+                        self.emit_store_arg(func, 1, right);
+                        self.emit_memcall(func, "js_add", 2);
                     }
                     // Bitwise ops need i32 truncation before the operation
                     BinaryOp::BitAnd => { self.emit_bitwise_binary(func, left, right, Instruction::I32And); }
@@ -3092,21 +3646,42 @@ impl<'a> FuncEmitCtx<'a> {
                     BinaryOp::Shr => { self.emit_bitwise_binary(func, left, right, Instruction::I32ShrS); }
                     BinaryOp::UShr => { self.emit_bitwise_binary(func, left, right, Instruction::I32ShrU); }
                     _ => {
-                        // Pure numeric operations
+                        // Pure numeric operations - convert i64 to f64, operate, convert back
                         self.emit_expr(func, left);
+                        func.instruction(&Instruction::F64ReinterpretI64);
                         self.emit_expr(func, right);
+                        func.instruction(&Instruction::F64ReinterpretI64);
                         match op {
                             BinaryOp::Sub => { func.instruction(&Instruction::F64Sub); }
                             BinaryOp::Mul => { func.instruction(&Instruction::F64Mul); }
                             BinaryOp::Div => { func.instruction(&Instruction::F64Div); }
                             BinaryOp::Mod => {
-                                func.instruction(&Instruction::Call(self.rt().js_mod));
+                                self.emit_frame_begin(func, 2);
+                                func.instruction(&Instruction::LocalSet(self.temp_local));
+                                self.emit_slot_addr(func, 1);
+                                func.instruction(&Instruction::LocalGet(self.temp_local));
+                                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                func.instruction(&Instruction::LocalSet(self.temp_local));
+                                self.emit_slot_addr(func, 0);
+                                func.instruction(&Instruction::LocalGet(self.temp_local));
+                                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                self.emit_memcall(func, "js_mod", 2);
                             }
                             BinaryOp::Pow => {
-                                func.instruction(&Instruction::Call(self.rt().math_pow));
+                                self.emit_frame_begin(func, 2);
+                                func.instruction(&Instruction::LocalSet(self.temp_local));
+                                self.emit_slot_addr(func, 1);
+                                func.instruction(&Instruction::LocalGet(self.temp_local));
+                                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                func.instruction(&Instruction::LocalSet(self.temp_local));
+                                self.emit_slot_addr(func, 0);
+                                func.instruction(&Instruction::LocalGet(self.temp_local));
+                                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                self.emit_memcall(func, "math_pow", 2);
                             }
                             _ => { func.instruction(&Instruction::F64Add); }
                         };
+                        func.instruction(&Instruction::I64ReinterpretF64);
                     }
                 }
             }
@@ -3118,19 +3693,34 @@ impl<'a> FuncEmitCtx<'a> {
                 // For strict equality on mixed types, use JS bridge
                 match op {
                     CompareOp::Eq | CompareOp::Ne => {
-                        func.instruction(&Instruction::Call(self.rt().js_strict_eq));
+                        // Values are i64 on stack, store them to memory via emit_store_arg pattern
+                        self.emit_frame_begin(func, 2);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 1);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_memcall_i32(func, "js_strict_eq", 2);
                         if matches!(op, CompareOp::Ne) {
                             func.instruction(&Instruction::I32Eqz);
                         }
                         // Convert i32 result to NaN-boxed boolean
-                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                        func.instruction(&f64_const_bits(TAG_TRUE));
+                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                        func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                         func.instruction(&Instruction::Else);
-                        func.instruction(&f64_const_bits(TAG_FALSE));
+                        func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                         func.instruction(&Instruction::End);
                     }
                     _ => {
-                        // Numeric comparisons
+                        // Numeric comparisons - convert i64 to f64 first
+                        // Stack: [left_i64, right_i64]
+                        func.instruction(&Instruction::LocalSet(self.temp_local)); // save right_i64
+                        func.instruction(&Instruction::F64ReinterpretI64); // left -> f64
+                        func.instruction(&Instruction::LocalGet(self.temp_local)); // push right_i64
+                        func.instruction(&Instruction::F64ReinterpretI64); // right -> f64
                         match op {
                             CompareOp::Lt => func.instruction(&Instruction::F64Lt),
                             CompareOp::Le => func.instruction(&Instruction::F64Le),
@@ -3139,10 +3729,10 @@ impl<'a> FuncEmitCtx<'a> {
                             _ => unreachable!(),
                         };
                         // Convert i32 to NaN-boxed boolean
-                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                        func.instruction(&f64_const_bits(TAG_TRUE));
+                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                        func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                         func.instruction(&Instruction::Else);
-                        func.instruction(&f64_const_bits(TAG_FALSE));
+                        func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                         func.instruction(&Instruction::End);
                     }
                 }
@@ -3153,18 +3743,20 @@ impl<'a> FuncEmitCtx<'a> {
                 match op {
                     LogicalOp::And => {
                         // Short-circuit: if left is falsy, return left; else return right
-                        self.emit_expr(func, left);
-                        func.instruction(&Instruction::Call(self.rt().is_truthy));
-                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
+                        self.emit_frame_begin(func, 1);
+                        self.emit_store_arg(func, 0, left);
+                        self.emit_memcall_i32(func, "is_truthy", 1);
+                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
                         self.emit_expr(func, right);
                         func.instruction(&Instruction::Else);
                         self.emit_expr(func, left);
                         func.instruction(&Instruction::End);
                     }
                     LogicalOp::Or => {
-                        self.emit_expr(func, left);
-                        func.instruction(&Instruction::Call(self.rt().is_truthy));
-                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
+                        self.emit_frame_begin(func, 1);
+                        self.emit_store_arg(func, 0, left);
+                        self.emit_memcall_i32(func, "is_truthy", 1);
+                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
                         self.emit_expr(func, left);
                         func.instruction(&Instruction::Else);
                         self.emit_expr(func, right);
@@ -3172,9 +3764,10 @@ impl<'a> FuncEmitCtx<'a> {
                     }
                     LogicalOp::Coalesce => {
                         // a ?? b: if a is null/undefined, return b; otherwise return a
-                        self.emit_expr(func, left);
-                        func.instruction(&Instruction::Call(self.rt().is_null_or_undefined));
-                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
+                        self.emit_frame_begin(func, 1);
+                        self.emit_store_arg(func, 0, left);
+                        self.emit_memcall_i32(func, "is_null_or_undefined", 1);
+                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
                         self.emit_expr(func, right);
                         func.instruction(&Instruction::Else);
                         self.emit_expr(func, left);
@@ -3187,23 +3780,34 @@ impl<'a> FuncEmitCtx<'a> {
             Expr::Unary { op, operand } => {
                 self.emit_expr(func, operand);
                 match op {
-                    UnaryOp::Neg => { func.instruction(&Instruction::F64Neg); }
+                    UnaryOp::Neg => {
+                        func.instruction(&Instruction::F64ReinterpretI64);
+                        func.instruction(&Instruction::F64Neg);
+                        func.instruction(&Instruction::I64ReinterpretF64);
+                    }
                     UnaryOp::Pos => {} // no-op for numbers
                     UnaryOp::Not => {
-                        func.instruction(&Instruction::Call(self.rt().is_truthy));
+                        self.emit_frame_begin(func, 1);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_memcall_i32(func, "is_truthy", 1);
                         func.instruction(&Instruction::I32Eqz);
-                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                        func.instruction(&f64_const_bits(TAG_TRUE));
+                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                        func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                         func.instruction(&Instruction::Else);
-                        func.instruction(&f64_const_bits(TAG_FALSE));
+                        func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                         func.instruction(&Instruction::End);
                     }
                     UnaryOp::BitNot => {
-                        // ~x: convert to i32, bitwise not, convert back
+                        // ~x: convert i64 to f64, truncate to i32, bitwise not, convert back to i64
+                        func.instruction(&Instruction::F64ReinterpretI64);
                         func.instruction(&Instruction::I32TruncF64S);
                         func.instruction(&Instruction::I32Const(-1));
                         func.instruction(&Instruction::I32Xor);
                         func.instruction(&Instruction::F64ConvertI32S);
+                        func.instruction(&Instruction::I64ReinterpretF64);
                     }
                 };
             }
@@ -3217,22 +3821,25 @@ impl<'a> FuncEmitCtx<'a> {
                         match property.as_str() {
                             "log" => {
                                 for arg in args {
-                                    self.emit_expr(func, arg);
-                                    func.instruction(&Instruction::Call(self.rt().console_log));
+                                    self.emit_frame_begin(func, 1);
+                                    self.emit_store_arg(func, 0, arg);
+                                    self.emit_memcall_void(func, "console_log", 1);
                                 }
                                 return;
                             }
                             "warn" => {
                                 for arg in args {
-                                    self.emit_expr(func, arg);
-                                    func.instruction(&Instruction::Call(self.rt().console_warn));
+                                    self.emit_frame_begin(func, 1);
+                                    self.emit_store_arg(func, 0, arg);
+                                    self.emit_memcall_void(func, "console_warn", 1);
                                 }
                                 return;
                             }
                             "error" => {
                                 for arg in args {
-                                    self.emit_expr(func, arg);
-                                    func.instruction(&Instruction::Call(self.rt().console_error));
+                                    self.emit_frame_begin(func, 1);
+                                    self.emit_store_arg(func, 0, arg);
+                                    self.emit_memcall_void(func, "console_error", 1);
                                 }
                                 return;
                             }
@@ -3244,22 +3851,16 @@ impl<'a> FuncEmitCtx<'a> {
                         return;
                     }
 
-                    // Fallback: try class method dispatch via bridge
+                    // Fallback: class/UI method dispatch via mem_call with stack-based buffer.
                     {
-                        let array_new = self.rt().array_new;
-                        let array_push = self.rt().array_push;
-                        let class_call_method = self.rt().class_call_method;
-                        self.emit_expr(func, object);
-                        let method_id = self.emitter.string_map.get(property.as_str()).copied().unwrap_or(0);
-                        let method_bits = (STRING_TAG << 48) | (method_id as u64);
-                        func.instruction(&f64_const(f64::from_bits(method_bits)));
-                        // Build args array
-                        func.instruction(&Instruction::Call(array_new));
-                        for arg in args {
-                            self.emit_expr(func, arg);
-                            func.instruction(&Instruction::Call(array_push));
+                        let method_name = property.as_str();
+                        // Slot 0 = object, slots 1..N = args
+                        self.emit_frame_begin(func, (args.len() + 1) as u32);
+                        self.emit_store_arg(func, 0, object);
+                        for (i, arg) in args.iter().enumerate() {
+                            self.emit_store_arg(func, (i + 1) as u32, arg);
                         }
-                        func.instruction(&Instruction::Call(class_call_method));
+                        self.emit_memcall(func, method_name, (args.len() + 1) as u32);
                         return;
                     }
                 }
@@ -3278,7 +3879,7 @@ impl<'a> FuncEmitCtx<'a> {
                             for _ in args {
                                 func.instruction(&Instruction::Drop);
                             }
-                            func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                            func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                         }
                     }
                     Expr::ExternFuncRef { name, .. } => {
@@ -3289,7 +3890,7 @@ impl<'a> FuncEmitCtx<'a> {
                             for _ in args {
                                 func.instruction(&Instruction::Drop);
                             }
-                            func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                            func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                         }
                     }
                     _ => {
@@ -3300,21 +3901,19 @@ impl<'a> FuncEmitCtx<'a> {
                         for _ in args {
                             func.instruction(&Instruction::Drop);
                         }
-                        // Now emit: callee, args..., closure_call_N
-                        self.emit_expr(func, callee);
-                        for arg in args {
-                            self.emit_expr(func, arg);
+                        // Now emit: callee, args... via mem_call for Firefox NaN safety
+                        self.emit_frame_begin(func, (args.len() + 1) as u32);
+                        self.emit_store_arg(func, 0, callee);
+                        for (i, arg) in args.iter().enumerate() {
+                            self.emit_store_arg(func, (i + 1) as u32, arg);
                         }
                         match args.len() {
-                            0 => { func.instruction(&Instruction::Call(self.rt().closure_call_0)); }
-                            1 => { func.instruction(&Instruction::Call(self.rt().closure_call_1)); }
-                            2 => { func.instruction(&Instruction::Call(self.rt().closure_call_2)); }
-                            3 => { func.instruction(&Instruction::Call(self.rt().closure_call_3)); }
+                            0 => { self.emit_memcall(func, "closure_call_0", 1); }
+                            1 => { self.emit_memcall(func, "closure_call_1", 2); }
+                            2 => { self.emit_memcall(func, "closure_call_2", 3); }
+                            3 => { self.emit_memcall(func, "closure_call_3", 4); }
                             _ => {
-                                // Too many args for direct call, use spread
-                                func.instruction(&Instruction::Drop); // drop callee
-                                for _ in args { func.instruction(&Instruction::Drop); }
-                                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                             }
                         }
                     }
@@ -3322,27 +3921,30 @@ impl<'a> FuncEmitCtx<'a> {
             }
 
             // --- Native method calls (console.log, etc.) ---
-            Expr::NativeMethodCall { module, method, object, args, .. } => {
+            Expr::NativeMethodCall { module, method, object, args, class_name } => {
                 let normalized = module.strip_prefix("node:").unwrap_or(module);
                 match normalized {
                     "console" => {
                         match method.as_str() {
                             "log" => {
                                 for arg in args {
-                                    self.emit_expr(func, arg);
-                                    func.instruction(&Instruction::Call(self.rt().console_log));
+                                    self.emit_frame_begin(func, 1);
+                                    self.emit_store_arg(func, 0, arg);
+                                    self.emit_memcall_void(func, "console_log", 1);
                                 }
                             }
                             "warn" => {
                                 for arg in args {
-                                    self.emit_expr(func, arg);
-                                    func.instruction(&Instruction::Call(self.rt().console_warn));
+                                    self.emit_frame_begin(func, 1);
+                                    self.emit_store_arg(func, 0, arg);
+                                    self.emit_memcall_void(func, "console_warn", 1);
                                 }
                             }
                             "error" => {
                                 for arg in args {
-                                    self.emit_expr(func, arg);
-                                    func.instruction(&Instruction::Call(self.rt().console_error));
+                                    self.emit_frame_begin(func, 1);
+                                    self.emit_store_arg(func, 0, arg);
+                                    self.emit_memcall_void(func, "console_error", 1);
                                 }
                             }
                             _ => {}
@@ -3352,18 +3954,20 @@ impl<'a> FuncEmitCtx<'a> {
                         match method.as_str() {
                             "parse" => {
                                 if let Some(a) = args.first() {
-                                    self.emit_expr(func, a);
-                                    func.instruction(&Instruction::Call(self.rt().json_parse));
+                                    self.emit_frame_begin(func, 1);
+                                    self.emit_store_arg(func, 0, a);
+                                    self.emit_memcall(func, "json_parse", 1);
                                 } else {
-                                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                                 }
                             }
                             "stringify" => {
                                 if let Some(a) = args.first() {
-                                    self.emit_expr(func, a);
-                                    func.instruction(&Instruction::Call(self.rt().json_stringify));
+                                    self.emit_frame_begin(func, 1);
+                                    self.emit_store_arg(func, 0, a);
+                                    self.emit_memcall(func, "json_stringify", 1);
                                 } else {
-                                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                                 }
                             }
                             _ => {}
@@ -3371,43 +3975,72 @@ impl<'a> FuncEmitCtx<'a> {
                     }
                     "Math" => {
                         match method.as_str() {
-                            "floor" => { self.emit_expr(func, &args[0]); func.instruction(&Instruction::F64Floor); }
-                            "ceil" => { self.emit_expr(func, &args[0]); func.instruction(&Instruction::F64Ceil); }
-                            "round" => { self.emit_expr(func, &args[0]); func.instruction(&Instruction::F64Nearest); }
-                            "abs" => { self.emit_expr(func, &args[0]); func.instruction(&Instruction::F64Abs); }
-                            "sqrt" => { self.emit_expr(func, &args[0]); func.instruction(&Instruction::F64Sqrt); }
+                            "floor" => { self.emit_expr(func, &args[0]); func.instruction(&Instruction::F64ReinterpretI64); func.instruction(&Instruction::F64Floor); func.instruction(&Instruction::I64ReinterpretF64); }
+                            "ceil" => { self.emit_expr(func, &args[0]); func.instruction(&Instruction::F64ReinterpretI64); func.instruction(&Instruction::F64Ceil); func.instruction(&Instruction::I64ReinterpretF64); }
+                            "round" => { self.emit_expr(func, &args[0]); func.instruction(&Instruction::F64ReinterpretI64); func.instruction(&Instruction::F64Nearest); func.instruction(&Instruction::I64ReinterpretF64); }
+                            "abs" => { self.emit_expr(func, &args[0]); func.instruction(&Instruction::F64ReinterpretI64); func.instruction(&Instruction::F64Abs); func.instruction(&Instruction::I64ReinterpretF64); }
+                            "sqrt" => { self.emit_expr(func, &args[0]); func.instruction(&Instruction::F64ReinterpretI64); func.instruction(&Instruction::F64Sqrt); func.instruction(&Instruction::I64ReinterpretF64); }
                             "pow" if args.len() >= 2 => {
-                                self.emit_expr(func, &args[0]);
-                                self.emit_expr(func, &args[1]);
-                                func.instruction(&Instruction::Call(self.rt().math_pow));
+                                self.emit_frame_begin(func, 2);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_store_arg(func, 1, &args[1]);
+                                self.emit_memcall(func, "math_pow", 2);
                             }
                             "min" if args.len() >= 2 => {
                                 self.emit_expr(func, &args[0]);
+                                func.instruction(&Instruction::F64ReinterpretI64);
                                 self.emit_expr(func, &args[1]);
+                                func.instruction(&Instruction::F64ReinterpretI64);
                                 func.instruction(&Instruction::F64Min);
+                                func.instruction(&Instruction::I64ReinterpretF64);
                             }
                             "max" if args.len() >= 2 => {
                                 self.emit_expr(func, &args[0]);
+                                func.instruction(&Instruction::F64ReinterpretI64);
                                 self.emit_expr(func, &args[1]);
+                                func.instruction(&Instruction::F64ReinterpretI64);
                                 func.instruction(&Instruction::F64Max);
+                                func.instruction(&Instruction::I64ReinterpretF64);
                             }
                             "random" => {
-                                func.instruction(&Instruction::Call(self.rt().math_random));
+                                self.emit_frame_begin(func, 0);
+                                self.emit_memcall(func, "math_random", 0);
                             }
                             "log" if !args.is_empty() => {
-                                self.emit_expr(func, &args[0]);
-                                func.instruction(&Instruction::Call(self.rt().math_log));
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_log", 1);
                             }
                             "log2" if !args.is_empty() => {
-                                self.emit_expr(func, &args[0]);
-                                func.instruction(&Instruction::Call(self.rt().math_log2));
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_log2", 1);
                             }
                             "log10" if !args.is_empty() => {
-                                self.emit_expr(func, &args[0]);
-                                func.instruction(&Instruction::Call(self.rt().math_log10));
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_log10", 1);
                             }
-                            _ => { func.instruction(&f64_const_bits(TAG_UNDEFINED)); }
+                            _ => { func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64)); }
                         }
+                    }
+                    "perry/ui" | "perry/system" => {
+                        // Memory-based dispatch: write args to WASM memory via i64.store.
+                        let bridge_name = map_ui_method(method, class_name.as_deref());
+                        let name_id = self.emitter.string_map.get(bridge_name).copied().unwrap_or(0);
+                        let mut slot = 0u32;
+                        let total_slots = (if object.is_some() { 1 } else { 0 }) + args.len() as u32;
+                        self.emit_frame_begin(func, total_slots);
+
+                        if let Some(obj) = object {
+                            self.emit_store_arg(func, slot, obj);
+                            slot += 1;
+                        }
+                        for arg in args {
+                            self.emit_store_arg(func, slot, arg);
+                            slot += 1;
+                        }
+                        self.emit_memcall(func, bridge_name, slot);
                     }
                     _ => {
                         // Handle instance method calls on objects
@@ -3416,98 +4049,198 @@ impl<'a> FuncEmitCtx<'a> {
                             match method.as_str() {
                                 // String instance methods
                                 "charAt" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().string_char_at));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall(func, "string_char_at", 2);
                                 }
                                 "substring" if args.len() >= 2 => {
-                                    self.emit_expr(func, &args[0]);
-                                    self.emit_expr(func, &args[1]);
-                                    func.instruction(&Instruction::Call(self.rt().string_substring));
+                                    self.emit_frame_begin(func, 3);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_store_arg(func, 2, &args[1]);
+                                    self.emit_memcall(func, "string_substring", 3);
                                 }
                                 "indexOf" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().string_index_of));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall(func, "string_index_of", 2);
                                 }
                                 "slice" if args.len() >= 2 => {
-                                    self.emit_expr(func, &args[0]);
-                                    self.emit_expr(func, &args[1]);
-                                    func.instruction(&Instruction::Call(self.rt().string_slice));
+                                    self.emit_frame_begin(func, 3);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_store_arg(func, 2, &args[1]);
+                                    self.emit_memcall(func, "string_slice", 3);
                                 }
                                 "toLowerCase" => {
-                                    func.instruction(&Instruction::Call(self.rt().string_to_lower_case));
+                                    self.emit_frame_begin(func, 1);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "string_to_lower_case", 1);
                                 }
                                 "toUpperCase" => {
-                                    func.instruction(&Instruction::Call(self.rt().string_to_upper_case));
+                                    self.emit_frame_begin(func, 1);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "string_to_upper_case", 1);
                                 }
                                 "trim" => {
-                                    func.instruction(&Instruction::Call(self.rt().string_trim));
+                                    self.emit_frame_begin(func, 1);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "string_trim", 1);
                                 }
                                 "includes" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().string_includes));
-                                    func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                                    func.instruction(&f64_const_bits(TAG_TRUE));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall_i32(func, "string_includes", 2);
+                                    func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                                    func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                                     func.instruction(&Instruction::Else);
-                                    func.instruction(&f64_const_bits(TAG_FALSE));
+                                    func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                                     func.instruction(&Instruction::End);
                                 }
                                 "startsWith" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().string_starts_with));
-                                    func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                                    func.instruction(&f64_const_bits(TAG_TRUE));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall_i32(func, "string_starts_with", 2);
+                                    func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                                    func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                                     func.instruction(&Instruction::Else);
-                                    func.instruction(&f64_const_bits(TAG_FALSE));
+                                    func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                                     func.instruction(&Instruction::End);
                                 }
                                 "endsWith" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().string_ends_with));
-                                    func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                                    func.instruction(&f64_const_bits(TAG_TRUE));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall_i32(func, "string_ends_with", 2);
+                                    func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                                    func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                                     func.instruction(&Instruction::Else);
-                                    func.instruction(&f64_const_bits(TAG_FALSE));
+                                    func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                                     func.instruction(&Instruction::End);
                                 }
                                 "replace" if args.len() >= 2 => {
-                                    self.emit_expr(func, &args[0]);
-                                    self.emit_expr(func, &args[1]);
-                                    func.instruction(&Instruction::Call(self.rt().string_replace));
+                                    self.emit_frame_begin(func, 3);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_store_arg(func, 2, &args[1]);
+                                    self.emit_memcall(func, "string_replace", 3);
                                 }
                                 "split" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().string_split));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall(func, "string_split", 2);
                                 }
                                 "repeat" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().string_repeat));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall(func, "string_repeat", 2);
                                 }
                                 "padStart" if args.len() >= 2 => {
-                                    self.emit_expr(func, &args[0]);
-                                    self.emit_expr(func, &args[1]);
-                                    func.instruction(&Instruction::Call(self.rt().string_pad_start));
+                                    self.emit_frame_begin(func, 3);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_store_arg(func, 2, &args[1]);
+                                    self.emit_memcall(func, "string_pad_start", 3);
                                 }
                                 "padEnd" if args.len() >= 2 => {
-                                    self.emit_expr(func, &args[0]);
-                                    self.emit_expr(func, &args[1]);
-                                    func.instruction(&Instruction::Call(self.rt().string_pad_end));
+                                    self.emit_frame_begin(func, 3);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_store_arg(func, 2, &args[1]);
+                                    self.emit_memcall(func, "string_pad_end", 3);
                                 }
                                 // Array instance methods called via NativeMethodCall
                                 "push" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().array_push));
-                                    func.instruction(&Instruction::Call(self.rt().array_length));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall(func, "array_push", 2);
+                                    self.emit_frame_begin(func, 1);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "array_length", 1);
                                 }
                                 "pop" => {
-                                    func.instruction(&Instruction::Call(self.rt().array_pop));
+                                    self.emit_frame_begin(func, 1);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "array_pop", 1);
                                 }
                                 "shift" => {
-                                    func.instruction(&Instruction::Call(self.rt().array_shift));
+                                    self.emit_frame_begin(func, 1);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "array_shift", 1);
                                 }
                                 "unshift" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().array_unshift));
-                                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall_void(func, "array_unshift", 2);
+                                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                                 }
                                 "join" => {
                                     if !args.is_empty() {
@@ -3515,90 +4248,196 @@ impl<'a> FuncEmitCtx<'a> {
                                     } else {
                                         let comma_id = self.emitter.string_map.get(",").copied().unwrap_or(0);
                                         let bits = (STRING_TAG << 48) | (comma_id as u64);
-                                        func.instruction(&f64_const(f64::from_bits(bits)));
+                                        func.instruction(&Instruction::I64Const(bits as i64));
                                     }
-                                    func.instruction(&Instruction::Call(self.rt().array_join));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 1);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "array_join", 2);
                                 }
                                 "map" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().array_map));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall(func, "array_map", 2);
                                 }
                                 "filter" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().array_filter));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall(func, "array_filter", 2);
                                 }
                                 "forEach" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().array_for_each));
-                                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall_void(func, "array_for_each", 2);
+                                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                                 }
                                 "find" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().array_find));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall(func, "array_find", 2);
                                 }
                                 "findIndex" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().array_find_index));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall(func, "array_find_index", 2);
                                 }
                                 "reduce" if !args.is_empty() => {
                                     self.emit_expr(func, &args[0]);
                                     if args.len() >= 2 {
                                         self.emit_expr(func, &args[1]);
                                     } else {
-                                        func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                                        func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                                     }
-                                    func.instruction(&Instruction::Call(self.rt().array_reduce));
+                                    self.emit_frame_begin(func, 3);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 2);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 1);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "array_reduce", 3);
                                 }
                                 "sort" => {
                                     if !args.is_empty() {
                                         self.emit_expr(func, &args[0]);
                                     } else {
-                                        func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                                        func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                                     }
-                                    func.instruction(&Instruction::Call(self.rt().array_sort));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 1);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "array_sort", 2);
                                 }
                                 "reverse" => {
-                                    func.instruction(&Instruction::Call(self.rt().array_reverse));
+                                    self.emit_frame_begin(func, 1);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "array_reverse", 1);
                                 }
                                 "concat" if !args.is_empty() => {
-                                    self.emit_expr(func, &args[0]);
-                                    func.instruction(&Instruction::Call(self.rt().array_concat));
+                                    self.emit_frame_begin(func, 2);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_store_arg(func, 1, &args[0]);
+                                    self.emit_memcall(func, "array_concat", 2);
                                 }
                                 "flat" => {
-                                    func.instruction(&Instruction::Call(self.rt().array_flat));
+                                    self.emit_frame_begin(func, 1);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "array_flat", 1);
                                 }
                                 "length" => {
-                                    func.instruction(&Instruction::Call(self.rt().array_length));
+                                    self.emit_frame_begin(func, 1);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "array_length", 1);
                                 }
                                 // Response methods
                                 "json" => {
-                                    func.instruction(&Instruction::Call(self.rt().response_json));
+                                    self.emit_frame_begin(func, 1);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "response_json", 1);
                                 }
                                 "text" => {
-                                    func.instruction(&Instruction::Call(self.rt().response_text));
+                                    self.emit_frame_begin(func, 1);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "response_text", 1);
                                 }
                                 "status" => {
-                                    func.instruction(&Instruction::Call(self.rt().response_status));
+                                    self.emit_frame_begin(func, 1);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "response_status", 1);
                                 }
                                 _ => {
-                                    // Fall back to class_call_method for class instances
-                                    let array_new = self.rt().array_new;
-                                    let array_push = self.rt().array_push;
-                                    let class_call_method = self.rt().class_call_method;
+                                    // Fall back to class_call_method via mem_call
                                     let method_id = self.emitter.string_map.get(method.as_str()).copied().unwrap_or(0);
+                                    // obj is already on the stack from emit_expr(obj) above
+                                    // Save obj to temp, build args array, then store all to memory
+                                    func.instruction(&Instruction::LocalSet(self.temp_local)); // slot 0 = obj handle
+                                    self.emit_slot_addr(func, 0);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
                                     let method_bits = (STRING_TAG << 48) | (method_id as u64);
-                                    func.instruction(&f64_const(f64::from_bits(method_bits)));
-                                    func.instruction(&Instruction::Call(array_new));
+                                    self.emit_store_const(func, 1, f64::from_bits(method_bits)); // slot 1 = method name
+                                    // Build args array
+                                    self.emit_frame_begin(func, 0);
+                                    self.emit_memcall(func, "array_new", 0); // get new array handle
                                     for arg in args {
-                                        self.emit_expr(func, arg);
-                                        func.instruction(&Instruction::Call(array_push));
+                                        self.emit_frame_begin(func, 2);
+                                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                                        self.emit_slot_addr(func, 0);
+                                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                        self.emit_store_arg(func, 1, arg);
+                                        self.emit_memcall(func, "array_push", 2); // push into array, returns handle
                                     }
-                                    func.instruction(&Instruction::Call(class_call_method));
+                                    self.emit_frame_begin(func, 3);
+                                    func.instruction(&Instruction::LocalSet(self.temp_local)); // slot 2 = args array handle
+                                    self.emit_slot_addr(func, 2);
+                                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                                    self.emit_memcall(func, "class_call_method", 3);
                                 }
                             }
                         } else {
                             // No object — module-level function
-                            func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                            func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                         }
                     }
                 }
@@ -3606,9 +4445,10 @@ impl<'a> FuncEmitCtx<'a> {
 
             // --- Conditional (ternary) ---
             Expr::Conditional { condition, then_expr, else_expr } => {
-                self.emit_expr(func, condition);
-                func.instruction(&Instruction::Call(self.rt().is_truthy));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, condition);
+                self.emit_memcall_i32(func, "is_truthy", 1);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
                 self.emit_expr(func, then_expr);
                 func.instruction(&Instruction::Else);
                 self.emit_expr(func, else_expr);
@@ -3618,47 +4458,66 @@ impl<'a> FuncEmitCtx<'a> {
             // --- Math ---
             Expr::MathFloor(x) => {
                 self.emit_expr(func, x);
+                func.instruction(&Instruction::F64ReinterpretI64);
                 func.instruction(&Instruction::F64Floor);
+                func.instruction(&Instruction::I64ReinterpretF64);
             }
             Expr::MathCeil(x) => {
                 self.emit_expr(func, x);
+                func.instruction(&Instruction::F64ReinterpretI64);
                 func.instruction(&Instruction::F64Ceil);
+                func.instruction(&Instruction::I64ReinterpretF64);
             }
             Expr::MathAbs(x) => {
                 self.emit_expr(func, x);
+                func.instruction(&Instruction::F64ReinterpretI64);
                 func.instruction(&Instruction::F64Abs);
+                func.instruction(&Instruction::I64ReinterpretF64);
             }
             Expr::MathSqrt(x) => {
                 self.emit_expr(func, x);
+                func.instruction(&Instruction::F64ReinterpretI64);
                 func.instruction(&Instruction::F64Sqrt);
+                func.instruction(&Instruction::I64ReinterpretF64);
             }
             Expr::MathRound(x) => {
                 self.emit_expr(func, x);
+                func.instruction(&Instruction::F64ReinterpretI64);
                 func.instruction(&Instruction::F64Nearest);
+                func.instruction(&Instruction::I64ReinterpretF64);
             }
             Expr::MathPow(base, exp) => {
-                self.emit_expr(func, base);
-                self.emit_expr(func, exp);
-                func.instruction(&Instruction::Call(self.rt().math_pow));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, base);
+                self.emit_store_arg(func, 1, exp);
+                self.emit_memcall(func, "math_pow", 2);
             }
             Expr::MathMin(args) if args.len() == 2 => {
                 self.emit_expr(func, &args[0]);
+                func.instruction(&Instruction::F64ReinterpretI64);
                 self.emit_expr(func, &args[1]);
+                func.instruction(&Instruction::F64ReinterpretI64);
                 func.instruction(&Instruction::F64Min);
+                func.instruction(&Instruction::I64ReinterpretF64);
             }
             Expr::MathMax(args) if args.len() == 2 => {
                 self.emit_expr(func, &args[0]);
+                func.instruction(&Instruction::F64ReinterpretI64);
                 self.emit_expr(func, &args[1]);
+                func.instruction(&Instruction::F64ReinterpretI64);
                 func.instruction(&Instruction::F64Max);
+                func.instruction(&Instruction::I64ReinterpretF64);
             }
             Expr::MathRandom => {
-                func.instruction(&Instruction::Call(self.rt().math_random));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "math_random", 0);
             }
 
             // --- Typeof ---
             Expr::TypeOf(operand) => {
-                self.emit_expr(func, operand);
-                func.instruction(&Instruction::Call(self.rt().js_typeof));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, operand);
+                self.emit_memcall(func, "js_typeof", 1);
             }
 
             // --- Async ---
@@ -3666,101 +4525,104 @@ impl<'a> FuncEmitCtx<'a> {
                 // Evaluate inner expression, then call await_promise bridge
                 // If the value is a promise handle, tries to get resolved value
                 // If not a promise, returns the value as-is
-                self.emit_expr(func, e);
-                func.instruction(&Instruction::Call(self.rt().await_promise));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, e);
+                self.emit_memcall(func, "await_promise", 1);
             }
 
             // --- Object literal ---
             Expr::Object(fields) => {
-                let rt = self.rt();
-                let obj_new = rt.object_new;
-                let obj_set = rt.object_set;
-                func.instruction(&Instruction::Call(obj_new));
-                // Stack: [handle]
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "object_new", 0);
+                // Stack: [handle as i64]
                 for (key, val) in fields {
-                    // Duplicate the handle (no tee for intermediate values, re-get isn't possible)
-                    // We need to keep the handle. Use a strategy: emit handle, key, value, call set, then re-push handle.
-                    // Actually object_set is (handle, key, value) -> void, and we need handle to remain.
-                    // Problem: after Call, the handle is consumed. We need it for subsequent sets.
-                    // Solution: use a local. But we don't have one allocated.
-                    // Alternative: just call object_new once at the start and then repeatedly push undefined
-                    // Actually the simplest: just re-emit object_new? No, that creates a new object.
-                    // The trick: we'll emit one extra set of instructions to duplicate the handle.
-                    // But WASM has no dup instruction. We need a scratch local.
-                    // For now, we'll work around this by storing the handle in a pattern:
-                    // object_set returns void, so we do:
-                    //   call object_new -> handle on stack
-                    //   For each field: we need handle on stack again
-                    // Without locals we can't do this. Let's emit it differently.
-                    // We'll just call object_new, then for each field: push handle, push key, push value, call set.
-                    // But we don't have the handle anymore after the first set.
-                    //
-                    // The real solution: our object_set should return the handle.
-                    // Let's change the bridge: object_set returns handle for chaining.
-                    // Actually let's just do it the simple way by using the JS bridge
-                    // which handles everything. We'll change object_set to return handle.
+                    // object_set(handle, key, value) returns handle (chaining)
                     let key_id = self.emitter.string_map.get(key.as_str()).copied().unwrap_or(0);
                     let key_bits = (STRING_TAG << 48) | (key_id as u64);
-                    func.instruction(&f64_const(f64::from_bits(key_bits)));
-                    self.emit_expr(func, val);
-                    func.instruction(&Instruction::Call(obj_set));
-                    // object_set returns handle (chaining)
+                    // Save handle from stack to temp_local, then store via emit_slot_addr
+                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                    self.emit_frame_begin(func, 3);
+                    // Store handle to slot 0
+                    self.emit_slot_addr(func, 0);
+                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                    // Store key string to slot 1
+                    self.emit_slot_addr(func, 1);
+                    func.instruction(&Instruction::I64Const(key_bits as i64));
+                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                    // Store value to slot 2
+                    self.emit_store_arg(func, 2, val);
+                    self.emit_memcall(func, "object_set", 3);
                 }
                 // Handle is on stack from last object_set (or object_new if no fields)
             }
 
             // --- Object spread ---
             Expr::ObjectSpread { parts } => {
-                let rt = self.rt();
-                let obj_new = rt.object_new;
-                let obj_set = rt.object_set;
-                let obj_assign = rt.object_assign;
-                func.instruction(&Instruction::Call(obj_new));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "object_new", 0);
                 for (key_opt, val) in parts {
                     if let Some(key) = key_opt {
-                        // Named field
                         let key_id = self.emitter.string_map.get(key.as_str()).copied().unwrap_or(0);
                         let key_bits = (STRING_TAG << 48) | (key_id as u64);
-                        func.instruction(&f64_const(f64::from_bits(key_bits)));
-                        self.emit_expr(func, val);
-                        func.instruction(&Instruction::Call(obj_set));
+                        self.emit_frame_begin(func, 3);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_store_const(func, 1, f64::from_bits(key_bits));
+                        self.emit_store_arg(func, 2, val);
+                        self.emit_memcall(func, "object_set", 3);
                     } else {
-                        // Spread: ...val
-                        self.emit_expr(func, val);
-                        func.instruction(&Instruction::Call(obj_assign));
+                        self.emit_frame_begin(func, 2);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_store_arg(func, 1, val);
+                        self.emit_memcall(func, "object_assign", 2);
                     }
                 }
             }
 
             // --- Array literal ---
             Expr::Array(elements) => {
-                let rt = self.rt();
-                let arr_new = rt.array_new;
-                let arr_push = rt.array_push;
-                func.instruction(&Instruction::Call(arr_new));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "array_new", 0);
                 for elem in elements {
-                    self.emit_expr(func, elem);
-                    func.instruction(&Instruction::Call(arr_push));
-                    // array_push returns handle (chaining)
+                    self.emit_frame_begin(func, 2);
+                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                    self.emit_slot_addr(func, 0);
+                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                    self.emit_store_arg(func, 1, elem);
+                    self.emit_memcall(func, "array_push", 2);
                 }
             }
 
             // --- Array spread ---
             Expr::ArraySpread(elements) => {
-                let rt = self.rt();
-                let arr_new = rt.array_new;
-                let arr_push = rt.array_push;
-                let arr_push_spread = rt.array_push_spread;
-                func.instruction(&Instruction::Call(arr_new));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "array_new", 0);
                 for elem in elements {
                     match elem {
                         ArrayElement::Expr(e) => {
-                            self.emit_expr(func, e);
-                            func.instruction(&Instruction::Call(arr_push));
+                            self.emit_frame_begin(func, 2);
+                            func.instruction(&Instruction::LocalSet(self.temp_local));
+                            self.emit_slot_addr(func, 0);
+                            func.instruction(&Instruction::LocalGet(self.temp_local));
+                            func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                            self.emit_store_arg(func, 1, e);
+                            self.emit_memcall(func, "array_push", 2);
                         }
                         ArrayElement::Spread(e) => {
-                            self.emit_expr(func, e);
-                            func.instruction(&Instruction::Call(arr_push_spread));
+                            self.emit_frame_begin(func, 2);
+                            func.instruction(&Instruction::LocalSet(self.temp_local));
+                            self.emit_slot_addr(func, 0);
+                            func.instruction(&Instruction::LocalGet(self.temp_local));
+                            func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                            self.emit_store_arg(func, 1, e);
+                            self.emit_memcall(func, "array_push_spread", 2);
                         }
                     }
                 }
@@ -3770,31 +4632,43 @@ impl<'a> FuncEmitCtx<'a> {
             Expr::PropertyGet { object, property } => {
                 // Special case: .length uses string_len which handles both strings and arrays
                 if property == "length" {
-                    self.emit_expr(func, object);
-                    func.instruction(&Instruction::Call(self.rt().string_len));
+                    self.emit_frame_begin(func, 1);
+                    self.emit_store_arg(func, 0, object);
+                    self.emit_memcall(func, "string_len", 1);
                     return;
                 }
                 // Special case: .message on error objects
                 if property == "message" {
-                    self.emit_expr(func, object);
-                    func.instruction(&Instruction::Call(self.rt().error_message));
+                    self.emit_frame_begin(func, 1);
+                    self.emit_store_arg(func, 0, object);
+                    self.emit_memcall(func, "error_message", 1);
                     return;
                 }
                 self.emit_expr(func, object);
                 let key_id = self.emitter.string_map.get(property.as_str()).copied().unwrap_or(0);
                 let key_bits = (STRING_TAG << 48) | (key_id as u64);
-                func.instruction(&f64_const(f64::from_bits(key_bits)));
                 // Use class_get_field (works for both plain objects and class instances)
-                func.instruction(&Instruction::Call(self.rt().class_get_field));
+                self.emit_frame_begin(func, 2);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_store_const(func, 1, f64::from_bits(key_bits));
+                self.emit_memcall(func, "class_get_field", 2);
             }
             Expr::PropertySet { object, property, value } => {
                 self.emit_expr(func, object);
                 let key_id = self.emitter.string_map.get(property.as_str()).copied().unwrap_or(0);
                 let key_bits = (STRING_TAG << 48) | (key_id as u64);
-                func.instruction(&f64_const(f64::from_bits(key_bits)));
-                self.emit_expr(func, value);
                 // Use class_set_field (works for both plain objects and class instances)
-                func.instruction(&Instruction::Call(self.rt().class_set_field));
+                self.emit_frame_begin(func, 3);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_store_const(func, 1, f64::from_bits(key_bits));
+                self.emit_store_arg(func, 2, value);
+                self.emit_memcall_void(func, "class_set_field", 3);
                 // class_set_field is void; push the object back for chaining
                 self.emit_expr(func, object);
             }
@@ -3806,73 +4680,90 @@ impl<'a> FuncEmitCtx<'a> {
                 // Get current value
                 // We need the object handle twice. Can't dup in WASM without locals.
                 // For simplicity: re-emit object (works if object is a simple expression)
-                func.instruction(&f64_const(f64::from_bits(key_bits)));
-                func.instruction(&Instruction::Call(self.rt().object_get));
-                // Stack: [old_value]
+                self.emit_frame_begin(func, 2);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_store_const(func, 1, f64::from_bits(key_bits));
+                self.emit_memcall(func, "object_get", 2);
+                // Stack: [old_value_i64]
                 if *prefix {
+                    func.instruction(&Instruction::F64ReinterpretI64);
                     func.instruction(&f64_const(1.0));
                     match op {
                         BinaryOp::Add => func.instruction(&Instruction::F64Add),
                         BinaryOp::Sub => func.instruction(&Instruction::F64Sub),
                         _ => func.instruction(&Instruction::F64Add),
                     };
+                    func.instruction(&Instruction::I64ReinterpretF64);
                     // Set new value
                     self.emit_expr(func, object);
-                    func.instruction(&f64_const(f64::from_bits(key_bits)));
+                    func.instruction(&Instruction::I64Const(key_bits as i64));
                     // Stack: [new_val, handle, key] — wrong order for object_set(handle, key, val)
                     // We need to restructure. For now, just emit the value (prefix returns new)
                     // This is imprecise but works for basic cases
                 } else {
                     // postfix: return old, then update
                     // For now, just do the increment and return new value (approximate)
+                    func.instruction(&Instruction::F64ReinterpretI64);
                     func.instruction(&f64_const(1.0));
                     match op {
                         BinaryOp::Add => func.instruction(&Instruction::F64Add),
                         BinaryOp::Sub => func.instruction(&Instruction::F64Sub),
                         _ => func.instruction(&Instruction::F64Add),
                     };
+                    func.instruction(&Instruction::I64ReinterpretF64);
                 }
             }
 
             // --- Index access ---
             Expr::IndexGet { object, index } => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, index);
-                func.instruction(&Instruction::Call(self.rt().object_get_dynamic));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, index);
+                self.emit_memcall(func, "object_get_dynamic", 2);
             }
             Expr::IndexSet { object, index, value } => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, index);
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().object_set_dynamic));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, index);
+                self.emit_store_arg(func, 2, value);
+                self.emit_memcall_void(func, "object_set_dynamic", 3);
                 // set_dynamic is void; push undefined as expression result
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::IndexUpdate { object, index, op, prefix: _ } => {
                 // Approximate: get, increment, set
-                self.emit_expr(func, object);
-                self.emit_expr(func, index);
-                func.instruction(&Instruction::Call(self.rt().object_get_dynamic));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, index);
+                self.emit_memcall(func, "object_get_dynamic", 2);
+                func.instruction(&Instruction::F64ReinterpretI64);
                 func.instruction(&f64_const(1.0));
                 match op {
                     BinaryOp::Add => func.instruction(&Instruction::F64Add),
                     BinaryOp::Sub => func.instruction(&Instruction::F64Sub),
                     _ => func.instruction(&Instruction::F64Add),
                 };
+                func.instruction(&Instruction::I64ReinterpretF64);
             }
 
             // --- Object/Array methods ---
             Expr::ObjectKeys(obj) => {
-                self.emit_expr(func, obj);
-                func.instruction(&Instruction::Call(self.rt().object_keys));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, obj);
+                self.emit_memcall(func, "object_keys", 1);
             }
             Expr::ObjectValues(obj) => {
-                self.emit_expr(func, obj);
-                func.instruction(&Instruction::Call(self.rt().object_values));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, obj);
+                self.emit_memcall(func, "object_values", 1);
             }
             Expr::ObjectEntries(obj) => {
-                self.emit_expr(func, obj);
-                func.instruction(&Instruction::Call(self.rt().object_entries));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, obj);
+                self.emit_memcall(func, "object_entries", 1);
             }
             Expr::ObjectRest { object, .. } => {
                 // For now, just return a copy of the object (approximate)
@@ -3884,30 +4775,37 @@ impl<'a> FuncEmitCtx<'a> {
                         self.emit_expr(func, object);
                         let key_id = self.emitter.string_map.get(property.as_str()).copied().unwrap_or(0);
                         let key_bits = (STRING_TAG << 48) | (key_id as u64);
-                        func.instruction(&f64_const(f64::from_bits(key_bits)));
-                        func.instruction(&Instruction::Call(self.rt().object_delete));
-                        func.instruction(&f64_const_bits(TAG_TRUE));
+                        self.emit_frame_begin(func, 2);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_store_const(func, 1, f64::from_bits(key_bits));
+                        self.emit_memcall_void(func, "object_delete", 2);
+                        func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                     }
                     Expr::IndexGet { object, index } => {
-                        self.emit_expr(func, object);
-                        self.emit_expr(func, index);
-                        func.instruction(&Instruction::Call(self.rt().object_delete_dynamic));
-                        func.instruction(&f64_const_bits(TAG_TRUE));
+                        self.emit_frame_begin(func, 2);
+                        self.emit_store_arg(func, 0, object);
+                        self.emit_store_arg(func, 1, index);
+                        self.emit_memcall_void(func, "object_delete_dynamic", 2);
+                        func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                     }
                     _ => {
-                        func.instruction(&f64_const_bits(TAG_TRUE));
+                        func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                     }
                 }
             }
             Expr::In { property, object } => {
-                self.emit_expr(func, object);
-                self.emit_expr(func, property);
-                func.instruction(&Instruction::Call(self.rt().object_has_property));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, object);
+                self.emit_store_arg(func, 1, property);
+                self.emit_memcall_i32(func, "object_has_property", 2);
                 // Convert i32 to NaN-boxed boolean
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
 
@@ -3916,57 +4814,92 @@ impl<'a> FuncEmitCtx<'a> {
                 if let Some(&idx) = self.local_map.get(array_id) {
                     func.instruction(&Instruction::LocalGet(idx));
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().array_push));
+                self.emit_frame_begin(func, 2);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_store_arg(func, 1, value);
                 // array_push returns handle, but ArrayPush typically returns new length
                 // The bridge returns the array handle. We need to store back and return length.
                 // For now, return the result of array_push (the handle).
                 // Actually, drop result and push the new length
-                func.instruction(&Instruction::Call(self.rt().array_length));
+                self.emit_memcall(func, "array_push", 2);
+                self.emit_frame_begin(func, 1);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "array_length", 1);
             }
             Expr::ArrayPushSpread { array_id, source } => {
                 if let Some(&idx) = self.local_map.get(array_id) {
                     func.instruction(&Instruction::LocalGet(idx));
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                self.emit_expr(func, source);
-                func.instruction(&Instruction::Call(self.rt().array_push_spread));
+                self.emit_frame_begin(func, 2);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_store_arg(func, 1, source);
+                self.emit_memcall(func, "array_push_spread", 2);
                 // Returns handle
             }
             Expr::ArrayPop(array_id) => {
                 if let Some(&idx) = self.local_map.get(array_id) {
                     func.instruction(&Instruction::LocalGet(idx));
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().array_pop));
+                self.emit_frame_begin(func, 1);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "array_pop", 1);
             }
             Expr::ArrayShift(array_id) => {
                 if let Some(&idx) = self.local_map.get(array_id) {
                     func.instruction(&Instruction::LocalGet(idx));
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().array_shift));
+                self.emit_frame_begin(func, 1);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "array_shift", 1);
             }
             Expr::ArrayUnshift { array_id, value } => {
                 if let Some(&idx) = self.local_map.get(array_id) {
                     func.instruction(&Instruction::LocalGet(idx));
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().array_unshift));
+                self.emit_frame_begin(func, 2);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall_void(func, "array_unshift", 2);
                 // void return, push length
                 if let Some(&idx) = self.local_map.get(array_id) {
                     func.instruction(&Instruction::LocalGet(idx));
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().array_length));
+                self.emit_frame_begin(func, 1);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "array_length", 1);
             }
             Expr::ArraySlice { array, start, end } => {
                 self.emit_expr(func, array);
@@ -3974,23 +4907,49 @@ impl<'a> FuncEmitCtx<'a> {
                 if let Some(e) = end {
                     self.emit_expr(func, e);
                 } else {
-                    func.instruction(&f64_const(f64::from_bits(TAG_UNDEFINED)));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().array_slice));
+                self.emit_frame_begin(func, 3);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 2);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 1);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "array_slice", 3);
             }
             Expr::ArraySplice { array_id, start, delete_count, items } => {
                 if let Some(&idx) = self.local_map.get(array_id) {
                     func.instruction(&Instruction::LocalGet(idx));
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
                 self.emit_expr(func, start);
                 if let Some(dc) = delete_count {
                     self.emit_expr(func, dc);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().array_splice));
+                self.emit_frame_begin(func, 3);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 2);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 1);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "array_splice", 3);
                 // Returns removed elements array handle
                 // TODO: insert items if present
                 let _ = items;
@@ -4003,75 +4962,95 @@ impl<'a> FuncEmitCtx<'a> {
                     // Default separator: ","
                     let comma_id = self.emitter.string_map.get(",").copied().unwrap_or(0);
                     let comma_bits = (STRING_TAG << 48) | (comma_id as u64);
-                    func.instruction(&f64_const(f64::from_bits(comma_bits)));
+                    func.instruction(&Instruction::I64Const(comma_bits as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().array_join));
+                self.emit_frame_begin(func, 2);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 1);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "array_join", 2);
             }
             Expr::ArrayIndexOf { array, value } => {
-                self.emit_expr(func, array);
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().array_index_of));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, array);
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall(func, "array_index_of", 2);
             }
             Expr::ArrayIncludes { array, value } => {
-                self.emit_expr(func, array);
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().array_includes));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, array);
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall_i32(func, "array_includes", 2);
                 // Convert i32 to NaN-boxed boolean
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
             Expr::ArrayFlat { array } => {
-                self.emit_expr(func, array);
-                func.instruction(&Instruction::Call(self.rt().array_flat));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, array);
+                self.emit_memcall(func, "array_flat", 1);
             }
             Expr::ArrayIsArray(val) => {
-                self.emit_expr(func, val);
-                func.instruction(&Instruction::Call(self.rt().array_is_array));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall_i32(func, "array_is_array", 1);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
             Expr::ArrayFrom(val) => {
-                self.emit_expr(func, val);
-                func.instruction(&Instruction::Call(self.rt().array_from));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall(func, "array_from", 1);
             }
 
             // --- Array higher-order methods ---
             Expr::ArrayMap { array, callback } => {
-                self.emit_expr(func, array);
-                self.emit_expr(func, callback);
-                func.instruction(&Instruction::Call(self.rt().array_map));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, array);
+                self.emit_store_arg(func, 1, callback);
+                self.emit_memcall(func, "array_map", 2);
             }
             Expr::ArrayFilter { array, callback } => {
-                self.emit_expr(func, array);
-                self.emit_expr(func, callback);
-                func.instruction(&Instruction::Call(self.rt().array_filter));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, array);
+                self.emit_store_arg(func, 1, callback);
+                self.emit_memcall(func, "array_filter", 2);
             }
             Expr::ArrayForEach { array, callback } => {
-                self.emit_expr(func, array);
-                self.emit_expr(func, callback);
-                func.instruction(&Instruction::Call(self.rt().array_for_each));
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, array);
+                self.emit_store_arg(func, 1, callback);
+                self.emit_memcall_void(func, "array_for_each", 2);
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::ArrayFind { array, callback } => {
-                self.emit_expr(func, array);
-                self.emit_expr(func, callback);
-                func.instruction(&Instruction::Call(self.rt().array_find));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, array);
+                self.emit_store_arg(func, 1, callback);
+                self.emit_memcall(func, "array_find", 2);
             }
             Expr::ArrayFindIndex { array, callback } => {
-                self.emit_expr(func, array);
-                self.emit_expr(func, callback);
-                func.instruction(&Instruction::Call(self.rt().array_find_index));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, array);
+                self.emit_store_arg(func, 1, callback);
+                self.emit_memcall(func, "array_find_index", 2);
             }
             Expr::ArraySort { array, comparator } => {
-                self.emit_expr(func, array);
-                self.emit_expr(func, comparator);
-                func.instruction(&Instruction::Call(self.rt().array_sort));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, array);
+                self.emit_store_arg(func, 1, comparator);
+                self.emit_memcall(func, "array_sort", 2);
             }
             Expr::ArrayReduce { array, callback, initial } => {
                 self.emit_expr(func, array);
@@ -4079,9 +5058,22 @@ impl<'a> FuncEmitCtx<'a> {
                 if let Some(init) = initial {
                     self.emit_expr(func, init);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().array_reduce));
+                self.emit_frame_begin(func, 3);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 2);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 1);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "array_reduce", 3);
             }
 
             // --- Closure ---
@@ -4092,24 +5084,39 @@ impl<'a> FuncEmitCtx<'a> {
                     // Function is registered, create closure handle
                     // Use table index, not raw WASM function index
                     let table_idx = self.emitter.func_to_table_idx.get(&func_idx).copied().unwrap_or(func_idx);
-                    func.instruction(&f64_const(table_idx as f64));
-                    func.instruction(&f64_const(captures.len() as f64));
-                    func.instruction(&Instruction::Call(self.rt().closure_new));
+                    self.emit_frame_begin(func, 2);
+                    self.emit_store_const(func, 0, table_idx as f64);
+                    self.emit_store_const(func, 1, captures.len() as f64);
+                    self.emit_memcall(func, "closure_new", 2);
                     // Set captures
                     for (i, cap_id) in captures.iter().chain(mutable_captures.iter()).enumerate() {
                         // Duplicate closure handle (it's returned by closure_new)
                         // closure_set_capture(handle, idx, value) -> handle (chaining)
                         func.instruction(&f64_const(i as f64));
+                        func.instruction(&Instruction::I64ReinterpretF64);
                         if let Some(&local_idx) = self.local_map.get(cap_id) {
                             func.instruction(&Instruction::LocalGet(local_idx));
                         } else {
-                            func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                            func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                         }
-                        func.instruction(&Instruction::Call(self.rt().closure_set_capture));
+                        self.emit_frame_begin(func, 3);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 2);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 1);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_memcall(func, "closure_set_capture", 3);
                     }
                 } else {
                     // Inline closure — not in function table, push undefined
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
                 let _ = (params, body);
             }
@@ -4117,11 +5124,12 @@ impl<'a> FuncEmitCtx<'a> {
                 if let Some(&func_idx) = self.emitter.func_map.get(id) {
                     // Create a closure wrapper with 0 captures for function reference
                     let table_idx = self.emitter.func_to_table_idx.get(&func_idx).copied().unwrap_or(func_idx);
-                    func.instruction(&f64_const(table_idx as f64));
-                    func.instruction(&f64_const(0.0));
-                    func.instruction(&Instruction::Call(self.rt().closure_new));
+                    self.emit_frame_begin(func, 2);
+                    self.emit_store_const(func, 0, table_idx as f64);
+                    self.emit_store_const(func, 1, 0.0);
+                    self.emit_memcall(func, "closure_new", 2);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
             }
             Expr::ExternFuncRef { name, .. } => {
@@ -4129,11 +5137,12 @@ impl<'a> FuncEmitCtx<'a> {
                 if let Some(&func_idx) = self.emitter.func_name_map.get(name) {
                     // Create a closure wrapper with 0 captures (like FuncRef)
                     let table_idx = self.emitter.func_to_table_idx.get(&func_idx).copied().unwrap_or(func_idx);
-                    func.instruction(&f64_const(table_idx as f64));
-                    func.instruction(&f64_const(0.0));
-                    func.instruction(&Instruction::Call(self.rt().closure_new));
+                    self.emit_frame_begin(func, 2);
+                    self.emit_store_const(func, 0, table_idx as f64);
+                    self.emit_store_const(func, 1, 0.0);
+                    self.emit_memcall(func, "closure_new", 2);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
             }
 
@@ -4149,39 +5158,61 @@ impl<'a> FuncEmitCtx<'a> {
                             // Empty flags string
                             let empty_id = self.emitter.string_map.get("").copied().unwrap_or(0);
                             let empty_bits = (STRING_TAG << 48) | (empty_id as u64);
-                            func.instruction(&f64_const(f64::from_bits(empty_bits)));
+                            func.instruction(&Instruction::I64Const(empty_bits as i64));
                         }
-                        func.instruction(&Instruction::Call(self.rt().regexp_new));
+                        self.emit_frame_begin(func, 2);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 1);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_memcall(func, "regexp_new", 2);
                         return;
                     }
                     "Error" => {
                         if let Some(msg) = args.first() {
                             self.emit_expr(func, msg);
                         } else {
-                            func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                            func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                         }
-                        func.instruction(&Instruction::Call(self.rt().error_new));
+                        self.emit_frame_begin(func, 1);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_memcall(func, "error_new", 1);
                         return;
                     }
                     "Date" => {
                         if let Some(arg) = args.first() {
                             self.emit_expr(func, arg);
                         } else {
-                            func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                            func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                         }
-                        func.instruction(&Instruction::Call(self.rt().date_new));
+                        self.emit_frame_begin(func, 1);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_memcall(func, "date_new", 1);
                         return;
                     }
                     "Map" => {
-                        func.instruction(&Instruction::Call(self.rt().map_new));
+                        self.emit_frame_begin(func, 0);
+                        self.emit_memcall(func, "map_new", 0);
                         return;
                     }
                     "Set" => {
                         if let Some(arg) = args.first() {
-                            self.emit_expr(func, arg);
-                            func.instruction(&Instruction::Call(self.rt().set_new_from_array));
+                            self.emit_frame_begin(func, 1);
+                            self.emit_store_arg(func, 0, arg);
+                            self.emit_memcall(func, "set_new_from_array", 1);
                         } else {
-                            func.instruction(&Instruction::Call(self.rt().set_new));
+                            self.emit_frame_begin(func, 0);
+                            self.emit_memcall(func, "set_new", 0);
                         }
                         return;
                     }
@@ -4189,9 +5220,14 @@ impl<'a> FuncEmitCtx<'a> {
                         if let Some(arg) = args.first() {
                             self.emit_expr(func, arg);
                         } else {
-                            func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                            func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                         }
-                        func.instruction(&Instruction::Call(self.rt().url_parse));
+                        self.emit_frame_begin(func, 1);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_memcall(func, "url_parse", 1);
                         return;
                     }
                     _ => {}
@@ -4200,9 +5236,10 @@ impl<'a> FuncEmitCtx<'a> {
                 // User-defined class instantiation
                 let class_name_id = self.emitter.string_map.get(class_name.as_str()).copied().unwrap_or(0);
                 let class_bits = (STRING_TAG << 48) | (class_name_id as u64);
-                func.instruction(&f64_const(f64::from_bits(class_bits)));
-                func.instruction(&f64_const(args.len() as f64));
-                func.instruction(&Instruction::Call(self.rt().class_new));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_const(func, 0, f64::from_bits(class_bits));
+                self.emit_store_const(func, 1, args.len() as f64);
+                self.emit_memcall(func, "class_new", 2);
                 // Call the compiled constructor if it exists
                 if let Some(&ctor_idx) = self.emitter.class_ctor_map.get(class_name.as_str()) {
                     // Stack: [instance_handle]
@@ -4217,21 +5254,19 @@ impl<'a> FuncEmitCtx<'a> {
                 // If no compiled constructor, just leave the instance handle on stack
             }
             Expr::NewDynamic { callee, args } => {
-                // Dynamic new — approximate with regular call
-                self.emit_expr(func, callee);
-                for arg in args {
-                    self.emit_expr(func, arg);
+                // Dynamic new — approximate with regular call via mem_call
+                self.emit_frame_begin(func, (args.len() + 1) as u32);
+                self.emit_store_arg(func, 0, callee);
+                for (i, arg) in args.iter().enumerate() {
+                    self.emit_store_arg(func, (i + 1) as u32, arg);
                 }
-                // Use closure_call
                 match args.len() {
-                    0 => { func.instruction(&Instruction::Call(self.rt().closure_call_0)); }
-                    1 => { func.instruction(&Instruction::Call(self.rt().closure_call_1)); }
-                    2 => { func.instruction(&Instruction::Call(self.rt().closure_call_2)); }
-                    3 => { func.instruction(&Instruction::Call(self.rt().closure_call_3)); }
+                    0 => { self.emit_memcall(func, "closure_call_0", 1); }
+                    1 => { self.emit_memcall(func, "closure_call_1", 2); }
+                    2 => { self.emit_memcall(func, "closure_call_2", 3); }
+                    3 => { self.emit_memcall(func, "closure_call_3", 4); }
                     _ => {
-                        for _ in args { func.instruction(&Instruction::Drop); }
-                        func.instruction(&Instruction::Drop); // callee
-                        func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                        func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                     }
                 }
             }
@@ -4265,46 +5300,58 @@ impl<'a> FuncEmitCtx<'a> {
                         func.instruction(&Instruction::Drop);
                     }
                 }
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::SuperMethodCall { method, args } => {
                 // Call parent method on this via class_call_method (walks parent chain)
-                let array_new = self.rt().array_new;
-                let array_push = self.rt().array_push;
-                let class_call_method = self.rt().class_call_method;
-                func.instruction(&Instruction::LocalGet(0)); // this handle
+                self.emit_slot_addr(func, 0); // this handle
+                func.instruction(&Instruction::LocalGet(0));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 })); // slot 0 = this (already i64)
                 let method_id = self.emitter.string_map.get(method.as_str()).copied().unwrap_or(0);
                 let method_bits = (STRING_TAG << 48) | (method_id as u64);
-                func.instruction(&f64_const(f64::from_bits(method_bits)));
+                self.emit_store_const(func, 1, f64::from_bits(method_bits)); // slot 1 = method name
                 // Build args array
-                func.instruction(&Instruction::Call(array_new));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "array_new", 0);
                 for arg in args {
-                    self.emit_expr(func, arg);
-                    func.instruction(&Instruction::Call(array_push));
+                    self.emit_frame_begin(func, 2);
+                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                    self.emit_slot_addr(func, 0);
+                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                    self.emit_store_arg(func, 1, arg);
+                    self.emit_memcall(func, "array_push", 2);
                 }
-                func.instruction(&Instruction::Call(class_call_method));
+                self.emit_frame_begin(func, 3);
+                func.instruction(&Instruction::LocalSet(self.temp_local)); // slot 2 = args array
+                self.emit_slot_addr(func, 2);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "class_call_method", 3);
             }
             Expr::ClassRef(_) => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::StaticFieldGet { class_name, field_name } => {
                 let class_id = self.emitter.string_map.get(class_name.as_str()).copied().unwrap_or(0);
                 let class_bits = (STRING_TAG << 48) | (class_id as u64);
                 let field_id = self.emitter.string_map.get(field_name.as_str()).copied().unwrap_or(0);
                 let field_bits = (STRING_TAG << 48) | (field_id as u64);
-                func.instruction(&f64_const(f64::from_bits(class_bits)));
-                func.instruction(&f64_const(f64::from_bits(field_bits)));
-                func.instruction(&Instruction::Call(self.rt().class_get_static));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_const(func, 0, f64::from_bits(class_bits));
+                self.emit_store_const(func, 1, f64::from_bits(field_bits));
+                self.emit_memcall(func, "class_get_static", 2);
             }
             Expr::StaticFieldSet { class_name, field_name, value } => {
                 let class_id = self.emitter.string_map.get(class_name.as_str()).copied().unwrap_or(0);
                 let class_bits = (STRING_TAG << 48) | (class_id as u64);
                 let field_id = self.emitter.string_map.get(field_name.as_str()).copied().unwrap_or(0);
                 let field_bits = (STRING_TAG << 48) | (field_id as u64);
-                func.instruction(&f64_const(f64::from_bits(class_bits)));
-                func.instruction(&f64_const(f64::from_bits(field_bits)));
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().class_set_static));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_const(func, 0, f64::from_bits(class_bits));
+                self.emit_store_const(func, 1, f64::from_bits(field_bits));
+                self.emit_store_arg(func, 2, value);
+                self.emit_memcall_void(func, "class_set_static", 3);
                 // void return, push the value back
                 self.emit_expr(func, value);
             }
@@ -4320,23 +5367,31 @@ impl<'a> FuncEmitCtx<'a> {
                         return;
                     }
                 }
-                // Fallback: bridge dispatch
+                // Fallback: bridge dispatch via mem_call
                 let class_id = self.emitter.string_map.get(class_name.as_str()).copied().unwrap_or(0);
                 let class_bits = (STRING_TAG << 48) | (class_id as u64);
                 let method_id = self.emitter.string_map.get(method_name.as_str()).copied().unwrap_or(0);
                 let method_bits = (STRING_TAG << 48) | (method_id as u64);
-                let rt = self.rt();
-                let arr_new = rt.array_new;
-                let arr_push = rt.array_push;
-                let call_method = rt.class_call_method;
-                func.instruction(&f64_const(f64::from_bits(class_bits)));
-                func.instruction(&f64_const(f64::from_bits(method_bits)));
-                func.instruction(&Instruction::Call(arr_new));
+                self.emit_store_const(func, 0, f64::from_bits(class_bits)); // slot 0 = class handle
+                self.emit_store_const(func, 1, f64::from_bits(method_bits)); // slot 1 = method name
+                // Build args array
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "array_new", 0);
                 for arg in args {
-                    self.emit_expr(func, arg);
-                    func.instruction(&Instruction::Call(arr_push));
+                    self.emit_frame_begin(func, 2);
+                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                    self.emit_slot_addr(func, 0);
+                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                    self.emit_store_arg(func, 1, arg);
+                    self.emit_memcall(func, "array_push", 2);
                 }
-                func.instruction(&Instruction::Call(call_method));
+                self.emit_frame_begin(func, 3);
+                func.instruction(&Instruction::LocalSet(self.temp_local)); // slot 2 = args array
+                self.emit_slot_addr(func, 2);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "class_call_method", 3);
             }
 
             // --- Enum members ---
@@ -4347,20 +5402,22 @@ impl<'a> FuncEmitCtx<'a> {
                     match resolved.clone() {
                         EnumResolvedValue::Number(n) => {
                             func.instruction(&f64_const(n));
+                            func.instruction(&Instruction::I64ReinterpretF64);
                         }
                         EnumResolvedValue::String(s) => {
                             let id = self.emitter.string_map.get(s.as_str()).copied().unwrap_or(0);
                             let bits = (STRING_TAG << 48) | (id as u64);
-                            func.instruction(&f64_const(f64::from_bits(bits)));
+                            func.instruction(&Instruction::I64Const(bits as i64));
                         }
                     }
                 } else if let Ok(n) = member_name.parse::<f64>() {
                     func.instruction(&f64_const(n));
+                    func.instruction(&Instruction::I64ReinterpretF64);
                 } else {
                     // Fallback: return the member name as a string
                     let id = self.emitter.string_map.get(member_name.as_str()).copied().unwrap_or(0);
                     let bits = (STRING_TAG << 48) | (id as u64);
-                    func.instruction(&f64_const(f64::from_bits(bits)));
+                    func.instruction(&Instruction::I64Const(bits as i64));
                 }
             }
 
@@ -4369,12 +5426,17 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_expr(func, expr);
                 let type_id = self.emitter.string_map.get(ty.as_str()).copied().unwrap_or(0);
                 let type_bits = (STRING_TAG << 48) | (type_id as u64);
-                func.instruction(&f64_const(f64::from_bits(type_bits)));
-                func.instruction(&Instruction::Call(self.rt().class_instanceof));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_store_const(func, 1, f64::from_bits(type_bits));
+                self.emit_memcall_i32(func, "class_instanceof", 2);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
 
@@ -4382,151 +5444,180 @@ impl<'a> FuncEmitCtx<'a> {
             Expr::Void(e) => {
                 self.emit_expr(func, e);
                 func.instruction(&Instruction::Drop);
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
 
             // --- String methods ---
             Expr::StringSplit(string, delim) => {
-                self.emit_expr(func, string);
-                self.emit_expr(func, delim);
-                func.instruction(&Instruction::Call(self.rt().string_split));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, string);
+                self.emit_store_arg(func, 1, delim);
+                self.emit_memcall(func, "string_split", 2);
             }
             Expr::StringFromCharCode(code) => {
-                self.emit_expr(func, code);
-                func.instruction(&Instruction::Call(self.rt().string_from_char_code));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, code);
+                self.emit_memcall(func, "string_from_char_code", 1);
             }
             Expr::StringMatch { string, regex } => {
-                self.emit_expr(func, string);
-                self.emit_expr(func, regex);
-                func.instruction(&Instruction::Call(self.rt().string_match));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, string);
+                self.emit_store_arg(func, 1, regex);
+                self.emit_memcall(func, "string_match", 2);
             }
             Expr::StringReplace { string, pattern, replacement } => {
-                self.emit_expr(func, string);
-                self.emit_expr(func, pattern);
-                self.emit_expr(func, replacement);
-                func.instruction(&Instruction::Call(self.rt().string_replace));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, string);
+                self.emit_store_arg(func, 1, pattern);
+                self.emit_store_arg(func, 2, replacement);
+                self.emit_memcall(func, "string_replace", 3);
             }
             Expr::StringCoerce(val) => {
-                self.emit_expr(func, val);
-                func.instruction(&Instruction::Call(self.rt().jsvalue_to_string));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall(func, "jsvalue_to_string", 1);
             }
 
             // --- JSON ---
             Expr::JsonParse(val) => {
-                self.emit_expr(func, val);
-                func.instruction(&Instruction::Call(self.rt().json_parse));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall(func, "json_parse", 1);
             }
             Expr::JsonStringify(val) => {
-                self.emit_expr(func, val);
-                func.instruction(&Instruction::Call(self.rt().json_stringify));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall(func, "json_stringify", 1);
             }
 
             // --- Map ---
             Expr::MapNew => {
-                func.instruction(&Instruction::Call(self.rt().map_new));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "map_new", 0);
             }
             Expr::MapSet { map, key, value } => {
-                self.emit_expr(func, map);
-                self.emit_expr(func, key);
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().map_set));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, map);
+                self.emit_store_arg(func, 1, key);
+                self.emit_store_arg(func, 2, value);
+                self.emit_memcall_void(func, "map_set", 3);
                 // void return, push the map back
                 self.emit_expr(func, map);
             }
             Expr::MapGet { map, key } => {
-                self.emit_expr(func, map);
-                self.emit_expr(func, key);
-                func.instruction(&Instruction::Call(self.rt().map_get));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, map);
+                self.emit_store_arg(func, 1, key);
+                self.emit_memcall(func, "map_get", 2);
             }
             Expr::MapHas { map, key } => {
-                self.emit_expr(func, map);
-                self.emit_expr(func, key);
-                func.instruction(&Instruction::Call(self.rt().map_has));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, map);
+                self.emit_store_arg(func, 1, key);
+                self.emit_memcall_i32(func, "map_has", 2);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
             Expr::MapDelete { map, key } => {
-                self.emit_expr(func, map);
-                self.emit_expr(func, key);
-                func.instruction(&Instruction::Call(self.rt().map_delete));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, map);
+                self.emit_store_arg(func, 1, key);
+                self.emit_memcall_void(func, "map_delete", 2);
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
             }
             Expr::MapSize(map) => {
-                self.emit_expr(func, map);
-                func.instruction(&Instruction::Call(self.rt().map_size));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, map);
+                self.emit_memcall(func, "map_size", 1);
             }
             Expr::MapClear(map) => {
-                self.emit_expr(func, map);
-                func.instruction(&Instruction::Call(self.rt().map_clear));
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, map);
+                self.emit_memcall_void(func, "map_clear", 1);
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::MapEntries(map) => {
-                self.emit_expr(func, map);
-                func.instruction(&Instruction::Call(self.rt().map_entries));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, map);
+                self.emit_memcall(func, "map_entries", 1);
             }
             Expr::MapKeys(map) => {
-                self.emit_expr(func, map);
-                func.instruction(&Instruction::Call(self.rt().map_keys));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, map);
+                self.emit_memcall(func, "map_keys", 1);
             }
             Expr::MapValues(map) => {
-                self.emit_expr(func, map);
-                func.instruction(&Instruction::Call(self.rt().map_values));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, map);
+                self.emit_memcall(func, "map_values", 1);
             }
 
             // --- Set ---
             Expr::SetNew => {
-                func.instruction(&Instruction::Call(self.rt().set_new));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "set_new", 0);
             }
             Expr::SetNewFromArray(arr) => {
-                self.emit_expr(func, arr);
-                func.instruction(&Instruction::Call(self.rt().set_new_from_array));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, arr);
+                self.emit_memcall(func, "set_new_from_array", 1);
             }
             Expr::SetAdd { set_id, value } => {
                 if let Some(&idx) = self.local_map.get(set_id) {
                     func.instruction(&Instruction::LocalGet(idx));
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().set_add));
+                self.emit_frame_begin(func, 2);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall_void(func, "set_add", 2);
                 // void, push set back
                 if let Some(&idx) = self.local_map.get(set_id) {
                     func.instruction(&Instruction::LocalGet(idx));
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
             }
             Expr::SetHas { set, value } => {
-                self.emit_expr(func, set);
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().set_has));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, set);
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall_i32(func, "set_has", 2);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
             Expr::SetDelete { set, value } => {
-                self.emit_expr(func, set);
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().set_delete));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, set);
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall_void(func, "set_delete", 2);
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
             }
             Expr::SetSize(set) => {
-                self.emit_expr(func, set);
-                func.instruction(&Instruction::Call(self.rt().set_size));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, set);
+                self.emit_memcall(func, "set_size", 1);
             }
             Expr::SetClear(set) => {
-                self.emit_expr(func, set);
-                func.instruction(&Instruction::Call(self.rt().set_clear));
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, set);
+                self.emit_memcall_void(func, "set_clear", 1);
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::SetValues(set) => {
-                self.emit_expr(func, set);
-                func.instruction(&Instruction::Call(self.rt().set_values));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, set);
+                self.emit_memcall(func, "set_values", 1);
             }
 
             // --- Date ---
@@ -4534,45 +5625,59 @@ impl<'a> FuncEmitCtx<'a> {
                 if let Some(a) = arg {
                     self.emit_expr(func, a);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().date_new));
+                self.emit_frame_begin(func, 1);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "date_new", 1);
             }
             Expr::DateGetTime(d) => {
-                self.emit_expr(func, d);
-                func.instruction(&Instruction::Call(self.rt().date_get_time));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_time", 1);
             }
             Expr::DateToISOString(d) => {
-                self.emit_expr(func, d);
-                func.instruction(&Instruction::Call(self.rt().date_to_iso_string));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_to_iso_string", 1);
             }
             Expr::DateGetFullYear(d) => {
-                self.emit_expr(func, d);
-                func.instruction(&Instruction::Call(self.rt().date_get_full_year));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_full_year", 1);
             }
             Expr::DateGetMonth(d) => {
-                self.emit_expr(func, d);
-                func.instruction(&Instruction::Call(self.rt().date_get_month));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_month", 1);
             }
             Expr::DateGetDate(d) => {
-                self.emit_expr(func, d);
-                func.instruction(&Instruction::Call(self.rt().date_get_date));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_date", 1);
             }
             Expr::DateGetHours(d) => {
-                self.emit_expr(func, d);
-                func.instruction(&Instruction::Call(self.rt().date_get_hours));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_hours", 1);
             }
             Expr::DateGetMinutes(d) => {
-                self.emit_expr(func, d);
-                func.instruction(&Instruction::Call(self.rt().date_get_minutes));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_minutes", 1);
             }
             Expr::DateGetSeconds(d) => {
-                self.emit_expr(func, d);
-                func.instruction(&Instruction::Call(self.rt().date_get_seconds));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_seconds", 1);
             }
             Expr::DateGetMilliseconds(d) => {
-                self.emit_expr(func, d);
-                func.instruction(&Instruction::Call(self.rt().date_get_milliseconds));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_milliseconds", 1);
             }
 
             // --- Error ---
@@ -4580,13 +5685,19 @@ impl<'a> FuncEmitCtx<'a> {
                 if let Some(m) = msg {
                     self.emit_expr(func, m);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().error_new));
+                self.emit_frame_begin(func, 1);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "error_new", 1);
             }
             Expr::ErrorMessage(err) => {
-                self.emit_expr(func, err);
-                func.instruction(&Instruction::Call(self.rt().error_message));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, err);
+                self.emit_memcall(func, "error_message", 1);
             }
 
             // --- RegExp ---
@@ -4595,18 +5706,20 @@ impl<'a> FuncEmitCtx<'a> {
                 let pat_bits = (STRING_TAG << 48) | (pat_id as u64);
                 let flags_id = self.emitter.string_map.get(flags.as_str()).copied().unwrap_or(0);
                 let flags_bits = (STRING_TAG << 48) | (flags_id as u64);
-                func.instruction(&f64_const(f64::from_bits(pat_bits)));
-                func.instruction(&f64_const(f64::from_bits(flags_bits)));
-                func.instruction(&Instruction::Call(self.rt().regexp_new));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_const(func, 0, f64::from_bits(pat_bits));
+                self.emit_store_const(func, 1, f64::from_bits(flags_bits));
+                self.emit_memcall(func, "regexp_new", 2);
             }
             Expr::RegExpTest { regex, string } => {
-                self.emit_expr(func, regex);
-                self.emit_expr(func, string);
-                func.instruction(&Instruction::Call(self.rt().regexp_test));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, regex);
+                self.emit_store_arg(func, 1, string);
+                self.emit_memcall_i32(func, "regexp_test", 2);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
 
@@ -4614,76 +5727,102 @@ impl<'a> FuncEmitCtx<'a> {
             Expr::ParseInt { string, radix } => {
                 self.emit_expr(func, string);
                 let _ = radix; // TODO: radix support
-                func.instruction(&Instruction::Call(self.rt().parse_int));
+                self.emit_frame_begin(func, 1);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "parse_int", 1);
             }
             Expr::ParseFloat(val) => {
-                self.emit_expr(func, val);
-                func.instruction(&Instruction::Call(self.rt().parse_float));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall(func, "parse_float", 1);
             }
             Expr::NumberCoerce(val) => {
-                self.emit_expr(func, val);
-                func.instruction(&Instruction::Call(self.rt().number_coerce));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall(func, "number_coerce", 1);
             }
             Expr::IsNaN(val) => {
-                self.emit_expr(func, val);
-                func.instruction(&Instruction::Call(self.rt().is_nan));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall_i32(func, "is_nan", 1);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
             Expr::IsFinite(val) => {
-                self.emit_expr(func, val);
-                func.instruction(&Instruction::Call(self.rt().is_finite));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall_i32(func, "is_finite", 1);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
             Expr::BigIntCoerce(_) => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
 
             // --- Math extra ---
             Expr::MathLog2(x) => {
-                self.emit_expr(func, x);
-                func.instruction(&Instruction::Call(self.rt().math_log2));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, x);
+                self.emit_memcall(func, "math_log2", 1);
             }
             Expr::MathLog10(x) => {
-                self.emit_expr(func, x);
-                func.instruction(&Instruction::Call(self.rt().math_log10));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, x);
+                self.emit_memcall(func, "math_log10", 1);
             }
             Expr::MathImul(a, b) => {
                 self.emit_expr(func, a);
+                func.instruction(&Instruction::F64ReinterpretI64);
                 func.instruction(&Instruction::I32TruncF64S);
                 self.emit_expr(func, b);
+                func.instruction(&Instruction::F64ReinterpretI64);
                 func.instruction(&Instruction::I32TruncF64S);
                 func.instruction(&Instruction::I32Mul);
                 func.instruction(&Instruction::F64ConvertI32S);
+                func.instruction(&Instruction::I64ReinterpretF64);
             }
             Expr::MathMin(args) if args.len() != 2 => {
                 // Variadic min — use bridge
                 if let Some(first) = args.first() {
                     self.emit_expr(func, first);
                     for arg in &args[1..] {
-                        self.emit_expr(func, arg);
-                        func.instruction(&Instruction::Call(self.rt().math_min));
+                        self.emit_frame_begin(func, 2);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_store_arg(func, 1, arg);
+                        self.emit_memcall(func, "math_min", 2);
                     }
                 } else {
                     func.instruction(&f64_const(f64::INFINITY));
+                    func.instruction(&Instruction::I64ReinterpretF64);
                 }
             }
             Expr::MathMax(args) if args.len() != 2 => {
                 if let Some(first) = args.first() {
                     self.emit_expr(func, first);
                     for arg in &args[1..] {
-                        self.emit_expr(func, arg);
-                        func.instruction(&Instruction::Call(self.rt().math_max));
+                        self.emit_frame_begin(func, 2);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_store_arg(func, 1, arg);
+                        self.emit_memcall(func, "math_max", 2);
                     }
                 } else {
                     func.instruction(&f64_const(f64::NEG_INFINITY));
+                    func.instruction(&Instruction::I64ReinterpretF64);
                 }
             }
 
@@ -4695,64 +5834,81 @@ impl<'a> FuncEmitCtx<'a> {
                     self.emit_expr(func, b);
                     func.instruction(&Instruction::Drop);
                 }
-                func.instruction(&Instruction::Call(self.rt().url_parse));
+                self.emit_frame_begin(func, 1);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "url_parse", 1);
             }
             Expr::UrlGetHref(u) => {
-                self.emit_expr(func, u);
-                func.instruction(&Instruction::Call(self.rt().url_get_href));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, u);
+                self.emit_memcall(func, "url_get_href", 1);
             }
             Expr::UrlGetPathname(u) => {
-                self.emit_expr(func, u);
-                func.instruction(&Instruction::Call(self.rt().url_get_pathname));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, u);
+                self.emit_memcall(func, "url_get_pathname", 1);
             }
             Expr::UrlGetProtocol(u) => {
-                self.emit_expr(func, u);
-                func.instruction(&Instruction::Call(self.rt().url_get_protocol));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, u);
+                self.emit_memcall(func, "url_get_protocol", 1);
             }
             Expr::UrlGetHost(u) | Expr::UrlGetHostname(u) => {
-                self.emit_expr(func, u);
-                func.instruction(&Instruction::Call(self.rt().url_get_hostname));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, u);
+                self.emit_memcall(func, "url_get_hostname", 1);
             }
             Expr::UrlGetPort(u) => {
-                self.emit_expr(func, u);
-                func.instruction(&Instruction::Call(self.rt().url_get_port));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, u);
+                self.emit_memcall(func, "url_get_port", 1);
             }
             Expr::UrlGetSearch(u) => {
-                self.emit_expr(func, u);
-                func.instruction(&Instruction::Call(self.rt().url_get_search));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, u);
+                self.emit_memcall(func, "url_get_search", 1);
             }
             Expr::UrlGetHash(u) => {
-                self.emit_expr(func, u);
-                func.instruction(&Instruction::Call(self.rt().url_get_hash));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, u);
+                self.emit_memcall(func, "url_get_hash", 1);
             }
             Expr::UrlGetOrigin(u) => {
-                self.emit_expr(func, u);
-                func.instruction(&Instruction::Call(self.rt().url_get_origin));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, u);
+                self.emit_memcall(func, "url_get_origin", 1);
             }
             Expr::UrlGetSearchParams(u) => {
-                self.emit_expr(func, u);
-                func.instruction(&Instruction::Call(self.rt().url_get_search_params));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, u);
+                self.emit_memcall(func, "url_get_search_params", 1);
             }
 
             // --- Process/OS ---
             Expr::ProcessArgv => {
-                func.instruction(&Instruction::Call(self.rt().process_argv));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "process_argv", 0);
             }
             Expr::ProcessCwd => {
-                func.instruction(&Instruction::Call(self.rt().process_cwd));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "process_cwd", 0);
             }
             Expr::OsPlatform => {
-                func.instruction(&Instruction::Call(self.rt().os_platform));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "os_platform", 0);
             }
             Expr::ProcessUptime | Expr::ProcessMemoryUsage |
             Expr::OsArch | Expr::OsHostname | Expr::OsHomedir | Expr::OsTmpdir |
             Expr::OsTotalmem | Expr::OsFreemem | Expr::OsUptime |
             Expr::OsType | Expr::OsRelease | Expr::OsCpus | Expr::OsNetworkInterfaces |
             Expr::OsUserInfo | Expr::OsEOL => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
 
             // --- FS stubs ---
@@ -4760,37 +5916,43 @@ impl<'a> FuncEmitCtx<'a> {
             Expr::FsExistsSync(_) | Expr::FsMkdirSync(_) |
             Expr::FsUnlinkSync(_) | Expr::FsAppendFileSync(_, _) |
             Expr::FsReadFileBinary(_) | Expr::FsRmRecursive(_) => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             // --- Path ---
             Expr::PathJoin(a, b) => {
-                self.emit_expr(func, a);
-                self.emit_expr(func, b);
-                func.instruction(&Instruction::Call(self.rt().path_join));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, a);
+                self.emit_store_arg(func, 1, b);
+                self.emit_memcall(func, "path_join", 2);
             }
             Expr::PathDirname(p) => {
-                self.emit_expr(func, p);
-                func.instruction(&Instruction::Call(self.rt().path_dirname));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, p);
+                self.emit_memcall(func, "path_dirname", 1);
             }
             Expr::PathBasename(p) => {
-                self.emit_expr(func, p);
-                func.instruction(&Instruction::Call(self.rt().path_basename));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, p);
+                self.emit_memcall(func, "path_basename", 1);
             }
             Expr::PathExtname(p) => {
-                self.emit_expr(func, p);
-                func.instruction(&Instruction::Call(self.rt().path_extname));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, p);
+                self.emit_memcall(func, "path_extname", 1);
             }
             Expr::PathResolve(p) => {
-                self.emit_expr(func, p);
-                func.instruction(&Instruction::Call(self.rt().path_resolve));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, p);
+                self.emit_memcall(func, "path_resolve", 1);
             }
             Expr::PathIsAbsolute(p) => {
-                self.emit_expr(func, p);
-                func.instruction(&Instruction::Call(self.rt().path_is_absolute));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, p);
+                self.emit_memcall_i32(func, "path_is_absolute", 1);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
             Expr::FileURLToPath(p) => {
@@ -4799,34 +5961,55 @@ impl<'a> FuncEmitCtx<'a> {
             }
             // --- Buffer/TypedArray ---
             Expr::BufferAlloc { ref size, .. } => {
-                self.emit_expr(func, size.as_ref());
-                func.instruction(&Instruction::Call(self.rt().buffer_alloc));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, size.as_ref());
+                self.emit_memcall(func, "buffer_alloc", 1);
             }
             Expr::BufferAllocUnsafe(size) => {
-                self.emit_expr(func, size);
-                func.instruction(&Instruction::Call(self.rt().buffer_alloc));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, size);
+                self.emit_memcall(func, "buffer_alloc", 1);
             }
             Expr::BufferFrom { data, encoding } => {
                 self.emit_expr(func, data);
                 if let Some(enc) = encoding {
                     self.emit_expr(func, enc);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().buffer_from_string));
+                self.emit_frame_begin(func, 2);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 1);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "buffer_from_string", 2);
             }
             Expr::BufferToString { buffer, encoding } => {
                 self.emit_expr(func, buffer);
                 if let Some(enc) = encoding {
                     self.emit_expr(func, enc);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().buffer_to_string));
+                self.emit_frame_begin(func, 2);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 1);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "buffer_to_string", 2);
             }
             Expr::BufferLength(buf) => {
-                self.emit_expr(func, buf);
-                func.instruction(&Instruction::Call(self.rt().buffer_length));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, buf);
+                self.emit_memcall(func, "buffer_length", 1);
             }
             Expr::BufferSlice { buffer, start, end } => {
                 self.emit_expr(func, buffer);
@@ -4834,29 +6017,46 @@ impl<'a> FuncEmitCtx<'a> {
                     self.emit_expr(func, s);
                 } else {
                     func.instruction(&f64_const(0.0));
+                    func.instruction(&Instruction::I64ReinterpretF64);
                 }
                 if let Some(e) = end {
                     self.emit_expr(func, e);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().buffer_slice));
+                self.emit_frame_begin(func, 3);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 2);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 1);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "buffer_slice", 3);
             }
             Expr::BufferConcat(arr) => {
-                self.emit_expr(func, arr);
-                func.instruction(&Instruction::Call(self.rt().buffer_concat));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, arr);
+                self.emit_memcall(func, "buffer_concat", 1);
             }
             Expr::BufferIndexGet { buffer, index } => {
-                self.emit_expr(func, buffer);
-                self.emit_expr(func, index);
-                func.instruction(&Instruction::Call(self.rt().buffer_get));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, buffer);
+                self.emit_store_arg(func, 1, index);
+                self.emit_memcall(func, "buffer_get", 2);
             }
             Expr::BufferIndexSet { buffer, index, value } => {
-                self.emit_expr(func, buffer);
-                self.emit_expr(func, index);
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().buffer_set));
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, buffer);
+                self.emit_store_arg(func, 1, index);
+                self.emit_store_arg(func, 2, value);
+                self.emit_memcall_void(func, "buffer_set", 3);
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::BufferCopy { source, target, target_start, source_start, source_end } => {
                 self.emit_expr(func, source);
@@ -4864,19 +6064,40 @@ impl<'a> FuncEmitCtx<'a> {
                 if let Some(ts) = target_start {
                     self.emit_expr(func, ts);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
                 if let Some(ss) = source_start {
                     self.emit_expr(func, ss);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
                 if let Some(se) = source_end {
                     self.emit_expr(func, se);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().buffer_copy));
+                self.emit_frame_begin(func, 5);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 4);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 3);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 2);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 1);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "buffer_copy", 5);
             }
             Expr::BufferWrite { buffer, string, offset, encoding } => {
                 self.emit_expr(func, buffer);
@@ -4884,72 +6105,102 @@ impl<'a> FuncEmitCtx<'a> {
                 if let Some(o) = offset {
                     self.emit_expr(func, o);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
                 if let Some(e) = encoding {
                     self.emit_expr(func, e);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                func.instruction(&Instruction::Call(self.rt().buffer_write));
+                self.emit_frame_begin(func, 4);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 3);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 2);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 1);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "buffer_write", 4);
             }
             Expr::BufferEquals { buffer, other } => {
-                self.emit_expr(func, buffer);
-                self.emit_expr(func, other);
-                func.instruction(&Instruction::Call(self.rt().buffer_equals));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, buffer);
+                self.emit_store_arg(func, 1, other);
+                self.emit_memcall_i32(func, "buffer_equals", 2);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
             Expr::BufferIsBuffer(val) => {
-                self.emit_expr(func, val);
-                func.instruction(&Instruction::Call(self.rt().buffer_is_buffer));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall_i32(func, "buffer_is_buffer", 1);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
             Expr::BufferByteLength(val) => {
-                self.emit_expr(func, val);
-                func.instruction(&Instruction::Call(self.rt().buffer_byte_length));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall(func, "buffer_byte_length", 1);
             }
             Expr::Uint8ArrayNew(size) => {
                 if let Some(s) = size {
                     self.emit_expr(func, s);
                 } else {
                     func.instruction(&f64_const(0.0));
+                    func.instruction(&Instruction::I64ReinterpretF64);
                 }
-                func.instruction(&Instruction::Call(self.rt().uint8array_new));
+                self.emit_frame_begin(func, 1);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "uint8array_new", 1);
             }
             Expr::Uint8ArrayFrom(val) => {
-                self.emit_expr(func, val);
-                func.instruction(&Instruction::Call(self.rt().uint8array_from));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall(func, "uint8array_from", 1);
             }
             Expr::Uint8ArrayLength(buf) => {
-                self.emit_expr(func, buf);
-                func.instruction(&Instruction::Call(self.rt().uint8array_length));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, buf);
+                self.emit_memcall(func, "uint8array_length", 1);
             }
             Expr::Uint8ArrayGet { array, index } => {
-                self.emit_expr(func, array);
-                self.emit_expr(func, index);
-                func.instruction(&Instruction::Call(self.rt().uint8array_get));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, array);
+                self.emit_store_arg(func, 1, index);
+                self.emit_memcall(func, "uint8array_get", 2);
             }
             Expr::Uint8ArraySet { array, index, value } => {
-                self.emit_expr(func, array);
-                self.emit_expr(func, index);
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().uint8array_set));
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, array);
+                self.emit_store_arg(func, 1, index);
+                self.emit_store_arg(func, 2, value);
+                self.emit_memcall_void(func, "uint8array_set", 3);
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             // --- Child process stubs ---
             Expr::ChildProcessExecSync { .. } | Expr::ChildProcessSpawnSync { .. } |
             Expr::ChildProcessSpawn { .. } | Expr::ChildProcessExec { .. } |
             Expr::ChildProcessSpawnBackground { .. } |
             Expr::ChildProcessGetProcessStatus(_) | Expr::ChildProcessKillProcess(_) => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             // --- Fetch ---
             Expr::FetchWithOptions { url, method, body, headers } => {
@@ -4958,126 +6209,201 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_expr(func, body);
                 // Build headers object
                 if headers.is_empty() {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 } else {
-                    let obj_new = self.rt().object_new;
-                    let obj_set = self.rt().object_set;
-                    func.instruction(&Instruction::Call(obj_new));
+                    self.emit_frame_begin(func, 0);
+                    self.emit_memcall(func, "object_new", 0);
                     for (key, val) in headers {
                         let key_id = self.emitter.string_map.get(key.as_str()).copied().unwrap_or(0);
                         let key_bits = (STRING_TAG << 48) | (key_id as u64);
-                        func.instruction(&f64_const(f64::from_bits(key_bits)));
-                        self.emit_expr(func, val);
-                        func.instruction(&Instruction::Call(obj_set));
+                        self.emit_frame_begin(func, 3);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_store_const(func, 1, f64::from_bits(key_bits));
+                        self.emit_store_arg(func, 2, val);
+                        self.emit_memcall(func, "object_set", 3);
                     }
                 }
-                func.instruction(&Instruction::Call(self.rt().fetch_with_options));
+                self.emit_frame_begin(func, 4);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 3);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 2);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 1);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "fetch_with_options", 4);
             }
             Expr::FetchGetWithAuth { url, auth_header } => {
                 self.emit_expr(func, url);
-                func.instruction(&f64_const_bits(TAG_UNDEFINED)); // method (default GET)
-                func.instruction(&f64_const_bits(TAG_UNDEFINED)); // body
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64)); // method (default GET)
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64)); // body
                 // Build headers object with Authorization
-                let obj_new = self.rt().object_new;
-                let obj_set = self.rt().object_set;
-                func.instruction(&Instruction::Call(obj_new));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "object_new", 0);
                 let auth_key_id = self.emitter.string_map.get("Authorization").copied().unwrap_or(0);
                 let auth_key_bits = (STRING_TAG << 48) | (auth_key_id as u64);
-                func.instruction(&f64_const(f64::from_bits(auth_key_bits)));
-                self.emit_expr(func, auth_header);
-                func.instruction(&Instruction::Call(obj_set));
-                func.instruction(&Instruction::Call(self.rt().fetch_with_options));
+                self.emit_frame_begin(func, 3);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_store_const(func, 1, f64::from_bits(auth_key_bits));
+                self.emit_store_arg(func, 2, auth_header);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 1);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_slot_addr(func, 2);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "object_set", 3);
+                self.emit_frame_begin(func, 4);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 3);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "fetch_with_options", 4);
             }
             Expr::FetchPostWithAuth { url, auth_header, body } => {
                 self.emit_expr(func, url);
                 // POST method string
                 let post_id = self.emitter.string_map.get("POST").copied().unwrap_or(0);
                 let post_bits = (STRING_TAG << 48) | (post_id as u64);
-                func.instruction(&f64_const(f64::from_bits(post_bits)));
+                func.instruction(&Instruction::I64Const(post_bits as i64));
                 self.emit_expr(func, body);
                 // Build headers object with Authorization
-                let obj_new = self.rt().object_new;
-                let obj_set = self.rt().object_set;
-                func.instruction(&Instruction::Call(obj_new));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "object_new", 0);
                 let auth_key_id = self.emitter.string_map.get("Authorization").copied().unwrap_or(0);
                 let auth_key_bits = (STRING_TAG << 48) | (auth_key_id as u64);
-                func.instruction(&f64_const(f64::from_bits(auth_key_bits)));
-                self.emit_expr(func, auth_header);
-                func.instruction(&Instruction::Call(obj_set));
-                func.instruction(&Instruction::Call(self.rt().fetch_with_options));
+                self.emit_frame_begin(func, 3);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_store_const(func, 1, f64::from_bits(auth_key_bits));
+                self.emit_store_arg(func, 2, auth_header);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 1);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_slot_addr(func, 2);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "object_set", 3);
+                self.emit_frame_begin(func, 4);
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 3);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_memcall(func, "fetch_with_options", 4);
             }
             // --- Net stubs ---
             Expr::NetCreateServer { .. } | Expr::NetCreateConnection { .. } |
             Expr::NetConnect { .. } => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             // --- Crypto ---
             Expr::CryptoRandomUUID => {
-                func.instruction(&Instruction::Call(self.rt().crypto_random_uuid));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "crypto_random_uuid", 0);
             }
             Expr::CryptoRandomBytes(n) => {
-                self.emit_expr(func, n);
-                func.instruction(&Instruction::Call(self.rt().crypto_random_bytes));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, n);
+                self.emit_memcall(func, "crypto_random_bytes", 1);
             }
             Expr::CryptoSha256(data) => {
-                self.emit_expr(func, data);
-                func.instruction(&Instruction::Call(self.rt().crypto_sha256));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, data);
+                self.emit_memcall(func, "crypto_sha256", 1);
             }
             Expr::CryptoMd5(data) => {
-                self.emit_expr(func, data);
-                func.instruction(&Instruction::Call(self.rt().crypto_md5));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, data);
+                self.emit_memcall(func, "crypto_md5", 1);
             }
             // --- URL SearchParams ---
             Expr::UrlSearchParamsNew(init) => {
                 if let Some(init_expr) = init {
-                    self.emit_expr(func, init_expr);
-                    func.instruction(&Instruction::Call(self.rt().url_parse));
-                    func.instruction(&Instruction::Call(self.rt().url_get_search_params));
+                    self.emit_frame_begin(func, 1);
+                    self.emit_store_arg(func, 0, init_expr);
+                    self.emit_memcall(func, "url_parse", 1);
+                    self.emit_frame_begin(func, 1);
+                    func.instruction(&Instruction::LocalSet(self.temp_local));
+                    self.emit_slot_addr(func, 0);
+                    func.instruction(&Instruction::LocalGet(self.temp_local));
+                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                    self.emit_memcall(func, "url_get_search_params", 1);
                 } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
             }
             Expr::UrlSearchParamsGet { params, name } => {
-                self.emit_expr(func, params);
-                self.emit_expr(func, name);
-                func.instruction(&Instruction::Call(self.rt().searchparams_get));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, params);
+                self.emit_store_arg(func, 1, name);
+                self.emit_memcall(func, "searchparams_get", 2);
             }
             Expr::UrlSearchParamsHas { params, name } => {
-                self.emit_expr(func, params);
-                self.emit_expr(func, name);
-                func.instruction(&Instruction::Call(self.rt().searchparams_has));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
-                func.instruction(&f64_const_bits(TAG_TRUE));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, params);
+                self.emit_store_arg(func, 1, name);
+                self.emit_memcall_i32(func, "searchparams_has", 2);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
                 func.instruction(&Instruction::Else);
-                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
                 func.instruction(&Instruction::End);
             }
             Expr::UrlSearchParamsSet { params, name, value } => {
-                self.emit_expr(func, params);
-                self.emit_expr(func, name);
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().searchparams_set));
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, params);
+                self.emit_store_arg(func, 1, name);
+                self.emit_store_arg(func, 2, value);
+                self.emit_memcall_void(func, "searchparams_set", 3);
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::UrlSearchParamsAppend { params, name, value } => {
-                self.emit_expr(func, params);
-                self.emit_expr(func, name);
-                self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().searchparams_append));
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                self.emit_frame_begin(func, 3);
+                self.emit_store_arg(func, 0, params);
+                self.emit_store_arg(func, 1, name);
+                self.emit_store_arg(func, 2, value);
+                self.emit_memcall_void(func, "searchparams_append", 3);
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::UrlSearchParamsDelete { params, name } => {
-                self.emit_expr(func, params);
-                self.emit_expr(func, name);
-                func.instruction(&Instruction::Call(self.rt().searchparams_delete));
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, params);
+                self.emit_store_arg(func, 1, name);
+                self.emit_memcall_void(func, "searchparams_delete", 2);
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::UrlSearchParamsToString(params) => {
-                self.emit_expr(func, params);
-                func.instruction(&Instruction::Call(self.rt().searchparams_to_string));
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, params);
+                self.emit_memcall(func, "searchparams_to_string", 1);
             }
             Expr::UrlSearchParamsGetAll { .. } => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             // --- JS runtime interop stubs ---
             Expr::JsLoadModule { .. } | Expr::JsGetExport { .. } |
@@ -5085,22 +6411,23 @@ impl<'a> FuncEmitCtx<'a> {
             Expr::JsGetProperty { .. } | Expr::JsSetProperty { .. } |
             Expr::JsNew { .. } | Expr::JsNewFromHandle { .. } |
             Expr::JsCreateCallback { .. } => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             // --- Misc ---
             Expr::ImportMetaUrl(_) | Expr::StaticPluginResolve(_) => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::Yield { .. } => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::BigInt(_) | Expr::NativeModuleRef(_) => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
 
             // --- DateNow ---
             Expr::DateNow => {
-                func.instruction(&Instruction::Call(self.rt().date_now));
+                self.emit_frame_begin(func, 0);
+                self.emit_memcall(func, "date_now", 0);
             }
 
             // --- Sequence ---
@@ -5112,13 +6439,13 @@ impl<'a> FuncEmitCtx<'a> {
                     }
                 }
                 if exprs.is_empty() {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
             }
 
             // --- Catch-all: emit undefined ---
             _ => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
         }
     }

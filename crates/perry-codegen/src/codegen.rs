@@ -843,7 +843,14 @@ impl Compiler {
                     Some(Expr::Uint8ArrayNew(_)) | Some(Expr::Uint8ArrayFrom(_)) |
                     Some(Expr::ChildProcessExecSync { .. }))
                     || is_buffer_from_native
-                    || matches!(ty, HirType::Named(name) if name == "Uint8Array" || name == "Buffer");
+                    || matches!(ty, HirType::Named(name) if name == "Uint8Array" || name == "Buffer")
+                    // Detect chained buffer methods: new Uint8Array(n).fill(v), Buffer.alloc(n).fill(v)
+                    || matches!(init, Some(Expr::Call { callee, .. }) if matches!(callee.as_ref(),
+                        Expr::PropertyGet { object, property } if property == "fill" && matches!(object.as_ref(),
+                            Expr::Uint8ArrayNew(_) | Expr::BufferAlloc { .. } | Expr::BufferAllocUnsafe(_) |
+                            Expr::BufferFrom { .. } | Expr::BufferSlice { .. } | Expr::BufferConcat(_)
+                        )
+                    ));
 
                 // Track compile-time constant values for const module-level variables.
                 // Special case: `declare const __platform__: number` is injected with

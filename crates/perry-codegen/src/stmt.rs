@@ -653,13 +653,23 @@ pub(crate) fn compile_stmt(
 
             // Helper to detect if an expression produces a buffer
             fn is_buffer_expr(expr: &Expr) -> bool {
-                matches!(expr,
+                match expr {
                     Expr::BufferFrom { .. } | Expr::BufferAlloc { .. } | Expr::BufferAllocUnsafe(_) |
                     Expr::BufferConcat(_) | Expr::BufferSlice { .. } | Expr::BufferFill { .. } |
-                    Expr::ChildProcessExecSync { .. } | Expr::CryptoRandomBytes(_)
-                ) || matches!(expr, Expr::NativeMethodCall { module, method, .. }
-                    if module == "crypto" && method == "randomBytes"
-                )
+                    Expr::Uint8ArrayNew(_) | Expr::Uint8ArrayFrom(_) |
+                    Expr::ChildProcessExecSync { .. } | Expr::CryptoRandomBytes(_) => true,
+                    Expr::NativeMethodCall { module, method, .. }
+                        if module == "crypto" && method == "randomBytes" => true,
+                    // Detect chained buffer methods: new Uint8Array(n).fill(v)
+                    Expr::Call { callee, .. } => {
+                        if let Expr::PropertyGet { object, property } = callee.as_ref() {
+                            property == "fill" && is_buffer_expr(object.as_ref())
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                }
             }
 
             // Use declared type information first, fall back to expression inference
@@ -682,7 +692,9 @@ pub(crate) fn compile_stmt(
                         None
                     }
                 });
-                (class_name, true, is_typed_array, false, is_typed_bigint, is_typed_closure, is_typed_map, is_typed_set, false, false)
+                let is_typed_buffer = matches!(ty, HirType::Named(name) if name == "Uint8Array" || name == "Buffer")
+                    || init.as_ref().map(|e| is_buffer_expr(e)).unwrap_or(false);
+                (class_name, true, is_typed_array, false, is_typed_bigint, is_typed_closure, is_typed_map, is_typed_set, is_typed_buffer, false)
             } else {
                 // Fall back to expression inference for untyped cases
                 match init {

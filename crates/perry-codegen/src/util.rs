@@ -39,6 +39,9 @@ thread_local! {
     /// Compile-time platform target for the `__platform__` built-in constant.
     /// 0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux.
     pub(crate) static COMPILE_TARGET: Cell<i64> = Cell::new(0);
+    /// Compile-time feature flags. Set from --features CLI flag.
+    /// Used to inject `__plugins__` and `__feature_NAME__` constants.
+    pub(crate) static ENABLED_FEATURES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// Current static method's class name, so `this.method()` inside static methods
     /// can be resolved to direct static method calls on the same class.
     pub(crate) static CURRENT_STATIC_CLASS_NAME: RefCell<Option<String>> = RefCell::new(None);

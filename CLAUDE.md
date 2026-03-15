@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.187
+**Current Version:** 0.2.189
 
 ## Workflow Requirements
 
@@ -152,6 +152,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.189
+- **WASM target: Firefox NaN canonicalization fix**: replace ALL bridge function calls with memory-based calling convention (`mem_call`/`mem_call_i32`); WASM writes f64 args to memory at 0xFF00 (preserves NaN-boxed payloads), JS reads via Float64Array; fixes Firefox corrupting STRING_TAG/POINTER_TAG values passed as function parameters; `__memDispatch` table routes 150+ bridge functions; `emit_bridgeN`/`emit_bridgeN_i32`/`emit_bridgeN_void` convenience methods; minimum 2 memory pages for arg buffer region
+
+### v0.2.188
+- **WASM target: full perry/ui support**: generic UI dispatcher (`ui_call`/`ui_call_method` bridge imports) routes all `perry/ui` and `perry/system` NativeMethodCalls through JS runtime; 170+ DOM-based UI functions ported from web runtime including widget creation (App, VStack, HStack, ZStack, Text, Button, TextField, SecureField, Toggle, Slider, ScrollView, Canvas, etc.), reactive State system (create/get/set/bindText/bindSlider/bindToggle/bindVisibility/bindForEach), styling (background, foreground, font, padding, border, opacity, animations), events (onClick, onHover, onDoubleClick), canvas drawing (fillRect, strokeRect, paths, text), menus, toolbars, sheets, dialogs, keyboard shortcuts, navigation stacks, windows, system APIs (openURL, isDarkMode, preferences, keychain, notifications); closures bridged through WASM indirect call table via `callWasmClosure` helper
 
 ### v0.2.187
 - **WASM target: complete gap fixes**: class getters/setters auto-invoked via `__get_`/`__set_` prefix dispatch in `class_get_field`/`class_set_field`; bridge exception propagation (JSON.parse, RegExp, URL errors set `currentException` when inside try/catch); setTimeout/setInterval/clearTimeout/clearInterval bridges; response property bridges (`response_status`, `response_ok`, `response_headers_get`, `response_url`); `response.json()`/`response.text()` dispatch in NativeMethodCall; Buffer `copy`/`write`/`equals`/`isBuffer`/`byteLength` implemented; `crypto.sha256` via SubtleCrypto (async), `path.isAbsolute` fixed; fetch auth headers for `FetchGetWithAuth`/`FetchPostWithAuth`; expanded JS emitter (IndexGet/Set, ArrayPush, StringCoerce, Math, typeof, delete, Sequence, ExternFuncRef); NativeMethodCall unknown-method fallback to `class_call_method`; void method return fix

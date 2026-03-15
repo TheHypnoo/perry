@@ -6,6 +6,10 @@ edition.workspace = true
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[features]
+default = []
+plugins = []
+
 [dependencies]
 perry-ui = { path = "../perry-ui" }
 libc = "0.2"

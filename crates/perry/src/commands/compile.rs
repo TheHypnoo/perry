@@ -74,6 +74,12 @@ pub struct CompileArgs {
     /// Automatically enabled for --target web.
     #[arg(long)]
     pub minify: bool,
+
+    /// Enable compile-time feature flags (comma-separated).
+    /// Each feature becomes a `__feature_NAME__` constant (0 or 1) for dead-code elimination.
+    /// Example: --features plugins,experimental
+    #[arg(long)]
+    pub features: Option<String>,
 }
 
 /// Information about a JavaScript module that will be interpreted at runtime
@@ -2746,6 +2752,23 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
         // Set output type for dylib support
         compiler.set_output_type(args.output_type.clone());
+
+        // Pass compile-time feature flags
+        if let Some(ref features_str) = args.features {
+            let mut features: Vec<String> = Vec::new();
+            for f in features_str.split(',') {
+                let trimmed = f.trim();
+                if !trimmed.is_empty() {
+                    features.push(trimmed.to_string());
+                }
+            }
+            // Auto-disable plugins on mobile targets (App Store policies)
+            let is_mobile = matches!(target.as_deref(), Some("ios") | Some("ios-simulator") | Some("android"));
+            if is_mobile {
+                features.retain(|f| f != "plugins");
+            }
+            compiler.set_enabled_features(features);
+        }
 
         // For entry module, add init function calls for all other native modules
         if is_entry {
