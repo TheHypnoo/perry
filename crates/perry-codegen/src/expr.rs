@@ -10417,8 +10417,14 @@ pub(crate) fn compile_expr(
                             for (idx, &arg_val) in effective_args.iter().enumerate() {
                                 let arg_type = builder.func.dfg.value_type(arg_val);
                                 let arg_f64 = if arg_type == types::I64 {
-                                    // Check if this arg is a known pointer type (object, array, closure)
-                                    // vs an integer value stored as I64 (from integer-optimized expressions)
+                                    // Check arg type: string → STRING_TAG, pointer → POINTER_TAG, int → f64
+                                    let is_string_arg = if idx < args.len() {
+                                        match &args[idx] {
+                                            Expr::String(_) => true,
+                                            Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                                            _ => false,
+                                        }
+                                    } else { false };
                                     let is_pointer_arg = if idx < args.len() {
                                         matches!(&args[idx],
                                             Expr::Object(_) | Expr::ObjectSpread { .. } | Expr::Array(_) | Expr::ArraySpread(_) |
@@ -10429,8 +10435,9 @@ pub(crate) fn compile_expr(
                                     } else {
                                         false
                                     };
-                                    if is_pointer_arg {
-                                        // NaN-box with POINTER_TAG so typeof returns 'object'
+                                    if is_string_arg {
+                                        inline_nanbox_string(builder, arg_val)
+                                    } else if is_pointer_arg {
                                         inline_nanbox_pointer(builder, arg_val)
                                     } else {
                                         // Integer value stored as I64 — convert to f64 number
