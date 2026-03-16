@@ -198,6 +198,17 @@ impl crate::codegen::Compiler {
                     let gc_init_ref = self.module.declare_func_in_func(*gc_init_id, builder.func);
                     builder.ins().call(gc_init_ref, &[]);
                 }
+
+                // Start geisterhand HTTP server if enabled
+                if self.needs_geisterhand {
+                    let mut gh_sig = self.module.make_signature();
+                    gh_sig.params.push(AbiParam::new(types::I32)); // port
+                    if let Ok(gh_func_id) = self.module.declare_function("perry_geisterhand_start", Linkage::Import, &gh_sig) {
+                        let gh_func_ref = self.module.declare_func_in_func(gh_func_id, builder.func);
+                        let port_val = builder.ins().iconst(types::I32, 7676);
+                        builder.ins().call(gh_func_ref, &[port_val]);
+                    }
+                }
             }
 
             // Initialize JS runtime at the start of main() if needed

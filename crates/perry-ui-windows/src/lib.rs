@@ -13,6 +13,9 @@ pub mod widgets;
 pub mod window;
 pub mod layout;
 
+#[cfg(feature = "geisterhand")]
+pub mod screenshot;
+
 // =============================================================================
 // FFI exports — these are the functions called from Cranelift-generated code
 // =============================================================================
@@ -946,10 +949,18 @@ pub extern "C" fn perry_ui_embed_nsview(hwnd_ptr: i64) -> i64 {
     if hwnd_ptr == 0 {
         return 0;
     }
-    let hwnd = windows::Win32::Foundation::HWND(hwnd_ptr as *mut std::ffi::c_void);
-    let handle = widgets::register_widget(hwnd, widgets::WidgetKind::Canvas, 0);
-    widgets::set_fills_remaining(handle, true);
-    handle
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = windows::Win32::Foundation::HWND(hwnd_ptr as *mut std::ffi::c_void);
+        let handle = widgets::register_widget(hwnd, widgets::WidgetKind::Canvas, 0);
+        widgets::set_fills_remaining(handle, true);
+        handle
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hwnd_ptr;
+        0
+    }
 }
 
 /// Request location permission (stub — not available on Windows desktop).

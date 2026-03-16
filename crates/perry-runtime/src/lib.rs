@@ -43,6 +43,8 @@ pub mod stdlib_stubs;
 pub mod redis_client;
 #[cfg(feature = "full")]
 pub mod plugin;
+#[cfg(feature = "geisterhand")]
+pub mod geisterhand_registry;
 
 pub use value::JSValue;
 pub use promise::Promise;

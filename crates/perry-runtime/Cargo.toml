@@ -13,6 +13,8 @@ default = ["full"]
 full = ["dep:hostname", "dep:dirs", "dep:whoami", "dep:postgres", "dep:redis"]
 # When perry-stdlib is the consumer, exclude no-op stubs to avoid duplicate symbols
 stdlib = []
+# Enable geisterhand in-process fuzzer (callback registry + dispatch queue)
+geisterhand = []
 
 [dependencies]
 thiserror.workspace = true

@@ -268,6 +268,11 @@ pub fn app_run(app_handle: i64) {
                         js_interval_timer_tick();
                     }
                 }
+                    #[cfg(feature = "geisterhand")]
+                    {
+                        extern "C" { fn perry_geisterhand_pump(); }
+                        unsafe { perry_geisterhand_pump(); }
+                    }
             }
         }
     }

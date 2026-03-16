@@ -115,6 +115,12 @@ pub fn add_item(menu_handle: i64, title_ptr: *const u8, callback: f64) {
             item.setTarget(Some(&target));
             std::mem::forget(target);
 
+            #[cfg(feature = "geisterhand")]
+            {
+                extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+                perry_geisterhand_register(menu_handle, 5, 0, callback, title_ptr);
+            }
+
             menu.addItem(&item);
         }
     }
@@ -149,6 +155,12 @@ pub fn add_item_with_shortcut(menu_handle: i64, title_ptr: *const u8, callback: 
 
             item.setTarget(Some(&target));
             std::mem::forget(target);
+
+            #[cfg(feature = "geisterhand")]
+            {
+                extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+                perry_geisterhand_register(menu_handle, 5, 0, callback, title_ptr);
+            }
 
             menu.addItem(&item);
         }

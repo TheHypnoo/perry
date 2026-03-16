@@ -100,6 +100,11 @@ pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
 
     let global = env.new_global_ref(button).expect("Failed to create global ref");
     let handle = super::register_widget(global);
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+        unsafe { perry_geisterhand_register(handle, 0, 0, on_press, label_ptr); }
+    }
     unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
     handle
 }

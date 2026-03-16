@@ -29,6 +29,8 @@ thread_local! {
     static NEXT_CALLBACK_KEY: RefCell<usize> = RefCell::new(1);
     /// Reference to the GTK Application (public for sheet/toolbar/window/system access).
     pub(crate) static GTK_APP: RefCell<Option<Application>> = RefCell::new(None);
+    /// Reference to the main ApplicationWindow (public for screenshot capture).
+    pub(crate) static APP_WINDOW: RefCell<Option<ApplicationWindow>> = RefCell::new(None);
     /// Timer callbacks (interval_ms, callback f64)
     static TIMER_CALLBACKS: RefCell<Vec<(f64, f64)>> = RefCell::new(Vec::new());
     /// App lifecycle callbacks
@@ -146,6 +148,13 @@ pub fn app_run(_app_handle: i64) {
                     .default_height(entry.height as i32)
                     .build();
 
+                // Store the window for screenshot capture (first window wins).
+                APP_WINDOW.with(|aw| {
+                    if aw.borrow().is_none() {
+                        *aw.borrow_mut() = Some(window.clone());
+                    }
+                });
+
                 // Set min/max size hints via GDK geometry
                 if let Some((min_w, min_h)) = entry.min_size {
                     window.set_size_request(min_w as i32, min_h as i32);
@@ -191,6 +200,11 @@ pub fn app_run(_app_handle: i64) {
                     }
                     let ptr = unsafe { js_nanbox_get_pointer(cb) } as *const u8;
                     unsafe { js_closure_call0(ptr); }
+                    #[cfg(feature = "geisterhand")]
+                    {
+                        extern "C" { fn perry_geisterhand_pump(); }
+                        unsafe { perry_geisterhand_pump(); }
+                    }
                     glib::ControlFlow::Continue
                 });
             }

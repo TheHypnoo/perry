@@ -9,6 +9,9 @@ pub mod state;
 pub mod string_header;
 pub mod widgets;
 
+#[cfg(feature = "geisterhand")]
+pub mod screenshot;
+
 /// Run a closure, catching any Rust panics so they don't abort across the FFI boundary.
 /// Logs the panic message to stderr and returns the error if one occurred.
 pub fn catch_callback_panic<F: FnOnce() + std::panic::UnwindSafe>(label: &str, f: F) {

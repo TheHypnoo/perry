@@ -9,6 +9,8 @@ pub mod json;
 pub mod keychain;
 pub mod location;
 pub mod menu;
+#[cfg(feature = "geisterhand")]
+pub mod screenshot;
 pub mod sheet;
 pub mod state;
 pub mod stdlib_stubs;

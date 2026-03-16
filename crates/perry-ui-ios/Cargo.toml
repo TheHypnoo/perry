@@ -9,6 +9,7 @@ crate-type = ["rlib", "staticlib"]
 [features]
 default = []
 plugins = []
+geisterhand = []
 
 [dependencies]
 perry-ui = { path = "../perry-ui" }

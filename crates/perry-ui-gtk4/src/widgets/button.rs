@@ -56,7 +56,13 @@ pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
         }
     });
 
-    super::register_widget(button.upcast())
+    let handle = super::register_widget(button.upcast());
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+        unsafe { perry_geisterhand_register(handle, 0, 0, on_press, label_ptr); }
+    }
+    handle
 }
 
 /// Set whether a button has a visible border/frame.

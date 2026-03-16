@@ -122,6 +122,7 @@ pub fn run(args: RunArgs, format: OutputFormat, use_color: bool, verbose: u8) ->
         type_check: args.type_check,
         minify: target.as_deref() == Some("web"),
         features: None,
+        enable_geisterhand: false,
     };
 
     let result = super::compile::run(compile_args, format, use_color, verbose)?;

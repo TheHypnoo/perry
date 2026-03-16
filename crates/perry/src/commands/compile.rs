@@ -80,6 +80,11 @@ pub struct CompileArgs {
     /// Example: --features plugins,experimental
     #[arg(long)]
     pub features: Option<String>,
+
+    /// Enable geisterhand in-process input fuzzer (debug/testing).
+    /// Starts an HTTP server on port 7676 for programmatic UI interaction.
+    #[arg(long)]
+    pub enable_geisterhand: bool,
 }
 
 /// Information about a JavaScript module that will be interpreted at runtime
@@ -125,6 +130,8 @@ pub struct CompilationContext {
     pub resolve_cache: HashMap<(String, PathBuf), Option<(PathBuf, ModuleKind)>>,
     /// Cache for find_node_modules results: start_dir -> Option<node_modules_dir>
     pub node_modules_cache: HashMap<PathBuf, Option<PathBuf>>,
+    /// Whether geisterhand (in-process input fuzzer) is enabled
+    pub needs_geisterhand: bool,
 }
 
 impl std::fmt::Debug for CompilationContext {
@@ -155,6 +162,7 @@ impl CompilationContext {
             type_checker: None,
             resolve_cache: HashMap::new(),
             node_modules_cache: HashMap::new(),
+            needs_geisterhand: false,
         }
     }
 }
@@ -507,6 +515,54 @@ fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
         }
     };
     find_library(lib_name, target)
+}
+
+fn find_geisterhand_library() -> Option<PathBuf> {
+    // Geisterhand libs built in target/geisterhand/release/
+    let candidates = [
+        PathBuf::from("target/geisterhand/release/libperry_ui_geisterhand.a"),
+        PathBuf::from("target/geisterhand/release/perry_ui_geisterhand.lib"),
+    ];
+    for path in &candidates {
+        if path.exists() {
+            return Some(path.clone());
+        }
+    }
+    // Also check standard target dir
+    find_library(if cfg!(target_os = "windows") { "perry_ui_geisterhand.lib" } else { "libperry_ui_geisterhand.a" }, None)
+}
+
+fn find_geisterhand_runtime(target: Option<&str>) -> Option<PathBuf> {
+    let name = if matches!(target, Some("windows")) || cfg!(target_os = "windows") {
+        "perry_runtime.lib"
+    } else {
+        "libperry_runtime.a"
+    };
+    // Try geisterhand build dir first
+    let gh_path = PathBuf::from(format!("target/geisterhand/release/{}", name));
+    if gh_path.exists() {
+        return Some(gh_path);
+    }
+    None
+}
+
+fn find_geisterhand_ui(target: Option<&str>) -> Option<PathBuf> {
+    let name = if matches!(target, Some("ios-simulator") | Some("ios")) {
+        "libperry_ui_ios.a"
+    } else if matches!(target, Some("android")) {
+        "libperry_ui_android.a"
+    } else if matches!(target, Some("linux")) || cfg!(target_os = "linux") {
+        "libperry_ui_gtk4.a"
+    } else if matches!(target, Some("windows")) || cfg!(target_os = "windows") {
+        "perry_ui_windows.lib"
+    } else {
+        "libperry_ui_macos.a"
+    };
+    let gh_path = PathBuf::from(format!("target/geisterhand/release/{}", name));
+    if gh_path.exists() {
+        return Some(gh_path);
+    }
+    None
 }
 
 /// Check if a package directory has a perry.nativeLibrary field in its package.json
@@ -2034,6 +2090,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         OutputFormat::Json => {}
     }
 
+    if args.enable_geisterhand {
+        ctx.needs_geisterhand = true;
+    }
+
     // --- Web target: emit JavaScript instead of native code ---
     if args.target.as_deref() == Some("web") {
         return compile_for_web(&ctx, &args, format);
@@ -2797,6 +2857,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
         // Tell codegen whether stdlib functions are available
         compiler.set_needs_stdlib(ctx.needs_stdlib);
+        compiler.set_needs_geisterhand(ctx.needs_geisterhand);
 
         // Pass external native library FFI functions to codegen
         if !ctx.native_libraries.is_empty() {
@@ -3207,7 +3268,17 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         });
     }
 
-    let runtime_lib = find_runtime_library(target.as_deref())?;
+    // When geisterhand is enabled, prefer the geisterhand-enabled runtime
+    // (has the registry, dispatch queue, and pump functions)
+    let runtime_lib = if ctx.needs_geisterhand {
+        if let Some(gh_rt) = find_geisterhand_runtime(target.as_deref()) {
+            gh_rt
+        } else {
+            find_runtime_library(target.as_deref())?
+        }
+    } else {
+        find_runtime_library(target.as_deref())?
+    };
     let stdlib_lib = find_stdlib_library(target.as_deref());
     let jsruntime_lib = if !is_ios && !is_android && (ctx.needs_js_runtime || args.enable_js_runtime) {
         match find_jsruntime_library(target.as_deref()) {
@@ -3528,7 +3599,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     // Link perry/ui library and platform frameworks if needed
     if ctx.needs_ui {
-        if let Some(ui_lib) = find_ui_library(target.as_deref()) {
+        // When geisterhand is enabled, prefer the geisterhand-enabled UI lib
+        // (it contains widget registration calls that the normal lib doesn't have)
+        let ui_lib_option = if ctx.needs_geisterhand {
+            find_geisterhand_ui(target.as_deref()).or_else(|| find_ui_library(target.as_deref()))
+        } else {
+            find_ui_library(target.as_deref())
+        };
+        if let Some(ui_lib) = ui_lib_option {
             // On Windows, the UI staticlib bundles its own copies of perry-runtime and
             // Rust std. When perry-stdlib is also linked (which bundles the same), the
             // duplicate Rust std CRT init causes a pre-main crash. Fix: extract only the
@@ -3576,7 +3654,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
 
             match format {
-                OutputFormat::Text => println!("Linking perry/ui (native UI)"),
+                OutputFormat::Text => println!("Linking perry/ui (native UI) from {}", ui_lib.display()),
                 OutputFormat::Json => {}
             }
         } else {
@@ -3593,6 +3671,35 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             };
             return Err(anyhow!(
                 "perry/ui imported but {} not found. Build with: {}", lib_name, build_cmd
+            ));
+        }
+    }
+
+    // Link geisterhand libraries if enabled
+    if ctx.needs_geisterhand {
+        if let Some(gh_lib) = find_geisterhand_library() {
+            cmd.arg(&gh_lib);
+            // Link geisterhand-enabled runtime (has the registry + pump functions)
+            if let Some(gh_runtime) = find_geisterhand_runtime(target.as_deref()) {
+                cmd.arg(&gh_runtime);
+                // ELF linkers need --allow-multiple-definition; macOS Mach-O uses first-wins natively
+                if is_linux || is_android {
+                    cmd.arg("-Wl,--allow-multiple-definition");
+                }
+            }
+            // Note: geisterhand-enabled UI lib is already linked above via
+            // the needs_ui block (find_geisterhand_ui preferred over find_ui_library)
+            match format {
+                OutputFormat::Text => println!("Linking geisterhand (in-process fuzzer)"),
+                OutputFormat::Json => {}
+            }
+        } else {
+            return Err(anyhow!(
+                "--enable-geisterhand requires geisterhand libraries. Build with:\n  \
+                CARGO_TARGET_DIR=target/geisterhand cargo build --release \\\n    \
+                -p perry-runtime --features geisterhand \\\n    \
+                -p perry-ui-macos --features geisterhand \\\n    \
+                -p perry-ui-geisterhand"
             ));
         }
     }

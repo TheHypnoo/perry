@@ -10319,46 +10319,47 @@ pub(crate) fn compile_expr(
                             };
 
                             // Handle rest params: if this closure has rest params, pack args into array
-                            let effective_args: Vec<Value> = if let Some(cfid) = info.closure_func_id {
-                                if let Some(&rest_idx) = func_rest_param_index.get(&cfid) {
-                                    // Pack rest args into an array (same logic as FuncRef path)
-                                    let regular_args = &arg_vals[..rest_idx.min(arg_vals.len())];
-                                    let rest_args = if rest_idx < arg_vals.len() { &arg_vals[rest_idx..] } else { &[] };
-                                    let rest_array = if rest_args.is_empty() {
-                                        let alloc_func = extern_funcs.get("js_array_from_f64")
-                                            .ok_or_else(|| anyhow!("js_array_from_f64 not declared"))?;
-                                        let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
-                                        let null_ptr = builder.ins().iconst(types::I64, 0);
-                                        let zero_count = builder.ins().iconst(types::I32, 0);
-                                        let call = builder.ins().call(alloc_ref, &[null_ptr, zero_count]);
-                                        builder.inst_results(call)[0]
-                                    } else {
-                                        let count = rest_args.len();
-                                        let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                                            StackSlotKind::ExplicitSlot, (count * 8) as u32, 0));
-                                        for (i, &val) in rest_args.iter().enumerate() {
-                                            let vt = builder.func.dfg.value_type(val);
-                                            let sv = if vt == types::I64 { inline_nanbox_pointer(builder, val) } else { val };
-                                            builder.ins().stack_store(sv, slot, (i * 8) as i32);
-                                        }
-                                        let slot_addr = builder.ins().stack_addr(types::I64, slot, 0);
-                                        let alloc_func = extern_funcs.get("js_array_from_f64")
-                                            .ok_or_else(|| anyhow!("js_array_from_f64 not declared"))?;
-                                        let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
-                                        let count_val = builder.ins().iconst(types::I32, count as i64);
-                                        let call = builder.ins().call(alloc_ref, &[slot_addr, count_val]);
-                                        builder.inst_results(call)[0]
-                                    };
-                                    // NaN-box the array pointer for the closure param
-                                    let rest_f64 = inline_nanbox_pointer(builder, rest_array);
-                                    let mut result = regular_args.to_vec();
-                                    result.push(rest_f64);
-                                    result
+                            let has_rest = info.closure_func_id
+                                .and_then(|cfid| func_rest_param_index.get(&cfid))
+                                .copied();
+
+                            let effective_args: Vec<Value> = if let Some(rest_idx) = has_rest {
+                                // Pack rest args into an array (same logic as FuncRef path)
+                                let regular_args = &arg_vals[..rest_idx.min(arg_vals.len())];
+                                let rest_args = if rest_idx < arg_vals.len() { &arg_vals[rest_idx..] } else { &[] };
+                                let rest_array = if rest_args.is_empty() {
+                                    let alloc_func = extern_funcs.get("js_array_from_f64")
+                                        .ok_or_else(|| anyhow!("js_array_from_f64 not declared"))?;
+                                    let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
+                                    let null_ptr = builder.ins().iconst(types::I64, 0);
+                                    let zero_count = builder.ins().iconst(types::I32, 0);
+                                    let call = builder.ins().call(alloc_ref, &[null_ptr, zero_count]);
+                                    builder.inst_results(call)[0]
                                 } else {
-                                    arg_vals.clone()
-                                }
+                                    let count = rest_args.len();
+                                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                                        StackSlotKind::ExplicitSlot, (count * 8) as u32, 0));
+                                    for (i, &val) in rest_args.iter().enumerate() {
+                                        let vt = builder.func.dfg.value_type(val);
+                                        let sv = if vt == types::I64 { inline_nanbox_pointer(builder, val) } else { val };
+                                        builder.ins().stack_store(sv, slot, (i * 8) as i32);
+                                    }
+                                    let slot_addr = builder.ins().stack_addr(types::I64, slot, 0);
+                                    let alloc_func = extern_funcs.get("js_array_from_f64")
+                                        .ok_or_else(|| anyhow!("js_array_from_f64 not declared"))?;
+                                    let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
+                                    let count_val = builder.ins().iconst(types::I32, count as i64);
+                                    let call = builder.ins().call(alloc_ref, &[slot_addr, count_val]);
+                                    builder.inst_results(call)[0]
+                                };
+                                // NaN-box the array pointer for the closure param
+                                let rest_f64 = inline_nanbox_pointer(builder, rest_array);
+                                let mut result = regular_args.to_vec();
+                                result.push(rest_f64);
+                                result
                             } else {
-                                arg_vals.clone()
+                                // No rest params — use args directly (no clone needed, just reference)
+                                arg_vals.to_vec()
                             };
 
                             // Select the appropriate js_closure_call* function based on arg count
@@ -10387,11 +10388,28 @@ pub(crate) fn compile_expr(
                             // Build call args: [closure_ptr, ...args]
                             // Closure call functions expect all args as f64, so convert as needed
                             let mut call_args = vec![closure_ptr];
-                            for &arg_val in effective_args.iter() {
+                            for (idx, &arg_val) in effective_args.iter().enumerate() {
                                 let arg_type = builder.func.dfg.value_type(arg_val);
                                 let arg_f64 = if arg_type == types::I64 {
-                                    // NaN-box with POINTER_TAG so typeof returns 'object' inside closure
-                                    inline_nanbox_pointer(builder, arg_val)
+                                    // Check if this arg is a known pointer type (object, array, closure)
+                                    // vs an integer value stored as I64 (from integer-optimized expressions)
+                                    let is_pointer_arg = if idx < args.len() {
+                                        matches!(&args[idx],
+                                            Expr::Object(_) | Expr::ObjectSpread { .. } | Expr::Array(_) | Expr::ArraySpread(_) |
+                                            Expr::New { .. } | Expr::MapNew | Expr::SetNew | Expr::SetNewFromArray(_) |
+                                            Expr::Closure { .. } | Expr::BufferFrom { .. } | Expr::BufferAlloc { .. } |
+                                            Expr::Uint8ArrayNew(_) | Expr::Uint8ArrayFrom(_)
+                                        ) || matches!(&args[idx], Expr::LocalGet(id) if locals.get(id).map(|i| i.is_pointer || i.is_array || i.is_closure || i.is_map || i.is_set || i.is_buffer).unwrap_or(false))
+                                    } else {
+                                        false
+                                    };
+                                    if is_pointer_arg {
+                                        // NaN-box with POINTER_TAG so typeof returns 'object'
+                                        inline_nanbox_pointer(builder, arg_val)
+                                    } else {
+                                        // Integer value stored as I64 — convert to f64 number
+                                        builder.ins().fcvt_from_sint(types::F64, arg_val)
+                                    }
                                 } else if arg_type == types::I32 {
                                     builder.ins().fcvt_from_sint(types::F64, arg_val)
                                 } else {

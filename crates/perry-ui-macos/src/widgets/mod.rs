@@ -766,6 +766,13 @@ pub fn set_on_hover(handle: i64, callback: f64) {
     HOVER_CALLBACKS.with(|cbs| {
         cbs.borrow_mut().insert(handle, callback);
     });
+
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+        unsafe { perry_geisterhand_register(handle, 0, 3, callback, std::ptr::null()); }
+    }
+
     if let Some(view) = get_widget(handle) {
         unsafe {
             // Add tracking area for mouse enter/exit
@@ -788,6 +795,13 @@ pub fn set_on_double_click(handle: i64, callback: f64) {
     DOUBLE_CLICK_CALLBACKS.with(|cbs| {
         cbs.borrow_mut().insert(handle, callback);
     });
+
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+        unsafe { perry_geisterhand_register(handle, 0, 4, callback, std::ptr::null()); }
+    }
+
     if let Some(view) = get_widget(handle) {
         unsafe {
             let gr_cls = AnyClass::get(c"NSClickGestureRecognizer").unwrap();
@@ -868,6 +882,12 @@ pub fn set_on_click(handle: i64, callback: f64) {
 
             // Leak target to keep it alive
             std::mem::forget(target);
+
+            #[cfg(feature = "geisterhand")]
+            {
+                extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+                perry_geisterhand_register(handle, 0, 0, callback, std::ptr::null());
+            }
         }
     }
 }

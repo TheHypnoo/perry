@@ -28,14 +28,14 @@ struct PendingShortcut {
 thread_local! {
     static ON_TERMINATE_CALLBACK: RefCell<Option<f64>> = RefCell::new(None);
     static ON_ACTIVATE_CALLBACK: RefCell<Option<f64>> = RefCell::new(None);
-    static WINDOWS: RefCell<Vec<WindowEntry>> = RefCell::new(Vec::new());
+    pub(crate) static WINDOWS: RefCell<Vec<WindowEntry>> = RefCell::new(Vec::new());
     static PENDING_ICON_PATH: RefCell<Option<String>> = RefCell::new(None);
     /// Files requested to be opened via macOS Open With / double-click.
     static PENDING_OPEN_FILES: RefCell<Vec<String>> = RefCell::new(Vec::new());
 }
 
-struct WindowEntry {
-    window: Retained<NSWindow>,
+pub(crate) struct WindowEntry {
+    pub(crate) window: Retained<NSWindow>,
 }
 
 struct AppEntry {
@@ -620,6 +620,11 @@ define_class!(
                     js_callback_timer_tick();
                     js_interval_timer_tick();
                     js_promise_run_microtasks();
+                    #[cfg(feature = "geisterhand")]
+                    {
+                        extern "C" { fn perry_geisterhand_pump(); }
+                        perry_geisterhand_pump();
+                    }
                 }
             }));
         }

@@ -14,7 +14,7 @@ use crate::menu;
 thread_local! {
     static PENDING_CONFIG: RefCell<Option<AppConfig>> = RefCell::new(None);
     static PENDING_BODY: RefCell<Option<i64>> = RefCell::new(None);
-    static APPS: RefCell<Vec<AppEntry>> = RefCell::new(Vec::new());
+    pub(crate) static APPS: RefCell<Vec<AppEntry>> = RefCell::new(Vec::new());
     /// The bottom constraint of the root widget, adjusted when keyboard appears/disappears
     static ROOT_BOTTOM_CONSTRAINT: RefCell<Option<Retained<AnyObject>>> = RefCell::new(None);
 }
@@ -25,8 +25,8 @@ struct AppConfig {
     _height: f64,
 }
 
-struct AppEntry {
-    window: Retained<UIWindow>,
+pub(crate) struct AppEntry {
+    pub(crate) window: Retained<UIWindow>,
 }
 
 /// Extract a &str from a *const StringHeader pointer.
@@ -395,6 +395,11 @@ define_class!(
                 js_callback_timer_tick();
                 js_interval_timer_tick();
                 js_promise_run_microtasks();
+                #[cfg(feature = "geisterhand")]
+                {
+                    extern "C" { fn perry_geisterhand_pump(); }
+                    perry_geisterhand_pump();
+                }
             }
         }
     }

@@ -1,0 +1,298 @@
+//! Geisterhand: In-process input fuzzer callback registry and dispatch queue.
+//!
+//! Provides a global registry where UI widgets register their callbacks,
+//! and a pending-action queue for cross-thread dispatch (HTTP server thread → main thread).
+
+use std::sync::{Mutex, Condvar};
+
+/// Widget type identifiers
+pub const WIDGET_BUTTON: u8 = 0;
+pub const WIDGET_TEXTFIELD: u8 = 1;
+pub const WIDGET_SLIDER: u8 = 2;
+pub const WIDGET_TOGGLE: u8 = 3;
+pub const WIDGET_PICKER: u8 = 4;
+pub const WIDGET_MENU: u8 = 5;
+pub const WIDGET_SHORTCUT: u8 = 6;
+pub const WIDGET_TABLE: u8 = 7;
+
+/// Callback kind identifiers
+pub const CB_ON_CLICK: u8 = 0;
+pub const CB_ON_CHANGE: u8 = 1;
+pub const CB_ON_SUBMIT: u8 = 2;
+pub const CB_ON_HOVER: u8 = 3;
+pub const CB_ON_DOUBLE_CLICK: u8 = 4;
+pub const CB_ON_FOCUS: u8 = 5;
+
+/// A registered widget callback entry
+pub struct RegisteredWidget {
+    pub handle: i64,
+    pub widget_type: u8,
+    pub callback_kind: u8,
+    pub closure_f64: f64,
+    pub label: String,
+}
+
+/// An action queued for main-thread execution
+pub enum PendingAction {
+    InvokeCallback { closure_f64: f64, args: Vec<f64> },
+    SetState { handle: i64, value: f64 },
+    CaptureScreenshot,
+}
+
+static REGISTRY: Mutex<Vec<RegisteredWidget>> = Mutex::new(Vec::new());
+static PENDING_ACTIONS: Mutex<Vec<PendingAction>> = Mutex::new(Vec::new());
+
+/// Screenshot result buffer: shared between main thread (writer) and HTTP server (reader).
+/// The main thread captures the screenshot and writes PNG bytes here, then signals the condvar.
+static SCREENSHOT_RESULT: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+static SCREENSHOT_CONDVAR: Condvar = Condvar::new();
+/// Flag indicating a screenshot request is pending (prevents duplicate requests)
+static SCREENSHOT_REQUESTED: Mutex<bool> = Mutex::new(false);
+
+extern "C" {
+    fn js_closure_call0(closure: *const u8) -> f64;
+    fn js_closure_call1(closure: *const u8, arg: f64) -> f64;
+    fn js_nanbox_get_pointer(value: f64) -> i64;
+}
+
+/// Register a widget callback in the global registry.
+/// Called from platform UI crates when widgets are created or callbacks attached.
+///
+/// - `handle`: widget handle (1-based i64)
+/// - `widget_type`: WIDGET_* constant
+/// - `callback_kind`: CB_* constant
+/// - `closure_f64`: NaN-boxed closure pointer
+/// - `label_ptr`: pointer to a StringHeader (or null)
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_register(
+    handle: i64,
+    widget_type: u8,
+    callback_kind: u8,
+    closure_f64: f64,
+    label_ptr: *const u8,
+) {
+    let label = if label_ptr.is_null() {
+        String::new()
+    } else {
+        // Read StringHeader: first 8 bytes are header (length at offset 0 as u32),
+        // followed by UTF-8 data bytes
+        unsafe {
+            let len = *(label_ptr as *const u32) as usize;
+            let data = label_ptr.add(std::mem::size_of::<[u64; 1]>()); // skip 8-byte GcHeader+length
+            if len > 0 && len < 10000 {
+                String::from_utf8_lossy(std::slice::from_raw_parts(data, len)).into_owned()
+            } else {
+                String::new()
+            }
+        }
+    };
+    if let Ok(mut reg) = REGISTRY.lock() {
+        reg.push(RegisteredWidget {
+            handle,
+            widget_type,
+            callback_kind,
+            closure_f64,
+            label,
+        });
+    }
+}
+
+/// Queue a callback invocation for main-thread dispatch.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_queue_action(closure_f64: f64) {
+    if let Ok(mut q) = PENDING_ACTIONS.lock() {
+        q.push(PendingAction::InvokeCallback {
+            closure_f64,
+            args: Vec::new(),
+        });
+    }
+}
+
+/// Queue a callback invocation with one argument for main-thread dispatch.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_queue_action1(closure_f64: f64, arg: f64) {
+    if let Ok(mut q) = PENDING_ACTIONS.lock() {
+        q.push(PendingAction::InvokeCallback {
+            closure_f64,
+            args: vec![arg],
+        });
+    }
+}
+
+/// Queue a state-set action for main-thread dispatch.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_queue_state_set(handle: i64, value: f64) {
+    if let Ok(mut q) = PENDING_ACTIONS.lock() {
+        q.push(PendingAction::SetState { handle, value });
+    }
+}
+
+/// Drain and execute all pending actions on the main thread.
+/// Called from the platform pump timer (every 8ms).
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_pump() {
+    let actions: Vec<PendingAction> = match PENDING_ACTIONS.lock() {
+        Ok(mut q) => q.drain(..).collect(),
+        Err(_) => return,
+    };
+    for action in actions {
+        match action {
+            PendingAction::InvokeCallback { closure_f64, args } => {
+                let ptr = unsafe { js_nanbox_get_pointer(closure_f64) } as *const u8;
+                unsafe {
+                    match args.len() {
+                        0 => { js_closure_call0(ptr); }
+                        _ => { js_closure_call1(ptr, args[0]); }
+                    }
+                }
+            }
+            PendingAction::SetState { handle, value } => {
+                // state_set is in the UI crate — call via extern
+                extern "C" {
+                    fn perry_ui_state_set(handle: i64, value: f64);
+                }
+                unsafe { perry_ui_state_set(handle, value); }
+            }
+            PendingAction::CaptureScreenshot => {
+                // Call platform-specific screenshot capture (implemented in each UI crate)
+                extern "C" {
+                    fn perry_ui_screenshot_capture(out_len: *mut usize) -> *mut u8;
+                }
+                let mut len: usize = 0;
+                let ptr = unsafe { perry_ui_screenshot_capture(&mut len) };
+                let png_data = if !ptr.is_null() && len > 0 {
+                    let data = unsafe { std::slice::from_raw_parts(ptr, len).to_vec() };
+                    // Free the platform-allocated buffer
+                    unsafe { libc::free(ptr as *mut libc::c_void); }
+                    data
+                } else {
+                    Vec::new()
+                };
+                // Store result and signal the waiting HTTP thread
+                if let Ok(mut result) = SCREENSHOT_RESULT.lock() {
+                    *result = Some(png_data);
+                }
+                SCREENSHOT_CONDVAR.notify_all();
+            }
+        }
+    }
+}
+
+/// Get a snapshot of the registry as JSON bytes.
+/// Returns a heap-allocated string (caller must free with perry_geisterhand_free_string).
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_get_registry_json(out_len: *mut usize) -> *mut u8 {
+    let json = match REGISTRY.lock() {
+        Ok(reg) => {
+            let mut s = String::from("[");
+            for (i, w) in reg.iter().enumerate() {
+                if i > 0 { s.push(','); }
+                s.push_str(&format!(
+                    r#"{{"handle":{},"widget_type":{},"callback_kind":{},"label":"{}"}}"#,
+                    w.handle, w.widget_type, w.callback_kind,
+                    w.label.replace('\\', "\\\\").replace('"', "\\\"")
+                ));
+            }
+            s.push(']');
+            s
+        }
+        Err(_) => "[]".to_string(),
+    };
+    let bytes = json.into_bytes();
+    let len = bytes.len();
+    let ptr = bytes.as_ptr();
+    let boxed = bytes.into_boxed_slice();
+    let raw = Box::into_raw(boxed);
+    unsafe { *out_len = len; }
+    raw as *mut u8
+}
+
+/// Free a string returned by perry_geisterhand_get_registry_json.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_free_string(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() && len > 0 {
+        unsafe {
+            let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr, len));
+        }
+    }
+}
+
+/// Get the number of registered widgets.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_registry_count() -> usize {
+    REGISTRY.lock().map(|r| r.len()).unwrap_or(0)
+}
+
+/// Request a screenshot capture. Called from the HTTP server thread.
+/// Queues a CaptureScreenshot action and blocks until the main thread completes it.
+/// Returns (ptr, len) of heap-allocated PNG data. Caller must free with perry_geisterhand_free_string.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_request_screenshot(out_len: *mut usize) -> *mut u8 {
+    // Prevent duplicate requests
+    if let Ok(mut requested) = SCREENSHOT_REQUESTED.lock() {
+        if *requested {
+            unsafe { *out_len = 0; }
+            return std::ptr::null_mut();
+        }
+        *requested = true;
+    }
+
+    // Clear any previous result
+    if let Ok(mut result) = SCREENSHOT_RESULT.lock() {
+        *result = None;
+    }
+
+    // Queue the capture action for the main thread pump
+    if let Ok(mut q) = PENDING_ACTIONS.lock() {
+        q.push(PendingAction::CaptureScreenshot);
+    }
+
+    // Wait for the main thread to complete the capture (timeout 5s)
+    let png_data = {
+        let result = SCREENSHOT_RESULT.lock().unwrap();
+        let (result, timeout) = SCREENSHOT_CONDVAR
+            .wait_timeout_while(result, std::time::Duration::from_secs(5), |r| r.is_none())
+            .unwrap();
+        if timeout.timed_out() {
+            None
+        } else {
+            result.clone()
+        }
+    };
+
+    // Clear request flag
+    if let Ok(mut requested) = SCREENSHOT_REQUESTED.lock() {
+        *requested = false;
+    }
+
+    match png_data {
+        Some(data) if !data.is_empty() => {
+            let len = data.len();
+            let boxed = data.into_boxed_slice();
+            let raw = Box::into_raw(boxed);
+            unsafe { *out_len = len; }
+            raw as *mut u8
+        }
+        _ => {
+            unsafe { *out_len = 0; }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Get the closure_f64 for a given handle and callback kind.
+/// Returns 0.0 if not found.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_get_closure(handle: i64, callback_kind: u8) -> f64 {
+    match REGISTRY.lock() {
+        Ok(reg) => {
+            for w in reg.iter() {
+                if w.handle == handle && w.callback_kind == callback_kind {
+                    return w.closure_f64;
+                }
+            }
+            0.0
+        }
+        Err(_) => 0.0,
+    }
+}

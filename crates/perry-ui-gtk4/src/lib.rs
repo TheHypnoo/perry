@@ -12,6 +12,9 @@ pub mod toolbar;
 pub mod widgets;
 pub mod window;
 
+#[cfg(feature = "geisterhand")]
+pub mod screenshot;
+
 // =============================================================================
 // FFI exports — these are the functions called from Cranelift-generated code
 // =============================================================================

@@ -219,6 +219,11 @@ pub extern "C" fn Java_com_perry_app_PerryBridge_nativePumpTick(
         js_interval_timer_tick();
         js_promise_run_microtasks();
     }
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_pump(); }
+        unsafe { perry_geisterhand_pump(); }
+    }
 }
 
 /// Run the app event loop.
