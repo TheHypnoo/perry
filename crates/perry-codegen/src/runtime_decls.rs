@@ -1708,6 +1708,24 @@ impl Compiler {
             self.extern_funcs.insert("js_string_trim".to_string(), func_id);
         }
 
+        // js_string_trim_start(s: *const StringHeader) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_string_trim_start", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_string_trim_start".to_string(), func_id);
+        }
+
+        // js_string_trim_end(s: *const StringHeader) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_string_trim_end", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_string_trim_end".to_string(), func_id);
+        }
+
         // js_string_to_lower_case(s: *const StringHeader) -> *mut StringHeader
         {
             let mut sig = self.module.make_signature();

@@ -7686,10 +7686,15 @@ pub(crate) fn compile_expr(
                                         let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
                                         return Ok(builder.inst_results(nanbox_call)[0]);
                                     }
-                                    "trim" => {
-                                        // str.trim() - remove whitespace from both ends
-                                        let trim_func = extern_funcs.get("js_string_trim")
-                                            .ok_or_else(|| anyhow!("js_string_trim not declared"))?;
+                                    "trim" | "trimStart" | "trimEnd" | "trimLeft" | "trimRight" => {
+                                        // str.trim/trimStart/trimEnd - whitespace removal
+                                        let func_name = match property.as_str() {
+                                            "trimStart" | "trimLeft" => "js_string_trim_start",
+                                            "trimEnd" | "trimRight" => "js_string_trim_end",
+                                            _ => "js_string_trim",
+                                        };
+                                        let trim_func = extern_funcs.get(func_name)
+                                            .ok_or_else(|| anyhow!("{} not declared", func_name))?;
                                         let func_ref = module.declare_func_in_func(*trim_func, builder.func);
 
                                         let call = builder.ins().call(func_ref, &[str_ptr]);

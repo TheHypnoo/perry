@@ -285,6 +285,26 @@ pub extern "C" fn js_string_trim(s: *const StringHeader) -> *mut StringHeader {
     js_string_from_str(trimmed)
 }
 
+/// Trim whitespace from start of a string (trimStart/trimLeft)
+#[no_mangle]
+pub extern "C" fn js_string_trim_start(s: *const StringHeader) -> *mut StringHeader {
+    if !is_valid_string_ptr(s) {
+        return js_string_from_bytes(ptr::null(), 0);
+    }
+    let str_data = string_as_str(s);
+    js_string_from_str(str_data.trim_start())
+}
+
+/// Trim whitespace from end of a string (trimEnd/trimRight)
+#[no_mangle]
+pub extern "C" fn js_string_trim_end(s: *const StringHeader) -> *mut StringHeader {
+    if !is_valid_string_ptr(s) {
+        return js_string_from_bytes(ptr::null(), 0);
+    }
+    let str_data = string_as_str(s);
+    js_string_from_str(str_data.trim_end())
+}
+
 /// Convert string to lowercase
 #[no_mangle]
 pub extern "C" fn js_string_to_lower_case(s: *const StringHeader) -> *mut StringHeader {
