@@ -2767,6 +2767,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             if is_mobile {
                 features.retain(|f| f != "plugins");
             }
+            // If "plugins" feature is enabled, set needs_plugins for -export_dynamic
+            if features.iter().any(|f| f == "plugins") {
+                ctx.needs_plugins = true;
+            }
             compiler.set_enabled_features(features);
         }
 
@@ -3162,9 +3166,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             c.arg("-shared");
             c
         } else {
-            // macOS
+            // macOS — use flat_namespace so plugins can resolve symbols from the host
             let mut c = Command::new("cc");
             c.arg("-dynamiclib")
+             .arg("-flat_namespace")
              .arg("-undefined").arg("dynamic_lookup");
             c
         };
@@ -3319,7 +3324,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     if !is_windows {
         if is_android || is_linux {
             cmd.arg("-Wl,--gc-sections");
-        } else {
+        } else if !ctx.needs_plugins {
+            // Skip dead_strip when plugins are enabled — dlopen'd plugins need
+            // to resolve Perry runtime symbols (js_*, perry_*) from the main binary.
             cmd.arg("-Wl,-dead_strip");
         }
     }
@@ -3382,17 +3389,18 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             .arg("-lc");
     }
 
-    // For plugin hosts, export symbols so dlopen'd plugins can resolve them
+    // For plugin hosts, export symbols so dlopen'd plugins can resolve them.
+    // Plugins are dylibs loaded via dlopen — they need to resolve hone_host_api_* and
+    // hone_plugin_* symbols from the main executable at load time.
     if ctx.needs_plugins && !is_windows {
-        #[cfg(target_os = "macos")]
-        {
-            cmd.arg("-Wl,-export_dynamic");
-        }
+        // Dead-stripping is already disabled (above) when needs_plugins is true.
+        // Plugin dylibs use flat_namespace + dynamic_lookup, so all symbols from
+        // the main binary (Perry runtime, host API) are resolvable at dlopen time.
+        // strip -x (below) preserves global symbols in the export trie.
         #[cfg(target_os = "linux")]
         {
             cmd.arg("-rdynamic");
         }
-        cmd.arg("-ldl"); // needed for dlopen/dlsym/dlclose
     }
 
     if is_ios {
@@ -3616,7 +3624,16 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                         let stem = stem.strip_suffix(".so").unwrap_or(stem);
                         cmd.arg(format!("-l{}", stem));
                     } else {
-                        cmd.arg(&lib);
+                        // When building a plugin host on macOS, force-load plugin-related native
+                        // libraries so their symbols are available for dlopen'd plugin dylibs.
+                        let force_load = cfg!(target_os = "macos")
+                            && ctx.needs_plugins
+                            && native_lib.module.contains("plugin");
+                        if force_load {
+                            cmd.arg(format!("-Wl,-force_load,{}", lib.display()));
+                        } else {
+                            cmd.arg(&lib);
+                        }
                     }
                     match format {
                         OutputFormat::Text => println!("Linking native library: {}", lib.display()),
@@ -4013,7 +4030,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // Strip debug symbols from the final binary (reduces size significantly)
     // Skip for iOS/Android cross-compilation — host strip can't handle foreign architectures
     if !is_dylib && !is_ios && target.as_deref() != Some("android") {
-        let _ = std::process::Command::new("strip").arg(&exe_path).status();
+        if ctx.needs_plugins {
+            // When plugins are enabled, use strip -x to keep exported symbols
+            // (dlopen'd plugins need to resolve hone_host_api_* from the main executable)
+            let _ = std::process::Command::new("strip").arg("-x").arg(&exe_path).status();
+        } else {
+            let _ = std::process::Command::new("strip").arg(&exe_path).status();
+        }
     }
 
     // Print binary size
