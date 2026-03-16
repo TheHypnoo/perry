@@ -2473,6 +2473,7 @@ pub(crate) fn compile_expr(
         }
         // regex.test(string) -> boolean
         Expr::RegExpTest { regex, string } => {
+            eprintln!("DEBUG: RegExpTest codegen hit, regex={:?}", regex);
             // Compile regex and string expressions
             let regex_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, regex, this_ctx)?;
             let string_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, string, this_ctx)?;
@@ -10040,8 +10041,20 @@ pub(crate) fn compile_expr(
                     }
 
                     // Fallback: If js_native_call_method is available (JS runtime enabled),
-                    // use dynamic JS interop for unknown method calls
-                    if extern_funcs.contains_key("js_native_call_method") {
+                    // use dynamic JS interop for unknown method calls.
+                    // IMPORTANT: Only use JS interop for actual JS handle objects.
+                    // Native objects with dynamically-stored closures must use the closure fallback below.
+                    let is_js_handle = if let Expr::LocalGet(id) = object.as_ref() {
+                        locals.get(id).map(|i| {
+                            !i.is_pointer && !i.is_string && !i.is_array && !i.is_map && !i.is_set
+                            && !i.is_buffer && !i.is_bigint && !i.is_closure
+                            && i.class_name.is_some()
+                            && !matches!(i.class_name.as_deref(), Some("Uint8Array") | Some("Buffer") | Some("Date"))
+                        }).unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if is_js_handle && extern_funcs.contains_key("js_native_call_method") {
                         // Compile object expression
                         let obj_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
                         // js_native_call_method expects f64 (NaN-boxed) for object.
