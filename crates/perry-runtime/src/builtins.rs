@@ -956,6 +956,14 @@ pub extern "C" fn js_string_coerce(value: f64) -> *mut StringHeader {
     } else if jsval.is_string() {
         // Already a string, return as-is
         return jsval.as_string_ptr() as *mut StringHeader;
+    } else if jsval.is_bigint() {
+        let ptr = jsval.as_bigint_ptr();
+        if ptr.is_null() {
+            "0".to_string()
+        } else {
+            let str_ptr = crate::bigint::js_bigint_to_string(ptr);
+            return str_ptr as *mut StringHeader;
+        }
     } else if jsval.is_int32() {
         jsval.as_int32().to_string()
     } else {
