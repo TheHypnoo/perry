@@ -14,6 +14,18 @@ pub const CLOSURE_MAGIC: u32 = 0x434C_4F53; // "CLOS" in ASCII
 /// Captures layout: [0] = namespace_obj (f64), [1] = method_name_ptr (i64), [2] = method_name_len (i64)
 pub const BOUND_METHOD_FUNC_PTR: *const u8 = 0xBADD_DEAD_u64 as *const u8;
 
+/// Flag stored in the high bit of capture_count to indicate that capture slot 0
+/// holds `this` (i.e., this closure is an object literal method that captures `this`).
+/// When the closure is detached from the object (assigned to a variable via PropertyGet),
+/// `js_closure_unbind_this` clones it and clears slot 0 so `this` becomes undefined.
+pub const CAPTURES_THIS_FLAG: u32 = 0x8000_0000;
+
+/// Extract the real capture count (masking out the CAPTURES_THIS_FLAG).
+#[inline(always)]
+pub fn real_capture_count(capture_count: u32) -> u32 {
+    capture_count & !CAPTURES_THIS_FLAG
+}
+
 /// Header for heap-allocated closures
 #[repr(C)]
 pub struct ClosureHeader {
@@ -25,11 +37,16 @@ pub struct ClosureHeader {
     pub type_tag: u32,
 }
 
-/// Allocate a closure with space for captured values
+/// Allocate a closure with space for captured values.
+/// The high bit of `capture_count` may contain CAPTURES_THIS_FLAG to indicate
+/// that slot 0 is reserved for `this`. The flag is preserved in the header
+/// for later use by `js_closure_unbind_this`, but the actual allocation size
+/// uses only the lower 31 bits.
 /// Returns pointer to ClosureHeader
 #[no_mangle]
 pub extern "C" fn js_closure_alloc(func_ptr: *const u8, capture_count: u32) -> *mut ClosureHeader {
-    let captures_size = (capture_count as usize) * 8; // Each capture is 8 bytes (f64 or i64)
+    let actual_count = real_capture_count(capture_count) as usize;
+    let captures_size = actual_count * 8; // Each capture is 8 bytes (f64 or i64)
     let total_size = std::mem::size_of::<ClosureHeader>() + captures_size;
 
     let raw = crate::gc::gc_malloc(total_size, crate::gc::GC_TYPE_CLOSURE);
@@ -37,7 +54,7 @@ pub extern "C" fn js_closure_alloc(func_ptr: *const u8, capture_count: u32) -> *
 
     unsafe {
         (*ptr).func_ptr = func_ptr;
-        (*ptr).capture_count = capture_count;
+        (*ptr).capture_count = capture_count; // Preserve flag in high bit
         (*ptr).type_tag = CLOSURE_MAGIC;
     }
 
@@ -568,6 +585,58 @@ pub fn closure_get_dynamic_prop(ptr: usize, prop: &str) -> f64 {
 pub fn closure_set_dynamic_prop(ptr: usize, prop: &str, value: f64) {
     if let Ok(mut props) = get_closure_props().lock() {
         props.entry(ptr).or_insert_with(HashMap::new).insert(prop.to_string(), value);
+    }
+}
+
+/// Unbind `this` from a detached method closure.
+///
+/// When a method is read from an object via PropertyGet (e.g., `const fn = holder.getX`),
+/// this function is called on the result. If the value is a closure whose capture_count
+/// has CAPTURES_THIS_FLAG set (indicating slot 0 is `this`), it allocates a new closure
+/// with the same func_ptr and captures but slot 0 set to undefined.
+///
+/// For non-closure values (numbers, strings, objects, arrays), this is a no-op.
+#[no_mangle]
+pub extern "C" fn js_closure_unbind_this(val: f64) -> f64 {
+    let bits = val.to_bits();
+    let tag = bits & 0xFFFF_0000_0000_0000;
+    // Only process POINTER_TAG values (closures are NaN-boxed with POINTER_TAG)
+    if tag != 0x7FFD_0000_0000_0000 {
+        return val;
+    }
+    let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as usize;
+    if ptr < 0x10000 {
+        return val;
+    }
+    // Check CLOSURE_MAGIC
+    unsafe {
+        let type_tag = *((ptr as *const u8).add(12) as *const u32);
+        if type_tag != CLOSURE_MAGIC {
+            return val;
+        }
+        let header = ptr as *const ClosureHeader;
+        let raw_count = (*header).capture_count;
+        // Only unbind if the closure has the CAPTURES_THIS_FLAG
+        if raw_count & CAPTURES_THIS_FLAG == 0 {
+            return val;
+        }
+        let count = real_capture_count(raw_count) as usize;
+        if count == 0 {
+            return val;
+        }
+        // Clone the closure with slot 0 set to undefined
+        let new_closure = js_closure_alloc((*header).func_ptr, raw_count);
+        let src_captures = (ptr as *const u8).add(std::mem::size_of::<ClosureHeader>()) as *const f64;
+        let dst_captures = (new_closure as *mut u8).add(std::mem::size_of::<ClosureHeader>()) as *mut f64;
+        // Set slot 0 to undefined
+        *dst_captures = f64::from_bits(crate::value::TAG_UNDEFINED);
+        // Copy remaining captures (slots 1..count)
+        for i in 1..count {
+            *dst_captures.add(i) = *src_captures.add(i);
+        }
+        // NaN-box the new closure pointer
+        let new_ptr = new_closure as u64;
+        f64::from_bits(0x7FFD_0000_0000_0000 | (new_ptr & 0x0000_FFFF_FFFF_FFFF))
     }
 }
 

@@ -5158,17 +5158,36 @@ pub(crate) fn compile_expr(
                 }
             }
 
+            // Check if either operand might be a NaN-boxed boolean (from comparisons or bool literals).
+            // If so, we need to convert TAG_TRUE->1.0 / TAG_FALSE->0.0 before arithmetic.
+            fn may_produce_boolean(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                match expr {
+                    Expr::Compare { .. } | Expr::Bool(_) => true,
+                    Expr::Unary { op: UnaryOp::Not, .. } => true,
+                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_boolean).unwrap_or(false),
+                    _ => false,
+                }
+            }
+            let left_may_be_bool = may_produce_boolean(left, locals);
+            let right_may_be_bool = may_produce_boolean(right, locals);
+
             let (lhs, rhs) = if exprs_equal(left, right) {
                 // Same expression - compile once and reuse
                 let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
                 // Ensure f64 for arithmetic operations (values may be i64 for Any-typed parameters)
                 let val = ensure_f64(builder, val);
+                let val = if left_may_be_bool { unbox_bool_to_number(builder, val) } else { val };
                 (val, val)
             } else {
                 let l = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
                 let r = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
                 // Ensure f64 for arithmetic operations (values may be i64 for Any-typed parameters)
-                (ensure_f64(builder, l), ensure_f64(builder, r))
+                let l_f64 = ensure_f64(builder, l);
+                let r_f64 = ensure_f64(builder, r);
+                // Convert NaN-boxed booleans to numeric 1.0/0.0 for arithmetic
+                let l_f64 = if left_may_be_bool { unbox_bool_to_number(builder, l_f64) } else { l_f64 };
+                let r_f64 = if right_may_be_bool { unbox_bool_to_number(builder, r_f64) } else { r_f64 };
+                (l_f64, r_f64)
             };
             let result = match op {
                 BinaryOp::Add => builder.ins().fadd(lhs, rhs),
@@ -5366,18 +5385,27 @@ pub(crate) fn compile_expr(
             let val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, operand, this_ctx)?;
             let val = ensure_f64(builder, val_raw);
             match op {
-                UnaryOp::Neg => Ok(builder.ins().fneg(val)),
+                UnaryOp::Neg => {
+                    // Unbox NaN-boxed booleans before negation
+                    let numeric_val = unbox_bool_to_number(builder, val);
+                    Ok(builder.ins().fneg(numeric_val))
+                }
                 UnaryOp::Not => {
                     // Check if operand might be a string/pointer/NaN-boxed value
                     // In those cases, use js_is_truthy for correct falsiness (e.g., "" is falsy)
                     let needs_truthy_check = match operand.as_ref() {
-                        Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string || i.is_pointer || i.is_union || i.is_bigint).unwrap_or(false),
+                        Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string || i.is_pointer || i.is_union || i.is_bigint || i.is_boolean).unwrap_or(false),
                         Expr::Call { .. } | Expr::PropertyGet { .. } | Expr::IndexGet { .. } | Expr::StaticMethodCall { .. } => true,
                         Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
+                        // Comparisons now return NaN-boxed booleans
+                        Expr::Compare { .. } | Expr::Bool(_) => true,
                         _ => false,
                     };
-                    let zero = builder.ins().f64const(0.0);
-                    let one = builder.ins().f64const(1.0);
+                    // ! always returns a boolean in JS
+                    const NOT_TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+                    const NOT_TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+                    let true_val = builder.ins().f64const(f64::from_bits(NOT_TAG_TRUE));
+                    let false_val = builder.ins().f64const(f64::from_bits(NOT_TAG_FALSE));
                     if needs_truthy_check {
                         let truthy_func = extern_funcs.get("js_is_truthy")
                             .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
@@ -5385,16 +5413,19 @@ pub(crate) fn compile_expr(
                         let call = builder.ins().call(truthy_ref, &[val]);
                         let is_truthy = builder.inst_results(call)[0]; // i32
                         let is_falsy = builder.ins().icmp_imm(IntCC::Equal, is_truthy, 0);
-                        Ok(builder.ins().select(is_falsy, one, zero))
+                        Ok(builder.ins().select(is_falsy, true_val, false_val))
                     } else {
+                        let zero = builder.ins().f64const(0.0);
                         let is_zero = builder.ins().fcmp(FloatCC::Equal, val, zero);
-                        Ok(builder.ins().select(is_zero, one, zero))
+                        Ok(builder.ins().select(is_zero, true_val, false_val))
                     }
                 }
                 UnaryOp::BitNot => {
                     // Bitwise NOT: ~x
+                    // Unbox NaN-boxed booleans before integer conversion
+                    let numeric_val = unbox_bool_to_number(builder, val);
                     // Convert f64 to i32, apply bnot, convert back to f64
-                    let val_i32 = builder.ins().fcvt_to_sint_sat(types::I32, val);
+                    let val_i32 = builder.ins().fcvt_to_sint_sat(types::I32, numeric_val);
                     let result = builder.ins().bnot(val_i32);
                     Ok(builder.ins().fcvt_from_sint(types::F64, result))
                 }
@@ -5496,8 +5527,11 @@ pub(crate) fn compile_expr(
             let lhs_type = builder.func.dfg.value_type(lhs);
             let rhs_type = builder.func.dfg.value_type(rhs);
 
-            let one = builder.ins().f64const(1.0);
-            let zero = builder.ins().f64const(0.0);
+            // Return NaN-boxed booleans so console.log prints "true"/"false"
+            const CMP_TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+            const CMP_TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+            let one = builder.ins().f64const(f64::from_bits(CMP_TAG_TRUE));
+            let zero = builder.ins().f64const(f64::from_bits(CMP_TAG_FALSE));
 
             if is_static_string_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
                 // Static string comparison: use js_string_equals
@@ -13500,7 +13534,13 @@ pub(crate) fn compile_expr(
                 .ok_or_else(|| anyhow!("js_dynamic_object_get_property not declared"))?;
             let get_ref = module.declare_func_in_func(*get_func, builder.func);
             let call = builder.ins().call(get_ref, &[obj_f64, slot_addr, len_val]);
-            Ok(builder.inst_results(call)[0])
+            let result = builder.inst_results(call)[0];
+            // Unbind `this` from closures read via PropertyGet (detached method semantics)
+            let unbind_func = extern_funcs.get("js_closure_unbind_this")
+                .ok_or_else(|| anyhow!("js_closure_unbind_this not declared"))?;
+            let unbind_ref = module.declare_func_in_func(*unbind_func, builder.func);
+            let unbind_call = builder.ins().call(unbind_ref, &[result]);
+            Ok(builder.inst_results(unbind_call)[0])
         }
         Expr::This => {
             if let Some(ctx) = this_ctx {
@@ -15087,8 +15127,10 @@ pub(crate) fn compile_expr(
             let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
 
             // If captures_this, we need an extra slot for `this`
+            // OR in CAPTURES_THIS_FLAG so js_closure_unbind_this can detect it
             let total_captures = if *captures_this { captures.len() + 1 } else { captures.len() };
-            let capture_count = builder.ins().iconst(types::I32, total_captures as i64);
+            let flag = if *captures_this { 0x8000_0000u32 } else { 0 };
+            let capture_count = builder.ins().iconst(types::I32, (total_captures as u32 | flag) as i64);
 
             let call = builder.ins().call(alloc_ref, &[func_ptr, capture_count]);
             let closure_ptr = builder.inst_results(call)[0];

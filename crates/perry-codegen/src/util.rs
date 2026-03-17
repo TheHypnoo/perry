@@ -202,6 +202,22 @@ pub(crate) fn ensure_f64(builder: &mut FunctionBuilder, val: Value) -> Value {
     }
 }
 
+/// Convert NaN-boxed booleans to their numeric equivalents for arithmetic.
+/// TAG_TRUE (0x7FFC_0000_0000_0004) -> 1.0, TAG_FALSE (0x7FFC_0000_0000_0003) -> 0.0.
+/// Non-boolean values pass through unchanged. This is branchless (bitcast + 2 icmp + 2 select).
+pub(crate) fn unbox_bool_to_number(builder: &mut FunctionBuilder, val: Value) -> Value {
+    let bits = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    let is_tag_true = builder.ins().icmp_imm(IntCC::Equal, bits, TAG_TRUE as i64);
+    let is_tag_false = builder.ins().icmp_imm(IntCC::Equal, bits, TAG_FALSE as i64);
+    let is_bool = builder.ins().bor(is_tag_true, is_tag_false);
+    let one = builder.ins().f64const(1.0);
+    let zero = builder.ins().f64const(0.0);
+    let numeric = builder.ins().select(is_tag_true, one, zero);
+    builder.ins().select(is_bool, numeric, val)
+}
+
 /// Inline truthiness check: returns I8 bool (1=truthy, 0=falsy) without FFI.
 /// Covers falsy values: undefined, null, false (NaN-box tags within 2 of TAG_UNDEFINED),
 /// ±0.0 (bit pattern with all-zero mantissa+exponent after shifting out sign),

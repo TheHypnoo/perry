@@ -1349,7 +1349,14 @@ pub(crate) fn compile_stmt(
             } else {
                 None
             };
-            locals.insert(*id, LocalInfo { var: final_var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, closure_func_id, is_boxed: is_boxed_var, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: existing_data_id, class_ref_name });
+            // Detect if the variable holds a boolean value (from comparison or bool literal)
+            let is_boolean = match init {
+                Some(Expr::Compare { .. }) => true,
+                Some(Expr::Bool(_)) => true,
+                Some(Expr::Unary { op: UnaryOp::Not, .. }) => true,
+                _ => matches!(ty, HirType::Boolean),
+            };
+            locals.insert(*id, LocalInfo { var: final_var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, closure_func_id, is_boxed: is_boxed_var, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, is_boolean, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: existing_data_id, class_ref_name });
 
             // If this variable has a module-level data global (promoted for class capture),
             // write the initial value to the data global so class methods can read it.
@@ -2017,10 +2024,7 @@ pub(crate) fn compile_stmt(
                         builder.def_var(*cache_var, product);
                     }
                 }
-                let cond_val2_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
-                let cond_val2 = ensure_f64(builder, cond_val2_raw);
-                let zero2 = builder.ins().f64const(0.0);
-                let cond_bool2 = builder.ins().fcmp(FloatCC::NotEqual, cond_val2, zero2);
+                let cond_bool2 = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
                 builder.ins().brif(cond_bool2, body2_block, &[], exit_block, &[]);
 
                 builder.switch_to_block(body2_block);
@@ -2053,10 +2057,7 @@ pub(crate) fn compile_stmt(
                         builder.def_var(*cache_var, product);
                     }
                 }
-                let cond_val3_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
-                let cond_val3 = ensure_f64(builder, cond_val3_raw);
-                let zero3 = builder.ins().f64const(0.0);
-                let cond_bool3 = builder.ins().fcmp(FloatCC::NotEqual, cond_val3, zero3);
+                let cond_bool3 = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
                 builder.ins().brif(cond_bool3, body3_block, &[], exit_block, &[]);
 
                 builder.switch_to_block(body3_block);
@@ -2089,10 +2090,7 @@ pub(crate) fn compile_stmt(
                         builder.def_var(*cache_var, product);
                     }
                 }
-                let cond_val4_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
-                let cond_val4 = ensure_f64(builder, cond_val4_raw);
-                let zero4 = builder.ins().f64const(0.0);
-                let cond_bool4 = builder.ins().fcmp(FloatCC::NotEqual, cond_val4, zero4);
+                let cond_bool4 = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
                 builder.ins().brif(cond_bool4, body4_block, &[], exit_block, &[]);
 
                 builder.switch_to_block(body4_block);
@@ -2969,7 +2967,7 @@ pub(crate) fn compile_stmt(
                         is_mixed_array: false,
                         is_integer: false,
                         is_integer_array: false,
-                        is_i32: false,
+                        is_i32: false, is_boolean: false,
                         i32_shadow: None,
                         bounded_by_array: None,
                         bounded_by_constant: None,
@@ -4025,7 +4023,7 @@ pub(crate) fn compile_stmt(
                         is_mixed_array: false,
                         is_integer: false,
                         is_integer_array: false,
-                        is_i32: false,
+                        is_i32: false, is_boolean: false,
                         i32_shadow: None,
                         bounded_by_array: None,
                         bounded_by_constant: None,

@@ -51,6 +51,8 @@ pub(crate) struct LocalInfo {
     pub is_integer_array: bool,
     /// Is this variable stored as native i32? (loop counter optimization)
     pub is_i32: bool,
+    /// Is this a boolean value? (from comparisons - stored as NaN-boxed TAG_TRUE/TAG_FALSE)
+    pub is_boolean: bool,
     /// Shadow i32 variable for integer values (optimization for array indexing)
     pub i32_shadow: Option<Variable>,
     /// Bounds check elimination: if this index variable is bounded by an array's length

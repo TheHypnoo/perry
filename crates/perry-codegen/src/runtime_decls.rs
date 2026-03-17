@@ -2472,6 +2472,21 @@ impl Compiler {
             self.extern_funcs.insert("js_closure_get_capture_f64".to_string(), func_id);
         }
 
+        // js_closure_unbind_this(val: f64) -> f64
+        // Clones a closure with CAPTURES_THIS_FLAG and clears slot 0 (this).
+        // No-op for non-closure values.
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed value
+            sig.returns.push(AbiParam::new(types::F64)); // result (possibly new closure)
+            let func_id = self.module.declare_function(
+                "js_closure_unbind_this",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_closure_unbind_this".to_string(), func_id);
+        }
+
         // js_closure_call0(closure: *const ClosureHeader) -> f64
         {
             let mut sig = self.module.make_signature();

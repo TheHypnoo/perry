@@ -727,7 +727,7 @@ unsafe fn trace_object(user_ptr: *mut u8, valid_ptrs: &HashSet<usize>, worklist:
 /// Perry's codegen stores `is_string`/`is_array`/`is_closure` captures as raw I64 in some paths.
 unsafe fn trace_closure(user_ptr: *mut u8, valid_ptrs: &HashSet<usize>, worklist: &mut Vec<*mut GcHeader>) {
     let closure = user_ptr as *const crate::closure::ClosureHeader;
-    let capture_count = (*closure).capture_count;
+    let capture_count = crate::closure::real_capture_count((*closure).capture_count);
     let captures = (user_ptr as *const u8).add(std::mem::size_of::<crate::closure::ClosureHeader>()) as *const u64;
 
     for i in 0..capture_count as usize {
