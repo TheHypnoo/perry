@@ -678,8 +678,8 @@ pub(crate) fn compile_stmt(
                 // Union types use f64 (NaN-boxed), but track class_name if available for property access
                 (typed_class_name.clone(), false, false, false, false, false, false, false, false, false)
             } else if is_typed_string {
-                // String type uses f64 (NaN-boxed) but is_string = true for console.log
-                (None, false, false, true, false, false, false, false, false, false)
+                // String type uses i64 (raw pointer) with is_string = true for console.log
+                (None, true, false, true, false, false, false, false, false, false)
             } else if is_typed_bigint_check {
                 // BigInt type uses f64 (NaN-boxed) but is_bigint = true for method calls
                 (None, false, false, false, true, false, false, false, false, false)
@@ -718,8 +718,8 @@ pub(crate) fn compile_stmt(
                             // Static method returns BigInt
                             (None, false, false, false, true, false, false, false, false, false)
                         } else if let Some(perry_types::Type::String) = ret_type {
-                            // Static method returns String
-                            (None, false, false, true, false, false, false, false, false, false)
+                            // Static method returns String (i64 pointer)
+                            (None, true, false, true, false, false, false, false, false, false)
                         } else if let Some(perry_types::Type::Named(name)) = ret_type {
                             // Static method returns a class instance (singleton pattern etc.)
                             let name = name.clone();
@@ -749,7 +749,7 @@ pub(crate) fn compile_stmt(
                     // BigInt literals - stored as NaN-boxed F64 (is_pointer = false)
                     Some(Expr::BigInt(_)) => (None, false, false, false, true, false, false, false, false, false),
                     Some(expr) if is_bigint_expr(expr, locals, func_hir_return_types, classes) => (None, false, false, false, true, false, false, false, false, false),
-                    Some(expr) if is_string_expr(expr, locals) => (None, false, false, true, false, false, false, false, false, false),
+                    Some(expr) if is_string_expr(expr, locals) => (None, true, false, true, false, false, false, false, false, false),
                     Some(expr) if is_closure_expr(expr, locals, closure_returning_funcs) => (None, true, false, false, false, true, false, false, false, false),
                     // JsonParse returns any type - mark as union for dynamic typeof
                     Some(Expr::JsonParse(_)) => (None, false, false, false, false, false, false, false, false, false),
@@ -795,8 +795,8 @@ pub(crate) fn compile_stmt(
                                         resolved = (Some(name.clone()), true, false, false, false, false, false, false, false, false);
                                     }
                                     perry_types::Type::String => {
-                                        // Promise<string> resolves to string
-                                        resolved = (None, false, false, true, false, false, false, false, false, false);
+                                        // Promise<string> resolves to string (i64 pointer)
+                                        resolved = (None, true, false, true, false, false, false, false, false, false);
                                     }
                                     perry_types::Type::BigInt => {
                                         // Promise<bigint> resolves to bigint
@@ -839,8 +839,8 @@ pub(crate) fn compile_stmt(
                                         (None, true, true, false, false, false, false, false, false, false)
                                     }
                                     perry_types::Type::String => {
-                                        // Function returns string
-                                        (None, false, false, true, false, false, false, false, false, false)
+                                        // Function returns string (i64 pointer)
+                                        (None, true, false, true, false, false, false, false, false, false)
                                     }
                                     _ => {
                                         // Check ABI type for other pointer types
@@ -880,7 +880,7 @@ pub(crate) fn compile_stmt(
                                                         Some((Some(base.clone()), true, false, false, false, false, false, false, false, false))
                                                     }
                                                     perry_types::Type::String => {
-                                                        Some((None, false, false, true, false, false, false, false, false, false))
+                                                        Some((None, true, false, true, false, false, false, false, false, false))
                                                     }
                                                     perry_types::Type::Array(_) => {
                                                         Some((None, true, true, false, false, false, false, false, false, false))
@@ -905,8 +905,8 @@ pub(crate) fn compile_stmt(
                                 } else if let Expr::LocalGet(id) = object.as_ref() {
                                     if let Some(src_info) = locals.get(id) {
                                         if src_info.is_string {
-                                            // String.slice returns NaN-boxed string (f64, not i64 pointer)
-                                            (None, false, false, true, false, false, false, false, false, false)
+                                            // String.slice returns string (i64 pointer)
+                                            (None, true, false, true, false, false, false, false, false, false)
                                         } else if src_info.is_array {
                                             // Array.slice returns array
                                             (None, true, true, false, false, false, false, false, false, false)
@@ -922,9 +922,8 @@ pub(crate) fn compile_stmt(
                             } else if property == "substring" || property == "trim" || property == "toLowerCase"
                                 || property == "toUpperCase" || property == "charAt" || property == "padStart"
                                 || property == "padEnd" || property == "repeat" || property == "replace" {
-                                // String methods that return NaN-boxed strings (f64, not i64 pointers)
-                                // is_pointer must be false so the variable uses f64 type
-                                (None, false, false, true, false, false, false, false, false, false)
+                                // String methods return strings (i64 pointers)
+                                (None, true, false, true, false, false, false, false, false, false)
                             } else if property == "map" || property == "filter" ||
                                property == "concat" || property == "flat" || property == "flatMap" ||
                                property == "reverse" || property == "sort" || property == "toSorted" ||
@@ -972,7 +971,7 @@ pub(crate) fn compile_stmt(
                                 (None, false, false, false, true, false, false, false, false, false)
                             }
                             Some(perry_types::Type::String) => {
-                                (None, false, false, true, false, false, false, false, false, false)
+                                (None, true, false, true, false, false, false, false, false, false)
                             }
                             Some(perry_types::Type::Array(_)) => {
                                 (None, true, true, false, false, false, false, false, false, false)
@@ -1122,8 +1121,9 @@ pub(crate) fn compile_stmt(
                         let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
                         let call = builder.ins().call(nanbox_ref, &[ptr]);
                         builder.inst_results(call)[0]
-                    } else if is_string_from_array {
+                    } else if is_string_from_array && !is_pointer {
                         // String from array is NaN-boxed - extract the raw pointer
+                        // (When is_pointer=true, the general is_pointer path below handles this)
                         let get_str_ptr_func = extern_funcs.get("js_nanbox_get_string_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_string_pointer not declared"))?;
                         let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
@@ -1137,6 +1137,12 @@ pub(crate) fn compile_stmt(
                         // values that need to have the pointer extracted, not just bitcast.
                         let val_type = builder.func.dfg.value_type(val);
                         if val_type == types::F64 {
+                            if is_string {
+                                // FAST PATH: String values are always NaN-boxed with STRING_TAG.
+                                // Use inline_get_string_pointer (3 instructions: bitcast + mask + band)
+                                // instead of ensure_i64 (7 instructions) or js_nanbox_get_pointer (FFI call).
+                                inline_get_string_pointer(builder, val)
+                            } else {
                             // Check if this is a NaN-boxed expression (IndexGet, PropertyGet on generic objects, etc.)
                             let is_nanboxed_expr = match init_expr {
                                 Expr::IndexGet { .. } => true,
@@ -1178,6 +1184,7 @@ pub(crate) fn compile_stmt(
                             } else {
                                 // Regular bitcast for values that are already raw pointers
                                 ensure_i64(builder, val)
+                            }
                             }
                         } else {
                             // Value is not F64 - need to convert to I64

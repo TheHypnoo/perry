@@ -1580,21 +1580,31 @@ impl crate::codegen::Compiler {
                         squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: orig.and_then(|o| o.module_var_data_id), class_ref_name: orig.and_then(|o| o.class_ref_name.clone()),
                     });
                 } else {
-                    // For immutable captures, store the value directly
+                    // For immutable captures, check if original was a pointer type
+                    let orig = self.module_level_locals.get(capture_id);
+                    let orig_is_pointer = orig.map(|o| o.is_pointer && !o.is_union).unwrap_or(false);
+
                     let var = Variable::new(next_var);
                     next_var += 1;
-                    builder.declare_var(var, types::F64);
-                    builder.def_var(var, val_f64);
+
+                    if orig_is_pointer {
+                        // Pointer type: extract raw pointer from NaN-boxed F64
+                        builder.declare_var(var, types::I64);
+                        let ptr = ensure_i64(&mut builder, val_f64);
+                        builder.def_var(var, ptr);
+                    } else {
+                        builder.declare_var(var, types::F64);
+                        builder.def_var(var, val_f64);
+                    }
 
                     // Preserve type info from the original variable for static analysis
                     // (typeof, string comparison, etc.)
-                    let orig = self.module_level_locals.get(capture_id);
                     locals.insert(*capture_id, LocalInfo {
                         var,
                         name: None, // Captures don't have a direct name
                         class_name: orig.and_then(|o| o.class_name.clone()),
                         type_args: orig.map(|o| o.type_args.clone()).unwrap_or_default(),
-                        is_pointer: false, // Value is f64 (NaN-boxed for pointers)
+                        is_pointer: orig_is_pointer, // Pointer captures use I64
                         is_array: orig.map(|o| o.is_array).unwrap_or(false),
                         is_string: orig.map(|o| o.is_string).unwrap_or(false),
                         is_bigint: orig.map(|o| o.is_bigint).unwrap_or(false),

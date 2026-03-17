@@ -4314,18 +4314,21 @@ pub(crate) fn compile_expr(
                 // pointer/closure variable (is_pointer=true, is_boxed=false).
                 let val_type = builder.func.dfg.value_type(val);
                 let val_f64 = if val_type == types::I64 {
-                    let is_raw_pointer_src = match value.as_ref() {
+                    let (is_raw_pointer_src, is_raw_string_src) = match value.as_ref() {
                         Expr::LocalGet(src_id) => {
                             if let Some(src_info) = locals.get(src_id) {
                                 // Non-boxed pointer/closure variables store raw I64 pointers.
                                 // Boxed vars return NaN-tagged I64 via ensure_i64(js_box_get()).
-                                src_info.is_pointer && !src_info.is_boxed
-                                    && !src_info.is_string && !src_info.is_union
-                            } else { false }
+                                let is_raw = src_info.is_pointer && !src_info.is_boxed && !src_info.is_union;
+                                (is_raw && !src_info.is_string, is_raw && src_info.is_string)
+                            } else { (false, false) }
                         }
-                        _ => false
+                        _ => (false, false)
                     };
-                    if is_raw_pointer_src {
+                    if is_raw_string_src {
+                        // NaN-box the raw I64 string pointer with STRING_TAG before storing in box.
+                        inline_nanbox_string(builder, val)
+                    } else if is_raw_pointer_src {
                         // NaN-box the raw I64 closure/pointer with POINTER_TAG before storing in box.
                         // Without this, js_box_get returns raw bits (subnormal f64), and
                         // js_nanbox_get_pointer returns 0 (null) → closure call returns undefined.
@@ -4355,6 +4358,13 @@ pub(crate) fn compile_expr(
                 if val_type == types::I64 {
                     // Already I64, just store directly
                     builder.def_var(info.var, val);
+                    Ok(val)
+                } else if info.is_string {
+                    // FAST PATH: String F64 values always have STRING_TAG.
+                    // Use inline_get_string_pointer (3 instructions) instead of
+                    // js_nanbox_get_pointer (FFI call).
+                    let ptr = inline_get_string_pointer(builder, val);
+                    builder.def_var(info.var, ptr);
                     Ok(val)
                 } else {
                     // F64 value assigned to pointer variable (e.g., from await result)
@@ -6330,8 +6340,23 @@ pub(crate) fn compile_expr(
                                                         _ => unreachable!(),
                                                     };
 
-                                                    let (push_func_name, push_val) = if val_type == types::I64 {
-                                                        // Value is a pointer (i64) - use jsvalue version
+                                                    // Check if the value is a string (needs NaN-boxing with STRING_TAG)
+                                                    let is_string_val = match &args[0] {
+                                                        Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                                                        Expr::String(_) => true,
+                                                        _ => false,
+                                                    };
+
+                                                    let (push_func_name, push_val) = if val_type == types::I64 && is_string_val {
+                                                        // String pointer - NaN-box with STRING_TAG and push as f64
+                                                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                                        let nanbox_call = builder.ins().call(nanbox_ref, &[val]);
+                                                        let tagged_val = builder.inst_results(nanbox_call)[0];
+                                                        (format!("js_array_{}_f64", base_func), tagged_val)
+                                                    } else if val_type == types::I64 {
+                                                        // Non-string pointer (object, array, etc.) - use jsvalue version
                                                         (format!("js_array_{}_jsvalue", base_func), val)
                                                     } else {
                                                         // Check if the value expression produces a pointer type (Object, New, etc.)
@@ -8992,7 +9017,10 @@ pub(crate) fn compile_expr(
                                         if let Some(&field_idx) = ctx.class_meta.field_indices.get(field_name) {
                                             let this_ptr = builder.use_var(ctx.this_var);
                                             let field_offset = 24 + (field_idx as i32) * 8;
-                                            let field_val = builder.ins().load(types::F64, MemFlags::new(), this_ptr, field_offset);
+                                            // Private pointer fields stored as raw I64
+                                            let is_private_pointer = field_name.starts_with('#');
+                                            let load_type = if is_private_pointer { types::I64 } else { types::F64 };
+                                            let field_val = builder.ins().load(load_type, MemFlags::new(), this_ptr, field_offset);
                                             let ptr = ensure_i64(builder, field_val);
 
                                             if is_map {
@@ -12328,6 +12356,17 @@ pub(crate) fn compile_expr(
                         // Compile the init expression to get the default value
                         let init_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, init_expr, this_ctx)?;
 
+                        // Private pointer fields: store raw I64 directly (no NaN-boxing)
+                        let is_private_pointer = field_name.starts_with('#') && class_meta.field_types.get(field_name)
+                            .map(|t| matches!(t, perry_types::Type::String | perry_types::Type::Array(_) |
+                                perry_types::Type::Named(_) | perry_types::Type::Object(_) |
+                                perry_types::Type::Generic { .. }))
+                            .unwrap_or(false);
+
+                        if is_private_pointer {
+                            let val_i64 = ensure_i64(builder, init_val);
+                            builder.ins().store(MemFlags::new(), val_i64, obj_ptr, field_offset);
+                        } else {
                         // Determine if the value needs NaN-boxing for storage
                         let store_val = match init_expr {
                             // Array literals and empty arrays produce raw I64 pointers that need NaN-boxing
@@ -12357,8 +12396,8 @@ pub(crate) fn compile_expr(
                                 ensure_f64(builder, init_val)
                             }
                         };
-
                         builder.ins().store(MemFlags::new(), store_val, obj_ptr, field_offset);
+                        }
                     }
                 }
 
@@ -12780,6 +12819,22 @@ pub(crate) fn compile_expr(
                         let obj_ptr = builder.use_var(ctx.this_var);
                         let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
+                        // Check if this is a private field with a pointer type — these can
+                        // skip NaN-boxing since they're only accessed via this.#field
+                        let is_private_pointer = property.starts_with('#') && ctx.class_meta.field_types.get(property)
+                            .map(|t| matches!(t, perry_types::Type::String | perry_types::Type::Array(_) |
+                                perry_types::Type::Named(_) | perry_types::Type::Object(_) |
+                                perry_types::Type::Generic { .. }))
+                            .unwrap_or(false);
+
+                        // ObjectHeader is 24 bytes, fields start after that
+                        let field_offset = 24 + (field_idx as i32) * 8;
+
+                        if is_private_pointer {
+                            // Private pointer field: store raw I64 directly (no NaN-boxing)
+                            let val_i64 = ensure_i64(builder, val);
+                            builder.ins().store(MemFlags::new(), val_i64, obj_ptr, field_offset);
+                        } else {
                         // Store value as NaN-boxed f64. If the value is an i64 pointer
                         // (e.g., string parameter in setter), NaN-box it with the correct
                         // tag based on the field type to preserve type identity.
@@ -12799,10 +12854,8 @@ pub(crate) fn compile_expr(
                         } else {
                             ensure_f64(builder, val)
                         };
-
-                        // ObjectHeader is 24 bytes, fields start after that
-                        let field_offset = 24 + (field_idx as i32) * 8;
                         builder.ins().store(MemFlags::new(), val_f64, obj_ptr, field_offset);
+                        }
 
                         return Ok(val);
                     }
@@ -13260,7 +13313,14 @@ pub(crate) fn compile_expr(
                         let obj_ptr = builder.use_var(ctx.this_var);
                         // ObjectHeader is 24 bytes, fields start after that
                         let field_offset = 24 + (field_idx as i32) * 8;
-                        let value = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
+                        // Private pointer fields stored as raw I64 — load as I64 directly
+                        let is_private_pointer = property.starts_with('#') && ctx.class_meta.field_types.get(property)
+                            .map(|t| matches!(t, perry_types::Type::String | perry_types::Type::Array(_) |
+                                perry_types::Type::Named(_) | perry_types::Type::Object(_) |
+                                perry_types::Type::Generic { .. }))
+                            .unwrap_or(false);
+                        let load_type = if is_private_pointer { types::I64 } else { types::F64 };
+                        let value = builder.ins().load(load_type, MemFlags::new(), obj_ptr, field_offset);
                         return Ok(value);
                     }
                 }
@@ -13426,7 +13486,10 @@ pub(crate) fn compile_expr(
                                     if let Some(&field_idx) = ctx.class_meta.field_indices.get(field_name) {
                                         let this_ptr = builder.use_var(ctx.this_var);
                                         let field_offset = 24 + (field_idx as i32) * 8;
-                                        let field_val = builder.ins().load(types::F64, MemFlags::new(), this_ptr, field_offset);
+                                        // Private pointer fields stored as raw I64
+                                        let is_private_pointer = field_name.starts_with('#');
+                                        let load_type = if is_private_pointer { types::I64 } else { types::F64 };
+                                        let field_val = builder.ins().load(load_type, MemFlags::new(), this_ptr, field_offset);
                                         let ptr = ensure_i64(builder, field_val);
                                         let func_name = if is_map_field { "js_map_size" } else { "js_set_size" };
                                         let size_func = extern_funcs.get(func_name)
@@ -13462,7 +13525,14 @@ pub(crate) fn compile_expr(
 
                         // ObjectHeader is 24 bytes, fields start after that
                         let field_offset = 24 + (field_idx as i32) * 8;
-                        let field_val = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
+                        // Private pointer fields stored as raw I64 — load as I64 directly
+                        let is_private_pointer = property.starts_with('#') && ctx.class_meta.field_types.get(property)
+                            .map(|t| matches!(t, perry_types::Type::String | perry_types::Type::Array(_) |
+                                perry_types::Type::Named(_) | perry_types::Type::Object(_) |
+                                perry_types::Type::Generic { .. }))
+                            .unwrap_or(false);
+                        let load_type = if is_private_pointer { types::I64 } else { types::F64 };
+                        let field_val = builder.ins().load(load_type, MemFlags::new(), obj_ptr, field_offset);
 
                         return Ok(field_val);
                     }
@@ -13921,8 +13991,22 @@ pub(crate) fn compile_expr(
                         let arr_ptr = builder.use_var(arr_var);
                         // Use the appropriate push function based on value type
                         let val_type = builder.func.dfg.value_type(val);
-                        let call = if val_type == types::I64 {
-                            // Value is a pointer (i64) - use js_array_push_jsvalue
+                        // Check if the value is a string (needs NaN-boxing with STRING_TAG)
+                        let is_string_val = match expr {
+                            Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                            Expr::String(_) => true,
+                            _ => false,
+                        };
+                        let call = if val_type == types::I64 && is_string_val {
+                            // String pointer - NaN-box with STRING_TAG and push as f64
+                            let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                            let nanbox_call = builder.ins().call(nanbox_ref, &[val]);
+                            let tagged_val = builder.inst_results(nanbox_call)[0];
+                            builder.ins().call(push_f64_ref, &[arr_ptr, tagged_val])
+                        } else if val_type == types::I64 {
+                            // Non-string pointer (object, array, etc.) - use js_array_push_jsvalue
                             builder.ins().call(push_jsvalue_ref, &[arr_ptr, val])
                         } else if val_type == types::I32 {
                             // Value is i32 (from loop counter optimization) - convert to f64
@@ -17140,11 +17224,28 @@ pub(crate) fn compile_expr(
                         return Ok(builder.ins().fcvt_from_sint(types::F64, len_i32));
                     } else if !arg_vals.is_empty() {
                         // Single element push — capture new pointer (push may reallocate)
-                        let val = ensure_f64(builder, arg_vals[0]);
+                        // Check if value is a string I64 pointer that needs NaN-boxing
+                        let push_val = if builder.func.dfg.value_type(arg_vals[0]) == types::I64 {
+                            // Check if argument is a string
+                            let is_string_arg = args.first().map(|a| match a {
+                                Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                                Expr::String(_) => true,
+                                _ => false,
+                            }).unwrap_or(false);
+                            if is_string_arg {
+                                // NaN-box string pointer with STRING_TAG
+                                inline_nanbox_string(builder, arg_vals[0])
+                            } else {
+                                // Non-string pointer: NaN-box with POINTER_TAG
+                                inline_nanbox_pointer(builder, arg_vals[0])
+                            }
+                        } else {
+                            ensure_f64(builder, arg_vals[0])
+                        };
                         let func = extern_funcs.get("js_array_push_f64")
                             .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
                         let func_ref = module.declare_func_in_func(*func, builder.func);
-                        let call = builder.ins().call(func_ref, &[arr_ptr, val]);
+                        let call = builder.ins().call(func_ref, &[arr_ptr, push_val]);
                         let new_arr_ptr = builder.inst_results(call)[0];
 
                         // Write back the new pointer to the receiver if it's a field access.
@@ -17155,9 +17256,19 @@ pub(crate) fn compile_expr(
                                     if let Some(this) = this_ctx {
                                         if let Some(&field_idx) = this.class_meta.field_indices.get(field_name) {
                                             let this_ptr = builder.use_var(this.this_var);
-                                            let new_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr);
                                             let field_offset = 24 + (field_idx as i32) * 8;
-                                            builder.ins().store(MemFlags::new(), new_f64, this_ptr, field_offset);
+                                            // Private pointer fields store raw I64
+                                            let is_private_pointer = field_name.starts_with('#') && this.class_meta.field_types.get(field_name)
+                                                .map(|t| matches!(t, perry_types::Type::String | perry_types::Type::Array(_) |
+                                                    perry_types::Type::Named(_) | perry_types::Type::Object(_) |
+                                                    perry_types::Type::Generic { .. }))
+                                                .unwrap_or(false);
+                                            if is_private_pointer {
+                                                builder.ins().store(MemFlags::new(), new_arr_ptr, this_ptr, field_offset);
+                                            } else {
+                                                let new_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr);
+                                                builder.ins().store(MemFlags::new(), new_f64, this_ptr, field_offset);
+                                            }
                                         }
                                     }
                                 }
