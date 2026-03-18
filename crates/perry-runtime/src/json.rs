@@ -211,7 +211,7 @@ impl<'a> DirectParser<'a> {
         self.advance();
         self.skip_whitespace();
 
-        let js_arr = js_array_alloc(16);
+        let mut js_arr = js_array_alloc(16);
 
         if self.peek() == Some(b']') {
             self.advance();
@@ -220,7 +220,7 @@ impl<'a> DirectParser<'a> {
 
         loop {
             let value = self.parse_value();
-            js_array_push(js_arr, value);
+            js_arr = js_array_push(js_arr, value);
 
             self.skip_whitespace();
             if self.peek() == Some(b',') {
@@ -297,14 +297,40 @@ impl<'a> DirectParser<'a> {
 #[no_mangle]
 pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue {
     if text_ptr.is_null() {
-        return JSValue::null();
+        let msg = "Unexpected end of JSON input";
+        let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
+        let err_val = JSValue::string_ptr(msg_ptr);
+        crate::exception::js_throw(f64::from_bits(err_val.bits()));
     }
     let len = (*text_ptr).length as usize;
     let data_ptr = (text_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
 
+    if len == 0 {
+        let msg = "Unexpected end of JSON input";
+        let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
+        let err_val = JSValue::string_ptr(msg_ptr);
+        crate::exception::js_throw(f64::from_bits(err_val.bits()));
+    }
+
     let mut parser = DirectParser::new(bytes);
-    parser.parse_value()
+    let result = parser.parse_value();
+
+    // If parser didn't consume meaningful input (result is null and input wasn't "null"),
+    // the input was invalid JSON — throw SyntaxError
+    if result.is_null() {
+        let is_literal_null = len >= 4 && bytes.starts_with(b"null");
+        if !is_literal_null {
+            let preview_len = len.min(50);
+            let preview = std::str::from_utf8(&bytes[..preview_len]).unwrap_or("???");
+            let msg = format!("JSON parse error: Unexpected token: {}", preview);
+            let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
+            let err_val = JSValue::string_ptr(msg_ptr);
+            crate::exception::js_throw(f64::from_bits(err_val.bits()));
+        }
+    }
+
+    result
 }
 
 // ─── JSON.stringify ───────────────────────────────────────────────────────────
