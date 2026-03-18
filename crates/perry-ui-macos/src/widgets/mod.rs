@@ -74,6 +74,15 @@ pub fn register_external_nsview(nsview_ptr: i64) -> i64 {
                 let _: () = msg_send![&*nsview, setContentHuggingPriority: 1.0f32 forOrientation: 0i64]; // horizontal
                 let _: () = msg_send![&*nsview, setContentHuggingPriority: 1.0f32 forOrientation: 1i64]; // vertical
             }
+            // Clip to bounds — prevent the view from drawing outside its frame
+            // (e.g. editor content bleeding behind tab bar/breadcrumb in VStack)
+            unsafe {
+                let _: () = objc2::msg_send![&*nsview, setWantsLayer: true];
+                let layer: *mut AnyObject = objc2::msg_send![&*nsview, layer];
+                if !layer.is_null() {
+                    let _: () = objc2::msg_send![layer, setMasksToBounds: true];
+                }
+            }
             register_widget(nsview)
         },
         None => {
