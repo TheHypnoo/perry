@@ -10656,6 +10656,23 @@ pub(crate) fn compile_expr(
                     Err(anyhow!("Unsupported callee: LocalGet with unknown variable id={}", id))
                 }
                 Expr::ExternFuncRef { name: func_name, param_types, return_type } => {
+                    // Intercept keccak256: use native Rust implementation instead of
+                    // compiled TypeScript (which has bitwise operation bugs in the
+                    // keccak permutation). Takes Uint8Array, returns hex string.
+                    if func_name == "keccak256" {
+                        if let Some(&native_func) = extern_funcs.get("js_keccak256_native") {
+                            let func_ref = module.declare_func_in_func(native_func, builder.func);
+                            let buf_ptr = if !arg_vals.is_empty() {
+                                ensure_i64(builder, arg_vals[0])
+                            } else {
+                                builder.ins().iconst(types::I64, 0)
+                            };
+                            let call = builder.ins().call(func_ref, &[buf_ptr]);
+                            let result_ptr = builder.inst_results(call)[0];
+                            return Ok(inline_nanbox_string(builder, result_ptr));
+                        }
+                    }
+
                     // Calling an imported function by name
                     // First check if it's already in extern_funcs (runtime functions)
                     if let Some(&func_id) = extern_funcs.get(func_name.as_str()) {

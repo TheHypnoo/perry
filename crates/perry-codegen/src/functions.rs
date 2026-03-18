@@ -123,9 +123,11 @@ impl crate::codegen::Compiler {
                 Expr::Number(f) => f.fract() == 0.0,
                 Expr::LocalGet(_) => true,
                 Expr::Binary { op, left, right } => {
+                    // Exclude Shl/Shr/UShr: JavaScript shifts have 32-bit semantics
+                    // but i64 specialization uses native 64-bit shifts without truncation.
+                    // Functions using shifts must go through the f64 path for correctness.
                     matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Mod |
-                             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor |
-                             BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr) &&
+                             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) &&
                     is_integer_expr(left, func_id) && is_integer_expr(right, func_id)
                 }
                 Expr::Compare { left, right, .. } => {

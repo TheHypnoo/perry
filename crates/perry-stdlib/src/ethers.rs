@@ -201,6 +201,36 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
     output
 }
 
+/// Native keccak256(data: Uint8Array) -> hex string
+/// Provides a correct native implementation bypassing the compiled TypeScript version.
+/// Takes a buffer pointer (I64) and returns a "0x"-prefixed hex string pointer.
+#[no_mangle]
+pub unsafe extern "C" fn js_keccak256_native(buf_ptr: i64) -> *mut StringHeader {
+    let buf_ptr = (buf_ptr as u64 & 0x0000_FFFF_FFFF_FFFF) as *const perry_runtime::buffer::BufferHeader;
+    if buf_ptr.is_null() {
+        let s = "0x0000000000000000000000000000000000000000000000000000000000000000";
+        return js_string_from_bytes(s.as_ptr(), s.len() as u32);
+    }
+
+    let len = (*buf_ptr).length as usize;
+    let data = (buf_ptr as *const u8).add(std::mem::size_of::<perry_runtime::buffer::BufferHeader>());
+    let bytes = std::slice::from_raw_parts(data, len);
+
+    let hash = keccak256(bytes);
+
+    // Format as "0x" + 64 hex chars
+    let hex_chars = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(66);
+    out.push(b'0');
+    out.push(b'x');
+    for &byte in &hash {
+        out.push(hex_chars[(byte >> 4) as usize]);
+        out.push(hex_chars[(byte & 0x0f) as usize]);
+    }
+
+    js_string_from_bytes(out.as_ptr(), out.len() as u32)
+}
+
 /// formatUnits(value: bigint, decimals: number) -> string
 /// Converts a BigInt to a human-readable string with the given number of decimals.
 /// Example: formatUnits(1000000n, 6) -> "1.0"

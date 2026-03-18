@@ -7586,6 +7586,15 @@ impl Compiler {
             self.extern_funcs.insert("js_ethers_parse_units".to_string(), func_id);
         }
 
+        // js_keccak256_native(buf: i64) -> i64 (string pointer: "0x" + hex hash)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // buffer pointer
+            sig.returns.push(AbiParam::new(types::I64)); // string pointer
+            let func_id = self.module.declare_function("js_keccak256_native", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_keccak256_native".to_string(), func_id);
+        }
+
         // js_ethers_get_address(str: i64) -> i64 (string pointer)
         {
             let mut sig = self.module.make_signature();
