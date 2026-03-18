@@ -101,7 +101,7 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"], 
 futures-util = { version = "0.3", optional = true }
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "mysql", "postgres"], optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "mysql", "postgres", "chrono"], optional = true }
 redis = { version = "0.25", features = ["tokio-comp", "connection-manager"], optional = true }
 mongodb = { version = "2.8", default-features = false, features = ["tokio-runtime"], optional = true }
 bson = { version = "2.9", optional = true }

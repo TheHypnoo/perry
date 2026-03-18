@@ -242,14 +242,15 @@ fn column_value_to_jsvalue(row: &MySqlRow, index: usize) -> JSValue {
 
     // Try to get the value based on the column type
     match type_name {
-        "INT" | "TINYINT" | "SMALLINT" | "MEDIUMINT" => {
+        "INT" | "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT UNSIGNED" | "TINYINT UNSIGNED"
+        | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" => {
             if let Ok(val) = row.try_get::<i32, _>(index) {
                 JSValue::int32(val)
             } else {
                 JSValue::null()
             }
         }
-        "BIGINT" => {
+        "BIGINT" | "BIGINT UNSIGNED" => {
             if let Ok(val) = row.try_get::<i64, _>(index) {
                 JSValue::number(val as f64)
             } else {
@@ -263,7 +264,7 @@ fn column_value_to_jsvalue(row: &MySqlRow, index: usize) -> JSValue {
                 JSValue::null()
             }
         }
-        "VARCHAR" | "CHAR" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" | "TINYTEXT" => {
+        "VARCHAR" | "CHAR" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" | "TINYTEXT" | "ENUM" | "SET" => {
             if let Ok(val) = row.try_get::<String, _>(index) {
                 unsafe {
                     let str_ptr = js_string_from_bytes(val.as_ptr(), val.len() as u32);
@@ -280,11 +281,51 @@ fn column_value_to_jsvalue(row: &MySqlRow, index: usize) -> JSValue {
                 JSValue::null()
             }
         }
+        "DATETIME" | "TIMESTAMP" => {
+            if let Ok(val) = row.try_get::<chrono::NaiveDateTime, _>(index) {
+                let s = val.format("%Y-%m-%d %H:%M:%S").to_string();
+                unsafe {
+                    let str_ptr = js_string_from_bytes(s.as_ptr(), s.len() as u32);
+                    JSValue::string_ptr(str_ptr)
+                }
+            } else {
+                JSValue::null()
+            }
+        }
+        "DATE" => {
+            if let Ok(val) = row.try_get::<chrono::NaiveDate, _>(index) {
+                let s = val.format("%Y-%m-%d").to_string();
+                unsafe {
+                    let str_ptr = js_string_from_bytes(s.as_ptr(), s.len() as u32);
+                    JSValue::string_ptr(str_ptr)
+                }
+            } else {
+                JSValue::null()
+            }
+        }
+        "TIME" => {
+            if let Ok(val) = row.try_get::<chrono::NaiveTime, _>(index) {
+                let s = val.format("%H:%M:%S").to_string();
+                unsafe {
+                    let str_ptr = js_string_from_bytes(s.as_ptr(), s.len() as u32);
+                    JSValue::string_ptr(str_ptr)
+                }
+            } else {
+                JSValue::null()
+            }
+        }
         _ => {
-            // Try as string fallback
+            // Try as string first for unknown types
             if let Ok(val) = row.try_get::<String, _>(index) {
                 unsafe {
                     let str_ptr = js_string_from_bytes(val.as_ptr(), val.len() as u32);
+                    JSValue::string_ptr(str_ptr)
+                }
+            } else if let Ok(val) = row.try_get::<Vec<u8>, _>(index) {
+                // Fallback for BLOB/BINARY types — try UTF-8 conversion
+                let s = String::from_utf8_lossy(&val);
+                unsafe {
+                    let str_ptr = js_string_from_bytes(s.as_ptr(), s.len() as u32);
                     JSValue::string_ptr(str_ptr)
                 }
             } else {

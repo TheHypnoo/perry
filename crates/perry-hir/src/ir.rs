@@ -885,6 +885,8 @@ pub enum Expr {
     MathPow(Box<Expr>, Box<Expr>),       // Math.pow(base, exp) -> number
     MathMin(Vec<Expr>),                  // Math.min(...values) -> number
     MathMax(Vec<Expr>),                  // Math.max(...values) -> number
+    MathMinSpread(Box<Expr>),            // Math.min(...array) -> number (spread from single array)
+    MathMaxSpread(Box<Expr>),            // Math.max(...array) -> number (spread from single array)
     MathImul(Box<Expr>, Box<Expr>),      // Math.imul(a, b) -> number (32-bit integer multiply)
     MathRandom,                          // Math.random() -> number
 

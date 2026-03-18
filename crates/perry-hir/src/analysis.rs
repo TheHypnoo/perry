@@ -307,6 +307,9 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
                 collect_local_refs_expr(arg, refs, visited);
             }
         }
+        Expr::MathMinSpread(expr) | Expr::MathMaxSpread(expr) => {
+            collect_local_refs_expr(expr, refs, visited);
+        }
         Expr::MathRandom => {}
         // Crypto operations
         Expr::CryptoRandomBytes(expr) | Expr::CryptoSha256(expr) | Expr::CryptoMd5(expr) => {
@@ -1077,6 +1080,9 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
             for arg in args {
                 collect_assigned_locals_expr(arg, assigned);
             }
+        }
+        Expr::MathMinSpread(expr) | Expr::MathMaxSpread(expr) => {
+            collect_assigned_locals_expr(expr, assigned);
         }
         Expr::MathRandom => {}
         // Crypto operations

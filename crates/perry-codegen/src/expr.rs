@@ -1043,6 +1043,24 @@ pub(crate) fn compile_expr(
                 Ok(result)
             }
         }
+        Expr::MathMinSpread(arr_expr) => {
+            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arr_expr, this_ctx)?;
+            let arr_i64 = ensure_i64(builder, arr_val);
+            let func = extern_funcs.get("js_math_min_array")
+                .ok_or_else(|| anyhow!("js_math_min_array not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[arr_i64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathMaxSpread(arr_expr) => {
+            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arr_expr, this_ctx)?;
+            let arr_i64 = ensure_i64(builder, arr_val);
+            let func = extern_funcs.get("js_math_max_array")
+                .ok_or_else(|| anyhow!("js_math_max_array not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[arr_i64]);
+            Ok(builder.inst_results(call)[0])
+        }
         Expr::MathImul(a_expr, b_expr) => {
             // Math.imul(a, b): 32-bit integer multiply
             let a = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, a_expr, this_ctx)?;
@@ -1951,12 +1969,13 @@ pub(crate) fn compile_expr(
                     Ok(builder.inst_results(call)[0])
                 }
                 Some(ts_expr) => {
-                    // new Date(timestamp)
+                    // new Date(value) - handles both numeric timestamps and date strings
                     let ts_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, ts_expr, this_ctx)?;
-                    let func = extern_funcs.get("js_date_new_from_timestamp")
-                        .ok_or_else(|| anyhow!("js_date_new_from_timestamp not declared"))?;
+                    let ts_f64 = ensure_f64(builder, ts_val);
+                    let func = extern_funcs.get("js_date_new_from_value")
+                        .ok_or_else(|| anyhow!("js_date_new_from_value not declared"))?;
                     let func_ref = module.declare_func_in_func(*func, builder.func);
-                    let call = builder.ins().call(func_ref, &[ts_val]);
+                    let call = builder.ins().call(func_ref, &[ts_f64]);
                     Ok(builder.inst_results(call)[0])
                 }
             }

@@ -39,3 +39,51 @@ pub extern "C" fn js_math_random() -> f64 {
     let mut rng = rand::thread_rng();
     rng.gen::<f64>()
 }
+
+/// Math.min(...array) -> number — find minimum value in an array
+#[no_mangle]
+pub extern "C" fn js_math_min_array(arr_ptr: i64) -> f64 {
+    if arr_ptr == 0 {
+        return f64::INFINITY;
+    }
+    let arr = arr_ptr as *const crate::ArrayHeader;
+    let len = crate::array::js_array_length(arr) as usize;
+    if len == 0 {
+        return f64::INFINITY;
+    }
+    let mut result = f64::INFINITY;
+    for i in 0..len {
+        let num = crate::array::js_array_get_f64(arr, i as u32);
+        if num.is_nan() {
+            return f64::NAN;
+        }
+        if num < result {
+            result = num;
+        }
+    }
+    result
+}
+
+/// Math.max(...array) -> number — find maximum value in an array
+#[no_mangle]
+pub extern "C" fn js_math_max_array(arr_ptr: i64) -> f64 {
+    if arr_ptr == 0 {
+        return f64::NEG_INFINITY;
+    }
+    let arr = arr_ptr as *const crate::ArrayHeader;
+    let len = crate::array::js_array_length(arr) as usize;
+    if len == 0 {
+        return f64::NEG_INFINITY;
+    }
+    let mut result = f64::NEG_INFINITY;
+    for i in 0..len {
+        let num = crate::array::js_array_get_f64(arr, i as u32);
+        if num.is_nan() {
+            return f64::NAN;
+        }
+        if num > result {
+            result = num;
+        }
+    }
+    result
+}

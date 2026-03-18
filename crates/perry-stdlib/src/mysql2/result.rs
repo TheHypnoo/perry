@@ -125,14 +125,15 @@ impl RawQueryResult {
 /// Extract a raw value from a MySQL row (safe to call on any thread)
 fn extract_raw_value(row: &MySqlRow, index: usize, type_name: &str) -> RawValue {
     match type_name {
-        "INT" | "TINYINT" | "SMALLINT" | "MEDIUMINT" => {
+        "INT" | "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT UNSIGNED" | "TINYINT UNSIGNED"
+        | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" => {
             if let Ok(val) = row.try_get::<i32, _>(index) {
                 RawValue::Int32(val)
             } else {
                 RawValue::Null
             }
         }
-        "BIGINT" => {
+        "BIGINT" | "BIGINT UNSIGNED" => {
             if let Ok(val) = row.try_get::<i64, _>(index) {
                 RawValue::Int64(val)
             } else {
@@ -153,10 +154,34 @@ fn extract_raw_value(row: &MySqlRow, index: usize, type_name: &str) -> RawValue 
                 RawValue::Null
             }
         }
+        "DATETIME" | "TIMESTAMP" => {
+            if let Ok(val) = row.try_get::<chrono::NaiveDateTime, _>(index) {
+                RawValue::String(val.format("%Y-%m-%d %H:%M:%S").to_string())
+            } else {
+                RawValue::Null
+            }
+        }
+        "DATE" => {
+            if let Ok(val) = row.try_get::<chrono::NaiveDate, _>(index) {
+                RawValue::String(val.format("%Y-%m-%d").to_string())
+            } else {
+                RawValue::Null
+            }
+        }
+        "TIME" => {
+            if let Ok(val) = row.try_get::<chrono::NaiveTime, _>(index) {
+                RawValue::String(val.format("%H:%M:%S").to_string())
+            } else {
+                RawValue::Null
+            }
+        }
         _ => {
-            // Try as string for all other types
+            // Try as string first for VARCHAR, CHAR, TEXT, ENUM, SET, etc.
             if let Ok(val) = row.try_get::<String, _>(index) {
                 RawValue::String(val)
+            } else if let Ok(val) = row.try_get::<Vec<u8>, _>(index) {
+                // Fallback for BLOB/BINARY types — try UTF-8 conversion
+                RawValue::String(String::from_utf8_lossy(&val).to_string())
             } else {
                 RawValue::Null
             }

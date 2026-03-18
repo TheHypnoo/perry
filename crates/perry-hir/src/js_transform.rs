@@ -678,6 +678,9 @@ fn transform_expr(
                 transform_expr(arg, js_imports, extern_func_to_js, local_name_to_js, tracker);
             }
         }
+        Expr::MathMinSpread(e) | Expr::MathMaxSpread(e) => {
+            transform_expr(e, js_imports, extern_func_to_js, local_name_to_js, tracker);
+        }
         Expr::CryptoRandomBytes(e) | Expr::CryptoSha256(e) | Expr::CryptoMd5(e) => {
             transform_expr(e, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }

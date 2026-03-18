@@ -566,6 +566,9 @@ impl crate::codegen::Compiler {
                     self.collect_closures_from_expr(arg, closures, enclosing_class);
                 }
             }
+            Expr::MathMinSpread(e) | Expr::MathMaxSpread(e) => {
+                self.collect_closures_from_expr(e, closures, enclosing_class);
+            }
             Expr::MathPow(base, exp) | Expr::MathImul(base, exp) => {
                 self.collect_closures_from_expr(base, closures, enclosing_class);
                 self.collect_closures_from_expr(exp, closures, enclosing_class);

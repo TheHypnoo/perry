@@ -1218,6 +1218,16 @@ impl JsEmitter {
             }
             Expr::MathMin(args) => { self.emit_math_variadic("Math.min", args); }
             Expr::MathMax(args) => { self.emit_math_variadic("Math.max", args); }
+            Expr::MathMinSpread(arr) => {
+                self.output.push_str("Math.min(...");
+                self.emit_expr(arr);
+                self.output.push(')');
+            }
+            Expr::MathMaxSpread(arr) => {
+                self.output.push_str("Math.max(...");
+                self.emit_expr(arr);
+                self.output.push(')');
+            }
             Expr::MathRandom => self.output.push_str("Math.random()"),
 
             // --- Crypto ---

@@ -6957,6 +6957,24 @@ impl Compiler {
             self.extern_funcs.insert("js_math_random".to_string(), func_id);
         }
 
+        // js_math_min_array(arr_ptr: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_math_min_array", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_math_min_array".to_string(), func_id);
+        }
+
+        // js_math_max_array(arr_ptr: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_math_max_array", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_math_max_array".to_string(), func_id);
+        }
+
         // ========================================================================
         // Perry Native Framework: Date
         // ========================================================================
@@ -6984,6 +7002,15 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::F64));
             let func_id = self.module.declare_function("js_date_new_from_timestamp", Linkage::Import, &sig)?;
             self.extern_funcs.insert("js_date_new_from_timestamp".to_string(), func_id);
+        }
+
+        // js_date_new_from_value(value: f64) -> f64  (handles both string and number args)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_date_new_from_value", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_date_new_from_value".to_string(), func_id);
         }
 
         // js_date_get_time(timestamp: f64) -> f64

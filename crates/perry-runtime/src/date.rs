@@ -26,6 +26,124 @@ pub extern "C" fn js_date_new_from_timestamp(timestamp: f64) -> f64 {
     timestamp
 }
 
+/// Create a new Date from a value that could be a number or a NaN-boxed string.
+/// Checks for STRING_TAG (0x7FFF) in the top 16 bits; if found, parses the string
+/// as a date. Otherwise treats the value as a numeric timestamp.
+#[no_mangle]
+pub extern "C" fn js_date_new_from_value(value: f64) -> f64 {
+    let bits = value.to_bits();
+    let tag = (bits >> 48) & 0xFFFF;
+    if tag == 0x7FFF {
+        // NaN-boxed string — extract pointer and parse
+        let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const crate::StringHeader;
+        if ptr.is_null() || (ptr as usize) < 0x1000 {
+            return f64::NAN;
+        }
+        unsafe {
+            let len = (*ptr).length as usize;
+            let data = (ptr as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+            let bytes = std::slice::from_raw_parts(data, len);
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                parse_date_string(s)
+            } else {
+                f64::NAN
+            }
+        }
+    } else {
+        // Numeric timestamp
+        value
+    }
+}
+
+/// Parse a date string into a millisecond timestamp.
+/// Supports ISO 8601 and common formats:
+///   "2024-01-15"
+///   "2024-01-15T12:30:45"
+///   "2024-01-15T12:30:45Z"
+///   "2024-01-15T12:30:45.123Z"
+///   "2024-01-15 12:30:45" (MySQL format)
+///   "Jan 15, 2024"
+///   Numeric strings (treated as timestamps)
+fn parse_date_string(s: &str) -> f64 {
+    let s = s.trim();
+    if s.is_empty() {
+        return f64::NAN;
+    }
+
+    // Try as numeric timestamp first
+    if let Ok(n) = s.parse::<f64>() {
+        return n;
+    }
+
+    // Try ISO 8601 / MySQL datetime formats
+    // "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DD HH:MM:SS"
+    if s.len() >= 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' {
+        let year: i32 = match s[0..4].parse() { Ok(v) => v, Err(_) => return f64::NAN };
+        let month: u32 = match s[5..7].parse() { Ok(v) => v, Err(_) => return f64::NAN };
+        let day: u32 = match s[8..10].parse() { Ok(v) => v, Err(_) => return f64::NAN };
+
+        if month < 1 || month > 12 || day < 1 || day > 31 {
+            return f64::NAN;
+        }
+
+        let mut hour: u32 = 0;
+        let mut minute: u32 = 0;
+        let mut second: u32 = 0;
+        let mut millis: u32 = 0;
+
+        // Parse time part if present (after T or space)
+        let rest = &s[10..];
+        if rest.len() >= 6 && (rest.starts_with('T') || rest.starts_with(' ')) {
+            let time_str = &rest[1..];
+            if time_str.len() >= 5 && time_str.as_bytes()[2] == b':' {
+                hour = match time_str[0..2].parse() { Ok(v) => v, Err(_) => return f64::NAN };
+                minute = match time_str[3..5].parse() { Ok(v) => v, Err(_) => return f64::NAN };
+                if time_str.len() >= 8 && time_str.as_bytes()[5] == b':' {
+                    second = match time_str[6..8].parse() { Ok(v) => v, Err(_) => return f64::NAN };
+                    // Milliseconds after '.'
+                    if time_str.len() >= 10 && time_str.as_bytes()[8] == b'.' {
+                        let ms_end = time_str[9..].find(|c: char| !c.is_ascii_digit()).unwrap_or(time_str.len() - 9);
+                        let ms_str = &time_str[9..9 + ms_end];
+                        millis = match ms_str.parse::<u32>() {
+                            Ok(v) => {
+                                // Normalize to 3 digits
+                                match ms_str.len() {
+                                    1 => v * 100,
+                                    2 => v * 10,
+                                    3 => v,
+                                    _ => v / 10u32.pow(ms_str.len() as u32 - 3),
+                                }
+                            }
+                            Err(_) => 0,
+                        };
+                    }
+                }
+            }
+        }
+
+        // Convert to timestamp using the same algorithm as timestamp_to_components (inverse)
+        let ts = components_to_timestamp(year, month, day, hour, minute, second);
+        return (ts * 1000 + millis as i64) as f64;
+    }
+
+    f64::NAN
+}
+
+/// Convert date components (UTC) to Unix timestamp in seconds.
+/// Inverse of timestamp_to_components.
+fn components_to_timestamp(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> i64 {
+    // Howard Hinnant's civil_from_days (inverse of days_from_civil)
+    let y = if month <= 2 { year as i64 - 1 } else { year as i64 };
+    let m = if month <= 2 { month as i64 + 9 } else { month as i64 - 3 };
+    let era = if y >= 0 { y / 400 } else { (y - 399) / 400 };
+    let yoe = (y - era * 400) as u64;
+    let doy = (153 * m as u64 + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe as i64 - 719468;
+
+    days * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64
+}
+
 /// Get timestamp from Date (date.getTime())
 /// Since we store dates as timestamps, this is an identity function
 #[no_mangle]

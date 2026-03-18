@@ -1200,6 +1200,8 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
         Expr::MathMax(args) => Expr::MathMax(
             args.iter().map(|a| substitute_expr(a, substitutions)).collect()
         ),
+        Expr::MathMinSpread(e) => Expr::MathMinSpread(Box::new(substitute_expr(e, substitutions))),
+        Expr::MathMaxSpread(e) => Expr::MathMaxSpread(Box::new(substitute_expr(e, substitutions))),
         Expr::MathRandom => Expr::MathRandom,
 
         // Crypto operations
@@ -1909,6 +1911,9 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
                 collect_instantiations_in_expr(arg, ctx, module);
             }
         }
+        Expr::MathMinSpread(e) | Expr::MathMaxSpread(e) => {
+            collect_instantiations_in_expr(e, ctx, module);
+        }
         Expr::MathRandom => {}
         // Crypto operations
         Expr::CryptoRandomBytes(expr) | Expr::CryptoSha256(expr) | Expr::CryptoMd5(expr) => {
@@ -2325,6 +2330,9 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
             for arg in args.iter_mut() {
                 update_call_sites_in_expr(arg, ctx, lookup);
             }
+        }
+        Expr::MathMinSpread(e) | Expr::MathMaxSpread(e) => {
+            update_call_sites_in_expr(e, ctx, lookup);
         }
         Expr::MathRandom => {}
         // Crypto operations

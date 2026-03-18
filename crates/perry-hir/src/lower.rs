@@ -2937,9 +2937,15 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             }
                                         }
                                         "min" => {
+                                            if has_spread && args.len() == 1 {
+                                                return Ok(Expr::MathMinSpread(Box::new(args.into_iter().next().unwrap())));
+                                            }
                                             return Ok(Expr::MathMin(args));
                                         }
                                         "max" => {
+                                            if has_spread && args.len() == 1 {
+                                                return Ok(Expr::MathMaxSpread(Box::new(args.into_iter().next().unwrap())));
+                                            }
                                             return Ok(Expr::MathMax(args));
                                         }
                                         "random" => {
@@ -5921,9 +5927,8 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
 
                     let callee_expr = lower_expr(ctx, callee)?;
 
-                    // For method calls, we need to check the object
-                    // This is simplified - full implementation would need more context
-                    if has_spread {
+                    // Build the call expression
+                    let call_expr = if has_spread {
                         let spread_args: Vec<CallArg> = call.args.iter().zip(args.iter())
                             .map(|(ast_arg, lowered)| {
                                 if ast_arg.spread.is_some() {
@@ -5933,18 +5938,41 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 }
                             })
                             .collect();
-                        Ok(Expr::CallSpread {
+                        Expr::CallSpread {
                             callee: Box::new(callee_expr),
                             args: spread_args,
                             type_args: Vec::new(),
-                        })
+                        }
                     } else {
-                        Ok(Expr::Call {
+                        Expr::Call {
                             callee: Box::new(callee_expr),
                             args,
                             type_args: Vec::new(),
-                        })
-                    }
+                        }
+                    };
+
+                    // Extract the object to null-check from the callee
+                    // For method calls (obj.method), check the object
+                    // For plain calls (fn), check the function itself
+                    let check_expr = match &**callee {
+                        ast::Expr::Member(member) => {
+                            lower_expr(ctx, &member.obj)?
+                        }
+                        _ => {
+                            lower_expr(ctx, callee)?
+                        }
+                    };
+
+                    // Wrap in conditional: check_expr == null ? undefined : call_expr
+                    Ok(Expr::Conditional {
+                        condition: Box::new(Expr::Compare {
+                            op: CompareOp::Eq,
+                            left: Box::new(check_expr),
+                            right: Box::new(Expr::Null),
+                        }),
+                        then_expr: Box::new(Expr::Undefined),
+                        else_expr: Box::new(call_expr),
+                    })
                 }
             }
         }
