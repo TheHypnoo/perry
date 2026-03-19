@@ -36,9 +36,18 @@ impl crate::codegen::Compiler {
             sig.returns.push(AbiParam::new(types::I32)); // returns i32
         }
 
+        // iOS game loop mode: when targeting iOS with the "ios-game-loop" feature,
+        // generate "_perry_user_main" instead of "main". The runtime provides the
+        // actual "main" which calls UIApplicationMain on the main thread and spawns
+        // _perry_user_main on a background game thread.
+        let ios_game_loop = self.compile_target == 1 && self.enabled_features.contains("ios-game-loop");
+
         let func_id = if self.is_entry_module && is_dylib {
             // Dylib: generate "plugin_activate" as the entry point
             self.module.declare_function("plugin_activate", Linkage::Export, &sig)?
+        } else if self.is_entry_module && ios_game_loop {
+            // iOS game loop: generate "_perry_user_main" (actual main provided by runtime)
+            self.module.declare_function("_perry_user_main", Linkage::Export, &sig)?
         } else if self.is_entry_module {
             // Entry module: generate "main"
             match self.module.declare_function("main", Linkage::Export, &sig) {

@@ -45,6 +45,8 @@ pub mod redis_client;
 pub mod plugin;
 #[cfg(feature = "geisterhand")]
 pub mod geisterhand_registry;
+#[cfg(target_os = "ios")]
+pub mod ios_game_loop;
 
 pub use value::JSValue;
 pub use promise::Promise;
