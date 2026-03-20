@@ -1137,10 +1137,13 @@ pub(crate) fn compile_stmt(
                         // values that need to have the pointer extracted, not just bitcast.
                         let val_type = builder.func.dfg.value_type(val);
                         if val_type == types::F64 {
-                            if is_string {
+                            if is_string || is_typed_string {
                                 // FAST PATH: String values are always NaN-boxed with STRING_TAG.
                                 // Use inline_get_string_pointer (3 instructions: bitcast + mask + band)
                                 // instead of ensure_i64 (7 instructions) or js_nanbox_get_pointer (FFI call).
+                                // Also handle is_typed_string for cross-module calls where the
+                                // expression type inference (is_string_expr) can't detect the return
+                                // type but the variable's declared type is String.
                                 inline_get_string_pointer(builder, val)
                             } else {
                             // Check if this is a NaN-boxed expression (IndexGet, PropertyGet on generic objects, etc.)
