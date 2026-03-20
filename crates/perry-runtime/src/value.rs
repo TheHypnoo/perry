@@ -674,7 +674,7 @@ pub extern "C" fn js_nanbox_is_pointer(value: f64) -> bool {
 
 /// Extract a pointer from a NaN-boxed f64 value.
 /// Also handles raw pointer bits (bitcast from i64) for backward compatibility.
-/// Handles both POINTER_TAG and STRING_TAG.
+/// Handles POINTER_TAG, STRING_TAG, BIGINT_TAG, and JS_HANDLE_TAG.
 /// Returns the pointer as i64.
 #[no_mangle]
 pub extern "C" fn js_nanbox_get_pointer(value: f64) -> i64 {
@@ -691,6 +691,12 @@ pub extern "C" fn js_nanbox_get_pointer(value: f64) -> i64 {
 
     if jsval.is_bigint() {
         return jsval.as_bigint_ptr() as i64;
+    }
+
+    // JS_HANDLE_TAG (0x7FFB): used for V8 handles and Perry UI widget handles
+    // when values pass through inline_nanbox_pointer's "already tagged" path.
+    if (bits & TAG_MASK) == JS_HANDLE_TAG {
+        return (bits & POINTER_MASK) as i64;
     }
 
     if bits != 0 && bits <= POINTER_MASK {
