@@ -132,7 +132,7 @@ impl Compiler {
     pub fn new(target: Option<&str>) -> Result<Self> {
         let mut flag_builder = settings::builder();
         flag_builder.set("use_colocated_libcalls", "false").unwrap();
-        // Enable PIC for macOS/iOS compatibility
+        // Enable PIC for macOS/iOS compatibility and Windows COFF cross-module references
         flag_builder.set("is_pic", "true").unwrap();
         // Enable maximum optimization
         flag_builder.set("opt_level", "speed").unwrap();
