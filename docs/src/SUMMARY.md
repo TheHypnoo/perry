@@ -32,6 +32,7 @@
 - [Animation](ui/animation.md)
 - [Multi-Window](ui/multi-window.md)
 - [Theming](ui/theming.md)
+- [Camera](ui/camera.md)
 
 # Platforms
 
@@ -60,6 +61,7 @@
 - [Preferences](system/preferences.md)
 - [Keychain](system/keychain.md)
 - [Notifications](system/notifications.md)
+- [Audio Capture](system/audio.md)
 - [Other](system/other.md)
 
 # Widgets

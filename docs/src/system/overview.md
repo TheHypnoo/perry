@@ -3,7 +3,7 @@
 The `perry/system` module provides access to platform-native system features: preferences, secure storage, notifications, URL opening, and dark mode detection.
 
 ```typescript
-import { openURL, isDarkMode, preferencesSet, preferencesGet } from "perry/system";
+import { openURL, isDarkMode, preferencesSet, preferencesGet, audioStart, audioGetLevel } from "perry/system";
 ```
 
 ## Available APIs
@@ -19,6 +19,12 @@ import { openURL, isDarkMode, preferencesSet, preferencesGet } from "perry/syste
 | `sendNotification(title, body)` | Local notification | All |
 | `clipboardGet()` | Read clipboard | All |
 | `clipboardSet(text)` | Write clipboard | All |
+| `audioStart()` | Start microphone capture | All |
+| `audioStop()` | Stop microphone capture | All |
+| `audioGetLevel()` | Current dB(A) sound level | All |
+| `audioGetPeak()` | Current peak amplitude (0–1) | All |
+| `audioGetWaveformSamples(n)` | Recent dB samples for visualization | All |
+| `getDeviceModel()` | Device model identifier | All |
 
 ## Quick Example
 
@@ -43,4 +49,5 @@ openURL("https://example.com");
 - [Preferences](preferences.md)
 - [Keychain](keychain.md)
 - [Notifications](notifications.md)
+- [Audio Capture](audio.md)
 - [Other](other.md)

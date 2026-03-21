@@ -235,6 +235,32 @@ const canvas = Canvas(400, 300, (ctx) => {
 });
 ```
 
+## CameraView
+
+A live camera preview with color sampling. See [Camera](camera.md) for the full API.
+
+```typescript
+import { CameraView, cameraStart, cameraSampleColor, cameraSetOnTap } from "perry/ui";
+
+const cam = CameraView();
+cameraStart(cam);
+
+cameraSetOnTap(cam, (x, y) => {
+  const rgb = cameraSampleColor(x, y); // packed r*65536 + g*256 + b
+});
+```
+
+> **iOS only.** Other platforms are planned.
+
+**Functions:**
+- `CameraView()` — Create a camera preview widget
+- `cameraStart(handle)` — Start live capture
+- `cameraStop(handle)` — Stop capture
+- `cameraFreeze(handle)` — Pause preview (freeze frame)
+- `cameraUnfreeze(handle)` — Resume preview
+- `cameraSampleColor(x, y)` — Sample color at normalized coordinates (returns packed RGB or -1)
+- `cameraSetOnTap(handle, callback)` — Register tap handler with `(x, y)` coordinates
+
 ## Common Widget Methods
 
 All widgets support these methods:

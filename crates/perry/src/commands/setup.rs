@@ -221,29 +221,25 @@ pub(crate) fn android_wizard(saved: &mut PerryConfig) -> Result<()> {
 
     // Update project perry.toml with distribute = "playstore"
     let perry_toml_path = std::env::current_dir()?.join("perry.toml");
-    if perry_toml_path.exists() {
-        let gp_key = saved.android.as_ref().and_then(|a| a.google_play_key_path.as_deref());
-        match update_perry_toml_android(&perry_toml_path, &keystore_path, &key_alias, gp_key) {
-            Ok(()) => {
-                println!();
-                println!(
-                    "  {} Updated perry.toml with [android] settings",
-                    style("✓").green()
-                );
-            }
-            Err(e) => {
-                println!();
-                println!("  {} Could not update perry.toml: {e}", style("!").yellow());
-                println!("  Add these manually to your perry.toml [android] section:");
-                println!("    distribute = \"playstore\"");
-            }
+    // Create perry.toml if it doesn't exist — project-specific config belongs here
+    if !perry_toml_path.exists() {
+        std::fs::write(&perry_toml_path, "")?;
+    }
+    let gp_key = saved.android.as_ref().and_then(|a| a.google_play_key_path.as_deref());
+    match update_perry_toml_android(&perry_toml_path, &keystore_path, &key_alias, gp_key) {
+        Ok(()) => {
+            println!();
+            println!(
+                "  {} Updated perry.toml with [android] settings",
+                style("✓").green()
+            );
         }
-    } else {
-        println!();
-        println!("  Add to your perry.toml:");
-        println!();
-        println!("  {}", style("[android]").cyan());
-        println!("  distribute = \"playstore\"");
+        Err(e) => {
+            println!();
+            println!("  {} Could not update perry.toml: {e}", style("!").yellow());
+            println!("  Add these manually to your perry.toml [android] section:");
+            println!("    distribute = \"playstore\"");
+        }
     }
 
     println!();
@@ -802,28 +798,26 @@ pub(crate) fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     let p12_str = p12_path.to_string_lossy().to_string();
     let profile_str = profile_path.to_string_lossy().to_string();
 
-    if perry_toml_path.exists() {
-        match update_perry_toml_ios(
-            &perry_toml_path,
-            &p12_str,
-            &profile_str,
-            created_signing_identity.as_deref(),
-        ) {
-            Ok(()) => {
-                println!("  {} Project credentials saved to {}", style("✓").green().bold(),
-                    style(perry_toml_path.display()).dim());
-            }
-            Err(e) => {
-                println!("  {} Could not update perry.toml: {e}", style("!").yellow());
-                println!("  Add these manually to your perry.toml [ios] section:");
-                println!("  certificate = \"{}\"", p12_str);
-                println!("  provisioning_profile = \"{}\"", profile_str);
-            }
+    // Create perry.toml if it doesn't exist — project-specific config belongs here
+    if !perry_toml_path.exists() {
+        std::fs::write(&perry_toml_path, "")?;
+    }
+    match update_perry_toml_ios(
+        &perry_toml_path,
+        &p12_str,
+        &profile_str,
+        created_signing_identity.as_deref(),
+    ) {
+        Ok(()) => {
+            println!("  {} Project credentials saved to {}", style("✓").green().bold(),
+                style(perry_toml_path.display()).dim());
         }
-    } else {
-        println!("  Add these to your perry.toml [ios] section:");
-        println!("  certificate = \"{}\"", p12_str);
-        println!("  provisioning_profile = \"{}\"", profile_str);
+        Err(e) => {
+            println!("  {} Could not update perry.toml: {e}", style("!").yellow());
+            println!("  Add these manually to your perry.toml [ios] section:");
+            println!("  certificate = \"{}\"", p12_str);
+            println!("  provisioning_profile = \"{}\"", profile_str);
+        }
     }
     // --- Export compliance ---
     println!("  {} Export Compliance", style("→").cyan().bold());
@@ -832,14 +826,9 @@ pub(crate) fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
         .with_prompt("  Does your app ONLY use standard HTTPS? (no custom encryption)")
         .default(true)
         .interact()?;
-    if perry_toml_path.exists() {
-        if let Err(e) = update_perry_toml_encryption_exempt(&perry_toml_path, encryption_exempt) {
-            println!("  {} Could not update perry.toml: {e}", style("!").yellow());
-            println!("  Add manually to [ios]: encryption_exempt = {encryption_exempt}");
-        }
-    } else {
-        println!("  Add to your perry.toml [ios] section:");
-        println!("  encryption_exempt = {encryption_exempt}");
+    if let Err(e) = update_perry_toml_encryption_exempt(&perry_toml_path, encryption_exempt) {
+        println!("  {} Could not update perry.toml: {e}", style("!").yellow());
+        println!("  Add manually to [ios]: encryption_exempt = {encryption_exempt}");
     }
     println!();
 
@@ -1118,45 +1107,32 @@ pub(crate) fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
 
     // --- Save project-specific credentials to perry.toml ---
     let perry_toml_path = std::env::current_dir()?.join("perry.toml");
-    if perry_toml_path.exists() {
-        match update_perry_toml_macos(
-            &perry_toml_path,
-            distribute_value,
-            &cert_path,
-            if signing_identity.is_empty() { None } else { Some(&signing_identity) },
-            if distribute_value == "both" { Some(&notarize_cert_path) } else { None },
-            if distribute_value == "both" && !notarize_signing_identity.is_empty() {
-                Some(&notarize_signing_identity)
-            } else {
-                None
-            },
-            installer_cert_path.as_deref(),
-        ) {
-            Ok(()) => {
-                println!("  {} macOS credentials saved to {}", style("✓").green().bold(),
-                    style(perry_toml_path.display()).dim());
-            }
-            Err(e) => {
-                println!("  {} Could not update perry.toml: {e}", style("!").yellow());
-                println!("  Add these manually to your perry.toml [macos] section:");
-                println!("  distribute = \"{distribute_value}\"");
-                println!("  certificate = \"{}\"", cert_path);
-            }
+    // Create perry.toml if it doesn't exist — project-specific config belongs here
+    if !perry_toml_path.exists() {
+        std::fs::write(&perry_toml_path, "")?;
+    }
+    match update_perry_toml_macos(
+        &perry_toml_path,
+        distribute_value,
+        &cert_path,
+        if signing_identity.is_empty() { None } else { Some(&signing_identity) },
+        if distribute_value == "both" { Some(&notarize_cert_path) } else { None },
+        if distribute_value == "both" && !notarize_signing_identity.is_empty() {
+            Some(&notarize_signing_identity)
+        } else {
+            None
+        },
+        installer_cert_path.as_deref(),
+    ) {
+        Ok(()) => {
+            println!("  {} macOS credentials saved to {}", style("✓").green().bold(),
+                style(perry_toml_path.display()).dim());
         }
-    } else {
-        println!("  Add to your perry.toml:");
-        println!();
-        println!("  {}", style("[macos]").cyan());
-        println!("  distribute = \"{distribute_value}\"");
-        println!("  certificate = \"{}\"", cert_path);
-        if !signing_identity.is_empty() {
-            println!("  signing_identity = \"{}\"", signing_identity);
-        }
-        if distribute_value == "both" {
-            println!("  notarize_certificate = \"{}\"", notarize_cert_path);
-            if !notarize_signing_identity.is_empty() {
-                println!("  notarize_signing_identity = \"{}\"", notarize_signing_identity);
-            }
+        Err(e) => {
+            println!("  {} Could not update perry.toml: {e}", style("!").yellow());
+            println!("  Add these manually to your perry.toml [macos] section:");
+            println!("  distribute = \"{distribute_value}\"");
+            println!("  certificate = \"{}\"", cert_path);
         }
     }
 
@@ -1169,14 +1145,9 @@ pub(crate) fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
             .with_prompt("  Does your app ONLY use standard HTTPS? (no custom encryption)")
             .default(true)
             .interact()?;
-        if perry_toml_path.exists() {
-            if let Err(e) = update_perry_toml_section_bool(&perry_toml_path, "macos", "encryption_exempt", encryption_exempt) {
-                println!("  {} Could not update perry.toml: {e}", style("!").yellow());
-                println!("  Add manually to [macos]: encryption_exempt = {encryption_exempt}");
-            }
-        } else {
-            println!("  Add to your perry.toml [macos] section:");
-            println!("  encryption_exempt = {encryption_exempt}");
+        if let Err(e) = update_perry_toml_section_bool(&perry_toml_path, "macos", "encryption_exempt", encryption_exempt) {
+            println!("  {} Could not update perry.toml: {e}", style("!").yellow());
+            println!("  Add manually to [macos]: encryption_exempt = {encryption_exempt}");
         }
     }
     println!();

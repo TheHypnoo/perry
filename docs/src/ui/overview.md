@@ -116,6 +116,10 @@ import {
 
   // Window
   Window,
+
+  // Camera (iOS)
+  CameraView, cameraStart, cameraStop, cameraFreeze, cameraUnfreeze,
+  cameraSampleColor, cameraSetOnTap,
 } from "perry/ui";
 ```
 

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.199
+**Current Version:** 0.2.200
 
 ## Workflow Requirements
 
@@ -152,6 +152,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.200
+- **Fix `perry setup` not saving to project perry.toml**: all 3 platform wizards (iOS, Android, macOS) silently skipped writing to `perry.toml` when the file didn't exist — now auto-creates it; also removed redundant `perry_toml_path.exists()` guards on encryption_exempt writes since the file is guaranteed to exist after creation
+- **Audio capture API (`perry/system`)**: `audioStart`, `audioStop`, `audioGetLevel` (dB(A)), `audioGetPeak`, `audioGetWaveformSamples`, `getDeviceModel` — all 6 platforms (macOS AVAudioEngine, iOS AVAudioSession, Android AudioRecord/JNI, Linux PulseAudio, Windows WASAPI, Web getUserMedia); A-weighted IIR filter, EMA smoothing, lock-free ring buffer
+- **Camera API (`perry/ui`, iOS only)**: `CameraView`, `cameraStart`/`Stop`/`Freeze`/`Unfreeze`, `cameraSampleColor(x,y)` (5x5 averaged pixel sampling from CVPixelBuffer), `cameraSetOnTap` — AVCaptureSession + AVCaptureVideoPreviewLayer with dynamic ObjC delegate
+- **Documentation**: new `docs/src/system/audio.md` and `docs/src/ui/camera.md`; updated system overview, UI overview, widgets page, and SUMMARY.md
 
 ### v0.2.199
 - **Fix `import * as X` namespace function calls**: `X.foo()` on namespace imports fell through to `js_native_call_method` fallback instead of using pre-declared scoped wrappers — intercept in `Call { PropertyGet { ExternFuncRef } }` path after class static method check; also handles exported closures via `js_closure_callN` fallback
