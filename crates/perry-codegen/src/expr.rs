@@ -13254,25 +13254,24 @@ pub(crate) fn compile_expr(
 
                     // Handle string.length
                     if info.is_string && property == "length" {
-                        // Get the string value - for boxed variables (mutable closure captures),
-                        // use js_box_get to extract the actual value from the box first
-                        let str_f64 = if info.is_boxed {
+                        // Get the string pointer directly as i64.
+                        // IMPORTANT: Do NOT bitcast to f64 and back — on Windows,
+                        // the MSVC CRT enables denormals-are-zero (DAZ) mode in MXCSR.
+                        // Raw pointer values interpreted as f64 are denormalized floats,
+                        // which get flushed to 0.0 by DAZ, losing the pointer bits.
+                        let str_ptr = if info.is_boxed {
                             let box_ptr = builder.use_var(info.var);
                             let box_get_func = extern_funcs.get("js_box_get")
                                 .ok_or_else(|| anyhow!("js_box_get not declared"))?;
                             let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
                             let call = builder.ins().call(box_get_ref, &[box_ptr]);
-                            builder.inst_results(call)[0]
+                            // box_get returns f64; extract pointer via mask (not via XMM register)
+                            inline_get_string_pointer(builder, builder.inst_results(call)[0])
                         } else {
+                            // Variable is i64 string pointer — use directly
                             let str_val = builder.use_var(info.var);
-                            ensure_f64(builder, str_val)
+                            ensure_i64(builder, str_val)
                         };
-                        // Extract pointer from NaN-boxed value (handles both raw and boxed)
-                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
-                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
-                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
-                        let ptr_call = builder.ins().call(get_ptr_ref, &[str_f64]);
-                        let str_ptr = builder.inst_results(ptr_call)[0];
 
                         // Inline load: StringHeader.length is u32 at offset 0
                         let len_i32 = builder.ins().load(types::I32, MemFlags::new(), str_ptr, 0);
