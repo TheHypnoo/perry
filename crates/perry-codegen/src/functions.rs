@@ -205,7 +205,9 @@ impl crate::codegen::Compiler {
             && !func.is_async
             && self.compile_target == 3; // Windows only (target 3)
 
-        let result = if needs_split {
+        // Debug: ONLY split renderWorkbench to isolate the crash
+        let only_this_func = func.name == "renderWorkbench";
+        let result = if needs_split && only_this_func {
             self.compile_function_split(func)
         } else if Self::is_integer_only_function(func) && func.params.len() <= 4 {
             self.compile_integer_specialized_function(func)
@@ -945,10 +947,42 @@ impl crate::codegen::Compiler {
                     .filter_map(|s| if let Stmt::Let { id, .. } = s { Some(*id) } else { None })
                     .collect();
 
-                // Pre-create variables from previous chunks AND module-level variables.
-                // Skip: variables defined in THIS chunk (compile_stmt creates them)
-                // Skip: function-local variables from LATER chunks (uninitialized)
-                // Always include: module-level variables (always available via globals)
+                // Pre-create ALL module-level variables (always available) AND
+                // function-local variables from previous chunks (already initialized).
+                // First: module-level variables from saved_module_vars
+                for (local_id, data_id) in &saved_module_vars {
+                    if chunk_let_ids.contains(local_id) {
+                        continue; // Redefined in this chunk
+                    }
+                    let var = Variable::new(next_var);
+                    next_var += 1;
+                    // Module vars use whatever type they have — load as f64 (universal)
+                    builder.declare_var(var, types::F64);
+                    let gv = self.module.declare_data_in_func(*data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, gv);
+                    let val = builder.ins().load(types::F64, MemFlags::new(), ptr, 0);
+                    builder.def_var(var, val);
+                    locals.insert(*local_id, LocalInfo {
+                        var,
+                        name: None, class_name: None, type_args: Vec::new(),
+                        is_pointer: false, is_array: false, is_string: false,
+                        is_bigint: false, is_closure: false, closure_func_id: None,
+                        is_boxed: false, is_map: false, is_set: false,
+                        is_buffer: false, is_event_emitter: false,
+                        is_union: true, // treat as union for max compat
+                        is_mixed_array: false, is_integer: false,
+                        is_integer_array: false, is_i32: false, is_boolean: false,
+                        i32_shadow: None, bounded_by_array: None,
+                        bounded_by_constant: None, scalar_fields: None,
+                        squared_cache: None, product_cache: None,
+                        cached_array_ptr: None, const_value: None,
+                        hoisted_element_loads: None, hoisted_i32_products: None,
+                        module_var_data_id: Some(*data_id),
+                        class_ref_name: None,
+                    });
+                }
+
+                // Then: function-local variables from previous chunks
                 for (local_id, data_id) in &all_slots {
                     if chunk_let_ids.contains(local_id) {
                         continue; // Will be created by compile_stmt with correct type
@@ -971,6 +1005,16 @@ impl crate::codegen::Compiler {
                     let ptr = builder.ins().global_value(types::I64, gv);
                     let val = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
                     builder.def_var(var, val);
+
+                    // Debug: log the loaded value if this is renderWorkbench
+                    if func.name == "renderWorkbench" {
+                        if let Some(debug_func) = self.extern_funcs.get("js_debug_val") {
+                            let debug_ref = self.module.declare_func_in_func(*debug_func, builder.func);
+                            let label = builder.ins().iconst(types::I32, (idx * 1000 + *local_id as usize) as i64);
+                            let val_f64 = ensure_f64(&mut builder, val);
+                            builder.ins().call(debug_ref, &[label, val_f64]);
+                        }
+                    }
 
                     let is_str = ti.map(|t| t.is_string).unwrap_or(false);
                     let is_ptr = ti.map(|t| t.is_pointer).unwrap_or(false);
@@ -1006,8 +1050,30 @@ impl crate::codegen::Compiler {
                     });
                 }
 
+                // Debug: emit checkpoint at chunk start
+                if func.name == "renderWorkbench" {
+                    if let Some(cp_func) = self.extern_funcs.get("js_checkpoint") {
+                        let cp_ref = self.module.declare_func_in_func(*cp_func, builder.func);
+                        let label = builder.ins().iconst(types::I32, (9000 + idx) as i64);
+                        builder.ins().call(cp_ref, &[label]);
+                    }
+                }
+
                 // Compile this chunk's statements
+                let mut stmt_counter = 0usize;
                 for stmt in *chunk {
+                    // Per-statement checkpoint for renderWorkbench
+                    if func.name == "renderWorkbench" {
+                        if let Some(cp_func) = self.extern_funcs.get("js_checkpoint") {
+                            let cb = builder.current_block().unwrap();
+                            if !is_block_filled(&builder, cb) {
+                                let cp_ref = self.module.declare_func_in_func(*cp_func, builder.func);
+                                let label = builder.ins().iconst(types::I32, (idx * 1000 + stmt_counter) as i64);
+                                builder.ins().call(cp_ref, &[label]);
+                            }
+                        }
+                    }
+                    stmt_counter += 1;
                     let cb = builder.current_block().unwrap();
                     if is_block_filled(&builder, cb) { break; }
                     compile_stmt(
