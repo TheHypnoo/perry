@@ -187,7 +187,7 @@ impl crate::codegen::Compiler {
     /// Maximum top-level statements before a function is split.
     /// Cranelift generates incorrect machine code for very large functions
     /// (>3MB compiled code) on Windows.
-    const LARGE_FUNC_THRESHOLD: usize = 65;
+    const LARGE_FUNC_THRESHOLD: usize = 50;
 
     pub(crate) fn compile_function(&mut self, func: &Function) -> Result<()> {
         // Track current function for self-recursive call optimization
@@ -744,7 +744,7 @@ impl crate::codegen::Compiler {
                     // write-back (expr.rs line 4454-4467), so the reload is only needed when
                     // a cross-module call modifies a var that THIS module also reads. This is
                     // rare and the values will be correct on next function-level read.
-                    let skip_reload = false;
+                    let skip_reload = self.compile_target == 3 && func.body.len() > 50;
                     if !skip_reload && !self.module_var_data_ids.is_empty() {
                         let current_block = builder.current_block().unwrap();
                         if !is_block_filled(&builder, current_block) {
@@ -945,15 +945,19 @@ impl crate::codegen::Compiler {
                     .filter_map(|s| if let Stmt::Let { id, .. } = s { Some(*id) } else { None })
                     .collect();
 
-                // Pre-create variables ONLY from PREVIOUS chunks (already initialized).
+                // Pre-create variables from previous chunks AND module-level variables.
                 // Skip: variables defined in THIS chunk (compile_stmt creates them)
-                // Skip: variables from LATER chunks (globals are zero → null crash)
+                // Skip: function-local variables from LATER chunks (uninitialized)
+                // Always include: module-level variables (always available via globals)
                 for (local_id, data_id) in &all_slots {
                     if chunk_let_ids.contains(local_id) {
                         continue; // Will be created by compile_stmt with correct type
                     }
-                    if !defined_in_previous_chunks.contains(local_id) {
-                        continue; // Not yet initialized — don't load garbage from global
+                    // Module-level variables (existed before splitting) are always available.
+                    // Function-local variables are only available if defined in a previous chunk.
+                    let is_module_var = saved_module_vars.contains_key(local_id);
+                    if !is_module_var && !defined_in_previous_chunks.contains(local_id) {
+                        continue; // Function-local from a later chunk — not yet initialized
                     }
                     let ti = local_type_info.get(local_id);
                     let var_type = ti.map(|t| t.abi_type).unwrap_or(types::F64);
@@ -992,7 +996,12 @@ impl crate::codegen::Compiler {
                         squared_cache: None, product_cache: None,
                         cached_array_ptr: None, const_value: None,
                         hoisted_element_loads: None, hoisted_i32_products: None,
-                        module_var_data_id: Some(*data_id),
+                        // Don't set module_var_data_id on pre-created cross-chunk
+                        // variables. The module-var reload loop would reload them
+                        // with potentially wrong types (SplitLocalInfo vs actual).
+                        // These variables are loaded once at chunk entry and don't
+                        // need reloading — they're only read, not written.
+                        module_var_data_id: if is_module_var { Some(*data_id) } else { None },
                         class_ref_name: None,
                     });
                 }
