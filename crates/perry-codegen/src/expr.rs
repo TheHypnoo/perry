@@ -4422,8 +4422,9 @@ pub(crate) fn compile_expr(
                         // retain their type identity (typeof returns 'object', not 'number')
                         inline_nanbox_pointer(builder, val)
                     } else if var_type == types::I64 && val_type == types::F64 {
-                        let result = ensure_i64(builder, val);
-                        result
+                        // Extract raw pointer from NaN-boxed f64.
+                        // Must strip NaN tag bits, not raw bitcast.
+                        inline_get_string_pointer(builder, val)
                     } else if val_type == types::I32 && var_type == types::F64 {
                         builder.ins().fcvt_from_sint(types::F64, val)
                     } else if val_type == types::I32 && var_type == types::I64 {

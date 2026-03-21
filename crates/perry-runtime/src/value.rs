@@ -444,6 +444,15 @@ pub extern "C" fn js_checkpoint(n: i32) {
     let _ = stderr.flush();
 }
 
+/// Debug: print a value's raw bits to stderr (for diagnosing NaN-boxing issues)
+#[no_mangle]
+pub extern "C" fn js_debug_val(label: i32, val: f64) {
+    use std::io::Write;
+    let bits = val.to_bits();
+    let _ = writeln!(std::io::stderr(), "[DEBUG_VAL] label={} bits=0x{:016X} f64={}", label, bits, val);
+    let _ = std::io::stderr().flush();
+}
+
 /// Create a NaN-boxed BigInt pointer value from an i64 raw pointer.
 /// Returns the value as f64 for storage in union-typed variables.
 /// This uses BIGINT_TAG (0x7FFA) to distinguish from other pointer types.

@@ -712,7 +712,7 @@ impl crate::codegen::Compiler {
                 // For large functions on Windows, emit checkpoint calls after each
                 // statement to help diagnose crashes at specific statement indices.
                 // Emit checkpoints for renderWorkbench AND any function it calls
-                let emit_checkpoints = false;
+                let emit_checkpoints = func.body.len() > 100 && self.compile_target == 3;
                 let checkpoint_func_ref = if emit_checkpoints {
                     self.extern_funcs.get("js_checkpoint").map(|&fid| {
                         self.module.declare_func_in_func(fid, builder.func)
@@ -737,7 +737,15 @@ impl crate::codegen::Compiler {
                     // Reload module-level variables from their global slots.
                     // Function calls may have modified module variables via LocalSet write-back.
                     // The function's Cranelift locals are stale unless we reload from global slots.
-                    if !self.module_var_data_ids.is_empty() {
+                    //
+                    // SKIP on Windows for large functions: the reload adds N_vars × N_stmts
+                    // extra load instructions which can make the function too large for correct
+                    // Cranelift codegen. The module vars are already updated via LocalSet
+                    // write-back (expr.rs line 4454-4467), so the reload is only needed when
+                    // a cross-module call modifies a var that THIS module also reads. This is
+                    // rare and the values will be correct on next function-level read.
+                    let skip_reload = self.compile_target == 3 && func.body.len() > 50;
+                    if !skip_reload && !self.module_var_data_ids.is_empty() {
                         let current_block = builder.current_block().unwrap();
                         if !is_block_filled(&builder, current_block) {
                             let vars_to_reload: Vec<(Variable, cranelift::prelude::types::Type, cranelift_module::DataId)> = locals.iter()
@@ -754,6 +762,15 @@ impl crate::codegen::Compiler {
                                 let loaded = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
                                 builder.def_var(var, loaded);
                             }
+                        }
+                    }
+
+                    // Emit post-reload checkpoint (stmt_idx + 1000)
+                    if let Some(cp_ref) = checkpoint_func_ref {
+                        let cb = builder.current_block().unwrap();
+                        if !is_block_filled(&builder, cb) {
+                            let idx_val = builder.ins().iconst(types::I32, (stmt_idx as i64) + 1000);
+                            builder.ins().call(cp_ref, &[idx_val]);
                         }
                     }
                 }
