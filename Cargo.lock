@@ -4337,6 +4337,7 @@ dependencies = [
 name = "perry-ui-macos"
 version = "0.2.199"
 dependencies = [
+ "block2",
  "libc",
  "objc2",
  "objc2-app-kit",

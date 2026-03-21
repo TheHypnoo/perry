@@ -580,6 +580,106 @@ function perry_system_preferences_set(key, value) {
     localStorage.setItem(key, value);
 }
 
+// --- Audio Capture (Web Audio API) ---
+let _perry_audio_ctx = null;
+let _perry_audio_analyser = null;
+let _perry_audio_stream = null;
+let _perry_audio_db = 0;
+let _perry_audio_peak = 0;
+let _perry_audio_waveform = [];
+const _PERRY_WAVEFORM_SIZE = 256;
+
+// A-weighting approximation for Web (simplified single-pole filter)
+// Full IIR is CPU-intensive in JS; this gives a reasonable approximation.
+function _perry_compute_db(analyser) {
+    const bufLen = analyser.fftSize;
+    const buf = new Float32Array(bufLen);
+    analyser.getFloatTimeDomainData(buf);
+
+    let sumSq = 0;
+    let peak = 0;
+    for (let i = 0; i < bufLen; i++) {
+        const s = buf[i];
+        const abs = Math.abs(s);
+        if (abs > peak) peak = abs;
+        sumSq += s * s;
+    }
+    const rms = Math.sqrt(sumSq / bufLen);
+    const dbRaw = rms > 1e-10 ? 20 * Math.log10(rms) + 110 : 0;
+    const dbClamped = Math.max(0, Math.min(140, dbRaw));
+
+    // EMA smoothing
+    const alpha = 0.3;
+    _perry_audio_db += alpha * (dbClamped - _perry_audio_db);
+    _perry_audio_peak = peak;
+
+    // Waveform ring buffer
+    _perry_audio_waveform.push(_perry_audio_db);
+    if (_perry_audio_waveform.length > _PERRY_WAVEFORM_SIZE) {
+        _perry_audio_waveform.shift();
+    }
+}
+
+function perry_system_audio_start() {
+    if (_perry_audio_ctx) return 1.0;
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 2048;
+
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+            _perry_audio_stream = stream;
+            const source = ctx.createMediaStreamSource(stream);
+            source.connect(analyser);
+            _perry_audio_ctx = ctx;
+            _perry_audio_analyser = analyser;
+
+            // Poll at ~60fps
+            const poll = () => {
+                if (!_perry_audio_ctx) return;
+                _perry_compute_db(_perry_audio_analyser);
+                requestAnimationFrame(poll);
+            };
+            requestAnimationFrame(poll);
+        }).catch(() => {
+            _perry_audio_ctx = null;
+        });
+        return 1.0;
+    } catch (e) {
+        return 0.0;
+    }
+}
+
+function perry_system_audio_stop() {
+    if (_perry_audio_stream) {
+        _perry_audio_stream.getTracks().forEach(t => t.stop());
+        _perry_audio_stream = null;
+    }
+    if (_perry_audio_ctx) {
+        _perry_audio_ctx.close();
+        _perry_audio_ctx = null;
+        _perry_audio_analyser = null;
+    }
+}
+
+function perry_system_audio_get_level() {
+    return _perry_audio_db;
+}
+
+function perry_system_audio_get_peak() {
+    return _perry_audio_peak;
+}
+
+function perry_system_audio_get_waveform(count) {
+    // Return a JS array (Perry web runtime handles arrays natively)
+    const n = Math.min(Math.floor(count), _perry_audio_waveform.length);
+    return _perry_audio_waveform.slice(-n);
+}
+
+function perry_system_get_device_model() {
+    return navigator.userAgent || "Web";
+}
+
 // --- Canvas Operations ---
 function perry_ui_canvas_fill_rect(h, x, y, w, ht) {
     const el = getHandle(h);
@@ -2956,6 +3056,13 @@ window.__perry = {
     perry_system_keychain_get,
     perry_system_keychain_delete,
     perry_system_notification_send,
+    // Audio
+    perry_system_audio_start,
+    perry_system_audio_stop,
+    perry_system_audio_get_level,
+    perry_system_audio_get_peak,
+    perry_system_audio_get_waveform,
+    perry_system_get_device_model,
     // Canvas
     perry_ui_canvas_fill_rect,
     perry_ui_canvas_stroke_rect,

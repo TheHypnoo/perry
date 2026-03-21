@@ -1,4 +1,5 @@
 pub mod app;
+pub mod audio;
 pub mod clipboard;
 pub mod crash_log;
 pub mod file_dialog;
@@ -1248,6 +1249,46 @@ pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) 
 #[no_mangle]
 pub extern "C" fn perry_system_request_location(callback: f64) {
     location::request_location(callback);
+}
+
+// =============================================================================
+// Audio (perry/system) — AVAudioEngine-based microphone capture
+// =============================================================================
+
+/// Start audio capture. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn perry_system_audio_start() -> i64 {
+    audio::start()
+}
+
+/// Stop audio capture.
+#[no_mangle]
+pub extern "C" fn perry_system_audio_stop() {
+    audio::stop()
+}
+
+/// Get current smoothed dB(A) level.
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_level() -> f64 {
+    audio::get_level()
+}
+
+/// Get current peak sample amplitude.
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_peak() -> f64 {
+    audio::get_peak()
+}
+
+/// Get recent dB samples for waveform rendering.
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_waveform(count: f64) -> f64 {
+    audio::get_waveform(count)
+}
+
+/// Get device model identifier string.
+#[no_mangle]
+pub extern "C" fn perry_system_get_device_model() -> i64 {
+    audio::get_device_model()
 }
 
 // =============================================================================

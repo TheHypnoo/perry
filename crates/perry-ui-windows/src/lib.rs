@@ -1,4 +1,5 @@
 pub mod app;
+pub mod audio;
 
 // Install a vectored exception handler that prints crash info to stderr.
 #[cfg(target_os = "windows")]
@@ -1178,6 +1179,20 @@ pub extern "C" fn perry_get_orientation() -> i64 { 0 }
 
 #[no_mangle]
 pub extern "C" fn perry_get_device_idiom() -> f64 { 0.0 }
+
+// Audio capture (WASAPI)
+#[no_mangle]
+pub extern "C" fn perry_system_audio_start() -> i64 { audio::start() }
+#[no_mangle]
+pub extern "C" fn perry_system_audio_stop() { audio::stop() }
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_level() -> f64 { audio::get_level() }
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_peak() -> f64 { audio::get_peak() }
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_waveform(count: f64) -> f64 { audio::get_waveform(count) }
+#[no_mangle]
+pub extern "C" fn perry_system_get_device_model() -> i64 { audio::get_device_model() }
 
 // =============================================================================
 // Splitview / VBox stubs (iOS-only layout containers)

@@ -9083,6 +9083,65 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_canvas_fill_gradient".to_string(), func_id);
         }
 
+        // perry_ui_camera_create() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_camera_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_camera_create".to_string(), func_id);
+        }
+
+        // perry_ui_camera_start(handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_camera_start", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_camera_start".to_string(), func_id);
+        }
+
+        // perry_ui_camera_stop(handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_camera_stop", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_camera_stop".to_string(), func_id);
+        }
+
+        // perry_ui_camera_freeze(handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_camera_freeze", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_camera_freeze".to_string(), func_id);
+        }
+
+        // perry_ui_camera_unfreeze(handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_camera_unfreeze", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_camera_unfreeze".to_string(), func_id);
+        }
+
+        // perry_ui_camera_sample_color(x: f64, y: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_camera_sample_color", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_camera_sample_color".to_string(), func_id);
+        }
+
+        // perry_ui_camera_set_on_tap(handle: i64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_camera_set_on_tap", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_camera_set_on_tap".to_string(), func_id);
+        }
+
         // ============================================
         // Perry UI Phase B: New widgets + interactions
         // ============================================
@@ -9681,6 +9740,58 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::F64));
             let func_id = self.module.declare_function("perry_system_request_location", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_system_request_location".to_string(), func_id);
+        }
+
+        // ============================================
+        // Perry Audio System FFI functions
+        // ============================================
+
+        // perry_system_audio_start() -> i64 (1=success, 0=failure)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_system_audio_start", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_audio_start".to_string(), func_id);
+        }
+
+        // perry_system_audio_stop()
+        {
+            let mut sig = self.module.make_signature();
+            let func_id = self.module.declare_function("perry_system_audio_stop", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_audio_stop".to_string(), func_id);
+        }
+
+        // perry_system_audio_get_level() -> f64 (current dB(A) level)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_system_audio_get_level", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_audio_get_level".to_string(), func_id);
+        }
+
+        // perry_system_audio_get_peak() -> f64 (peak sample value)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_system_audio_get_peak", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_audio_get_peak".to_string(), func_id);
+        }
+
+        // perry_system_audio_get_waveform(count: f64) -> f64 (NaN-boxed array handle)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_system_audio_get_waveform", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_audio_get_waveform".to_string(), func_id);
+        }
+
+        // perry_system_get_device_model() -> i64 (NaN-boxed string)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_system_get_device_model", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_get_device_model".to_string(), func_id);
         }
 
         // ============================================

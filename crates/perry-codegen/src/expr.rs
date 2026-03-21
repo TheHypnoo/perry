@@ -17382,6 +17382,66 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
+                    "CameraView" => {
+                        // CameraView() -> handle (no args)
+                        let func = extern_funcs.get("perry_ui_camera_create")
+                            .ok_or_else(|| anyhow!("perry_ui_camera_create not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        let call = builder.ins().call(func_ref, &[]);
+                        let handle_i64 = builder.inst_results(call)[0];
+                        return Ok(inline_nanbox_pointer(builder, handle_i64));
+                    }
+                    "cameraStart" | "cameraStop" | "cameraFreeze" | "cameraUnfreeze" => {
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let ffi_name = match method.as_str() {
+                            "cameraStart" => "perry_ui_camera_start",
+                            "cameraStop" => "perry_ui_camera_stop",
+                            "cameraFreeze" => "perry_ui_camera_freeze",
+                            "cameraUnfreeze" => "perry_ui_camera_unfreeze",
+                            _ => unreachable!(),
+                        };
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "cameraSampleColor" => {
+                        // cameraSampleColor(x, y) -> f64 (packed RGB)
+                        let x = ensure_f64(builder, arg_vals[0]);
+                        let y = ensure_f64(builder, arg_vals[1]);
+                        let func = extern_funcs.get("perry_ui_camera_sample_color")
+                            .ok_or_else(|| anyhow!("perry_ui_camera_sample_color not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        let call = builder.ins().call(func_ref, &[x, y]);
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    "cameraSetOnTap" => {
+                        // cameraSetOnTap(handle, callback)
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        // Callback is the second arg — keep as f64 (NaN-boxed closure)
+                        let callback = ensure_f64(builder, arg_vals[1]);
+
+                        let func = extern_funcs.get("perry_ui_camera_set_on_tap")
+                            .ok_or_else(|| anyhow!("perry_ui_camera_set_on_tap not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, callback]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
                     _ => {} // Fall through to generic dispatch
                 }
             }
@@ -18186,6 +18246,14 @@ pub(crate) fn compile_expr(
                 ("perry/system", false, "notificationSend") => "perry_system_notification_send",
                 ("perry/system", false, "requestLocation") => "perry_system_request_location",
                 ("perry/system", false, "getDeviceIdiom") => "perry_get_device_idiom",
+
+                // Perry Audio APIs
+                ("perry/system", false, "audioStart") => "perry_system_audio_start",
+                ("perry/system", false, "audioStop") => "perry_system_audio_stop",
+                ("perry/system", false, "audioGetLevel") => "perry_system_audio_get_level",
+                ("perry/system", false, "audioGetPeak") => "perry_system_audio_get_peak",
+                ("perry/system", false, "audioGetWaveformSamples") => "perry_system_audio_get_waveform",
+                ("perry/system", false, "getDeviceModel") => "perry_system_get_device_model",
 
                 // ========================================================================
                 // Perry Plugin System
@@ -20131,7 +20199,15 @@ pub(crate) fn compile_expr(
                             }
                             args
                         }
-                        "isDarkMode" | "getDeviceIdiom" => vec![],
+                        "isDarkMode" | "getDeviceIdiom" | "audioStart" | "audioStop" | "audioGetLevel" | "audioGetPeak" | "getDeviceModel" => vec![],
+                        "audioGetWaveformSamples" => {
+                            // audioGetWaveformSamples(count) - count is f64
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                args.push(ensure_f64(builder, arg_vals[0]));
+                            }
+                            args
+                        }
                         "keychainSave" => {
                             // keychainSave(key, value) - both strings
                             let mut args = Vec::new();
@@ -20481,7 +20557,7 @@ pub(crate) fn compile_expr(
                 } else if native_module == "perry/system" {
                     // perry/system result handling
                     match method.as_str() {
-                        "isDarkMode" => {
+                        "isDarkMode" | "audioStart" => {
                             // Returns i64, convert to f64
                             Ok(builder.ins().fcvt_from_sint(types::F64, result))
                         }
@@ -20489,16 +20565,20 @@ pub(crate) fn compile_expr(
                             // Returns f64 directly (0.0=phone, 1.0=pad)
                             Ok(result)
                         }
-                        "preferencesGet" => {
-                            // Returns f64 directly (number value from UserDefaults)
+                        "preferencesGet" | "audioGetLevel" | "audioGetPeak" | "audioGetWaveformSamples" => {
+                            // Returns f64 directly
                             Ok(result)
                         }
                         "keychainGet" => {
                             // Returns f64 directly (NaN-boxed string or TAG_UNDEFINED)
                             Ok(result)
                         }
+                        "getDeviceModel" => {
+                            // Returns i64 (NaN-boxed string) - NaN-box it
+                            Ok(inline_nanbox_pointer(builder, result))
+                        }
                         _ => {
-                            // Void functions (openURL, preferencesSet, keychain*, notification*) - return undefined
+                            // Void functions (openURL, preferencesSet, keychain*, notification*, audioStop) - return undefined
                             const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                             Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
                         }

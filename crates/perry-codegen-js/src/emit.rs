@@ -2284,6 +2284,26 @@ impl JsEmitter {
                 if let Some(a) = args.get(1) { self.emit_expr(a); }
                 self.output.push(')');
             }
+            "audioStart" | "audio_start" => {
+                self.output.push_str("perry_system_audio_start()");
+            }
+            "audioStop" | "audio_stop" => {
+                self.output.push_str("perry_system_audio_stop()");
+            }
+            "audioGetLevel" | "audio_get_level" => {
+                self.output.push_str("perry_system_audio_get_level()");
+            }
+            "audioGetPeak" | "audio_get_peak" => {
+                self.output.push_str("perry_system_audio_get_peak()");
+            }
+            "audioGetWaveformSamples" | "audio_get_waveform" => {
+                self.output.push_str("perry_system_audio_get_waveform(");
+                if let Some(a) = args.first() { self.emit_expr(a); }
+                self.output.push(')');
+            }
+            "getDeviceModel" | "get_device_model" => {
+                self.output.push_str("perry_system_get_device_model()");
+            }
             _ => {
                 let _ = write!(self.output, "console.warn('perry/system.{} not available in browser')", method);
             }

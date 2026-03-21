@@ -1,4 +1,5 @@
 pub mod app;
+pub mod audio;
 pub mod clipboard;
 pub mod dialog;
 pub mod file_dialog;
@@ -1053,6 +1054,20 @@ pub extern "C" fn perry_ui_poll_open_file() -> i64 {
 pub extern "C" fn __wrapper_perry_get_device_idiom(_closure_ptr: i64) -> f64 {
     0.0  // 0 = phone-like; value is irrelevant on Linux (dead code branch)
 }
+
+// Audio capture (PulseAudio simple API)
+#[no_mangle]
+pub extern "C" fn perry_system_audio_start() -> i64 { audio::start() }
+#[no_mangle]
+pub extern "C" fn perry_system_audio_stop() { audio::stop() }
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_level() -> f64 { audio::get_level() }
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_peak() -> f64 { audio::get_peak() }
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_waveform(count: f64) -> f64 { audio::get_waveform(count) }
+#[no_mangle]
+pub extern "C" fn perry_system_get_device_model() -> i64 { audio::get_device_model() }
 
 /// hone_get_documents_dir() — iOS sandbox documents dir stub.
 /// Returns empty string; only reachable on iOS (__platform__ === 1), which is dead code on Linux.

@@ -1,4 +1,5 @@
 pub mod app;
+pub mod audio;
 pub mod callback;
 pub mod clipboard;
 pub mod dialog;
@@ -1296,6 +1297,20 @@ pub extern "C" fn perry_get_scale_factor() -> f64 {
 
 #[no_mangle]
 pub extern "C" fn perry_get_device_idiom() -> i64 { 0 } // 0 = phone
+
+// Audio capture (AudioRecord via JNI)
+#[no_mangle]
+pub extern "C" fn perry_system_audio_start() -> i64 { audio::start() }
+#[no_mangle]
+pub extern "C" fn perry_system_audio_stop() { audio::stop() }
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_level() -> f64 { audio::get_level() }
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_peak() -> f64 { audio::get_peak() }
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_waveform(count: f64) -> f64 { audio::get_waveform(count) }
+#[no_mangle]
+pub extern "C" fn perry_system_get_device_model() -> i64 { audio::get_device_model() }
 
 #[no_mangle]
 pub extern "C" fn perry_on_layout_change(_callback: f64) {}

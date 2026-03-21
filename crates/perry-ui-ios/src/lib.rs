@@ -1,4 +1,6 @@
 pub mod app;
+pub mod audio;
+pub mod camera;
 pub mod clipboard;
 pub mod crash_log;
 pub mod file_dialog;
@@ -887,6 +889,79 @@ pub extern "C" fn perry_system_open_url(url_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_system_request_location(callback: f64) {
     location::request_location(callback);
+}
+
+// =============================================================================
+// Audio (perry/system) — AVAudioEngine-based microphone capture
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_system_audio_start() -> i64 {
+    audio::start()
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_audio_stop() {
+    audio::stop()
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_level() -> f64 {
+    audio::get_level()
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_peak() -> f64 {
+    audio::get_peak()
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_audio_get_waveform(count: f64) -> f64 {
+    audio::get_waveform(count)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_get_device_model() -> i64 {
+    audio::get_device_model()
+}
+
+// =============================================================================
+// Camera (perry/ui) — AVCaptureSession-based camera capture
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_create() -> i64 {
+    camera::create()
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_start(handle: i64) {
+    camera::start(handle)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_stop(handle: i64) {
+    camera::stop(handle)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_freeze(handle: i64) {
+    camera::freeze(handle)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_unfreeze(handle: i64) {
+    camera::unfreeze(handle)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_sample_color(x: f64, y: f64) -> f64 {
+    camera::sample_color(x, y)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_set_on_tap(handle: i64, callback: f64) {
+    camera::set_on_tap(handle, callback)
 }
 
 /// Check if dark mode is active. Returns 1 if dark, 0 if light.

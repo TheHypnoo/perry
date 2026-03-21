@@ -4064,6 +4064,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("-framework").arg("CoreFoundation")
            .arg("-framework").arg("SystemConfiguration")
            .arg("-framework").arg("QuartzCore")
+           .arg("-framework").arg("AVFAudio") // AVAudioEngine for audio capture
+           .arg("-framework").arg("AVFoundation") // Camera capture (AVCaptureSession)
+           .arg("-framework").arg("CoreMedia") // CMSampleBuffer
+           .arg("-framework").arg("CoreVideo") // CVPixelBuffer
            .arg("-liconv")
            .arg("-lresolv")
            .arg("-lSystem");
@@ -4081,7 +4085,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         cmd.arg("-Wl,--allow-multiple-definition")
            .arg("-lm")
            .arg("-lpthread")
-           .arg("-ldl");
+           .arg("-ldl")
+           .arg("-lpulse-simple") // PulseAudio simple API for audio capture
+           .arg("-lpulse");
 
         if ctx.needs_stdlib || jsruntime_lib.is_some() {
             cmd.arg("-lssl")
@@ -4198,6 +4204,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 {
                     cmd.arg("-framework").arg("AppKit");
                     cmd.arg("-framework").arg("QuartzCore"); // CAGradientLayer, CALayer
+                    cmd.arg("-framework").arg("AVFoundation"); // AVAudioEngine for audio capture
                 }
             }
 
@@ -4550,6 +4557,18 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     </dict>
 </dict>
 </plist>"#,
+        );
+
+        // Append usage descriptions for camera and microphone
+        let usage_descriptions = concat!(
+            "    <key>NSCameraUsageDescription</key>\n",
+            "    <string>This app uses the camera to identify colors.</string>\n",
+            "    <key>NSMicrophoneUsageDescription</key>\n",
+            "    <string>This app uses the microphone to measure sound levels.</string>",
+        );
+        let info_plist = info_plist.replace(
+            "</dict>\n</plist>",
+            &format!("{}\n</dict>\n</plist>", usage_descriptions),
         );
 
         // Append ITSAppUsesNonExemptEncryption if configured in perry.toml
