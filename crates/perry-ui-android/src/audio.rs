@@ -65,28 +65,15 @@ extern "C" {
     fn js_string_from_bytes(ptr: *const u8, len: i32) -> i64;
 }
 
-static PERMISSION_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub fn start() -> i64 {
     if RUNNING.load(Ordering::Relaxed) {
         return 1;
     }
 
-    // Request RECORD_AUDIO permission once via PerryBridge (shows system dialog)
-    if !PERMISSION_REQUESTED.swap(true, Ordering::Relaxed) {
-        let mut env = jni_bridge::get_env();
-        let _ = env.push_local_frame(8);
-        let bridge_class = jni_bridge::with_cache(|c| {
-            env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
-        });
-        let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
-        let _ = env.call_static_method(bridge_cls, "requestAudioPermission", "()V", &[]);
-        unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
-        // Return 0 — permission dialog is showing, caller should retry later
-        return 0;
-    }
-
-    // Check if permission was granted (may still be pending)
+    // Check RECORD_AUDIO permission. PerryActivity requests all dangerous
+    // permissions declared in the manifest at startup (before native code runs),
+    // so this should already be granted by the time we get here.
     {
         let mut env = jni_bridge::get_env();
         let _ = env.push_local_frame(8);
@@ -100,10 +87,9 @@ pub fn start() -> i64 {
         );
         unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
 
-        // PackageManager.PERMISSION_GRANTED = 0
         let granted = result.map(|v| v.i().unwrap_or(-1)).unwrap_or(-1) == 0;
         if !granted {
-            return 0; // Still waiting for user to grant permission
+            return 0;
         }
     }
 
