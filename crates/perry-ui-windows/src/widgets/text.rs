@@ -284,6 +284,11 @@ fn create_font(size: i32, weight: i32) -> HFONT {
 }
 
 #[cfg(target_os = "windows")]
+/// Public variant for use by button.rs icon font setup.
+pub fn create_font_with_family_pub(size: i32, weight: i32, family: &str) -> HFONT {
+    create_font_with_family(size, weight, family)
+}
+
 fn create_font_with_family(size: i32, weight: i32, family: &str) -> HFONT {
     let family_wide = to_wide(family);
     // Scale font size by DPI factor (96 DPI = 1.0x, 144 DPI = 1.5x)

@@ -172,6 +172,7 @@ pub fn set_image(handle: i64, name_ptr: *const u8) {
         "doc.on.doc" | "doc.on.doc.fill" => "\u{25A1}\u{25A0}",  // □■ (files)
         "magnifyingglass" => "\u{2315}",                   // ⌕ (search)
         "arrow.triangle.branch" => "\u{2387}",              // ⎇ (git branch)
+        "arrow.triangle.2.circlepath" => "\u{21BB}",           // ↻ (sync)
         "sparkles" => "\u{2606}",                            // ☆ (AI)
         "terminal" => ">_",                                  // terminal prompt
         "ladybug" | "ladybug.fill" => "\u{25C8}",           // ◈ (debug)
@@ -211,12 +212,16 @@ pub fn set_image(handle: i64, name_ptr: *const u8) {
     {
         if let Some(hwnd) = super::get_hwnd(handle) {
             // Replace the button text with the icon fallback.
-            // On macOS, buttonSetImage sets a separate image property, but on
-            // Windows we use text fallbacks. Always replace (not prepend) so
-            // repeated calls (e.g., dirty indicator toggling) don't accumulate.
             let wide = to_wide(fallback);
             unsafe {
                 let _ = SetWindowTextW(hwnd, windows::core::PCWSTR(wide.as_ptr()));
+            }
+            // Set font to "Segoe UI Symbol" so Unicode glyphs render at the correct
+            // size. The default "Segoe UI" doesn't contain these symbols and Win32
+            // falls back to a tiny glyph from another font.
+            let font = crate::widgets::text::create_font_with_family_pub(20, 400, "Segoe UI Symbol");
+            unsafe {
+                SendMessageW(hwnd, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
             }
         }
     }
