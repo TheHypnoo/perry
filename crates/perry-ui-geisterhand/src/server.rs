@@ -118,25 +118,15 @@ pub fn run_server(port: u16) {
                         let body = read_body(&mut request);
                         let text = match serde_json::from_str::<serde_json::Value>(&body) {
                             Ok(v) => v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                            Err(_) => String::new(),
+                            Err(_) => body.clone(),
                         };
-                        let closure = unsafe { perry_geisterhand_get_closure(handle, CB_ON_CHANGE) };
-                        if closure != 0.0 {
-                            // Create a NaN-boxed string from the text
-                            // For now, pass the closure_f64 as-is — the text value
-                            // needs NaN-boxing which requires calling into the runtime
-                            extern "C" {
-                                fn js_string_from_bytes(ptr: *const u8, len: usize) -> *mut u8;
-                                fn js_nanbox_string(ptr: i64) -> f64;
-                            }
-                            let text_bytes = text.as_bytes();
-                            let str_ptr = unsafe { js_string_from_bytes(text_bytes.as_ptr(), text_bytes.len()) };
-                            let nanboxed = unsafe { js_nanbox_string(str_ptr as i64) };
-                            unsafe { perry_geisterhand_queue_action1(closure, nanboxed); }
-                            ok_json(r#"{"ok":true}"#)
-                        } else {
-                            error_json(404, "no onChange callback for this handle")
+                        // Queue SetText action: sets Win32 Edit text AND fires onChange on main thread
+                        extern "C" {
+                            fn perry_geisterhand_queue_set_text(handle: i64, text_ptr: *const u8, text_len: usize);
                         }
+                        let text_bytes = text.as_bytes();
+                        unsafe { perry_geisterhand_queue_set_text(handle, text_bytes.as_ptr(), text_bytes.len()); }
+                        ok_json(r#"{"ok":true}"#)
                     }
                     None => error_json(400, "invalid handle"),
                 }

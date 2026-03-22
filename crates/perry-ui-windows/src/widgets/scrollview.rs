@@ -97,6 +97,35 @@ unsafe extern "system" fn scroll_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        WM_PAINT => {
+            let handle = super::find_handle_by_hwnd(hwnd);
+            let brush = if handle > 0 {
+                super::get_bg_brush(handle)
+            } else {
+                None
+            };
+            let brush = brush.or_else(|| find_ancestor_brush(hwnd));
+            if brush.is_some() {
+                let mut ps = windows::Win32::Graphics::Gdi::PAINTSTRUCT::default();
+                let hdc = windows::Win32::Graphics::Gdi::BeginPaint(hwnd, &mut ps);
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                let paint_brush = if let Some(color) = super::get_bg_color(handle) {
+                    windows::Win32::Graphics::Gdi::CreateSolidBrush(windows::Win32::Foundation::COLORREF(color))
+                } else if let Some(b) = brush {
+                    b
+                } else {
+                    HBRUSH(std::ptr::null_mut())
+                };
+                let _ = FillRect(hdc, &rect, paint_brush);
+                if super::get_bg_color(handle).is_some() {
+                    let _ = windows::Win32::Graphics::Gdi::DeleteObject(paint_brush);
+                }
+                windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);
+                return LRESULT(0);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }

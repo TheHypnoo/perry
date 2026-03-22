@@ -36,6 +36,7 @@ pub struct RegisteredWidget {
 pub enum PendingAction {
     InvokeCallback { closure_f64: f64, args: Vec<f64> },
     SetState { handle: i64, value: f64 },
+    SetText { handle: i64, text: String },
     CaptureScreenshot,
 }
 
@@ -127,6 +128,19 @@ pub extern "C" fn perry_geisterhand_queue_state_set(handle: i64, value: f64) {
     }
 }
 
+/// Queue a text-set action for main-thread dispatch (sets Win32 Edit control text + fires onChange).
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_queue_set_text(handle: i64, text_ptr: *const u8, text_len: usize) {
+    let text = if !text_ptr.is_null() && text_len > 0 {
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(text_ptr, text_len)).into_owned() }
+    } else {
+        String::new()
+    };
+    if let Ok(mut q) = PENDING_ACTIONS.lock() {
+        q.push(PendingAction::SetText { handle, text });
+    }
+}
+
 /// Drain and execute all pending actions on the main thread.
 /// Called from the platform pump timer (every 8ms).
 #[no_mangle]
@@ -152,6 +166,29 @@ pub extern "C" fn perry_geisterhand_pump() {
                     fn perry_ui_state_set(handle: i64, value: f64);
                 }
                 unsafe { perry_ui_state_set(handle, value); }
+            }
+            PendingAction::SetText { handle, text } => {
+                // Set text on the Win32 Edit control HWND, then fire onChange callback
+                extern "C" {
+                    fn perry_ui_textfield_set_string(handle: i64, text_ptr: i64);
+                    fn js_string_from_bytes(ptr: *const u8, len: usize) -> *mut u8;
+                    fn js_nanbox_string(ptr: i64) -> f64;
+                }
+                // Create a Perry StringHeader from the text bytes
+                let bytes = text.as_bytes();
+                let str_ptr = unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len()) };
+                unsafe { perry_ui_textfield_set_string(handle, str_ptr as i64); }
+                // Fire onChange callback if registered
+                if let Ok(reg) = REGISTRY.lock() {
+                    for w in reg.iter() {
+                        if w.handle == handle && w.callback_kind == CB_ON_CHANGE {
+                            let nanboxed = unsafe { js_nanbox_string(str_ptr as i64) };
+                            let ptr = unsafe { js_nanbox_get_pointer(w.closure_f64) } as *const u8;
+                            unsafe { js_closure_call1(ptr, nanboxed); }
+                            break;
+                        }
+                    }
+                }
             }
             PendingAction::CaptureScreenshot => {
                 // Call platform-specific screenshot capture (implemented in each UI crate)

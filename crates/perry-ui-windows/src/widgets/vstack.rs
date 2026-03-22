@@ -76,12 +76,24 @@ unsafe extern "system" fn container_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
                 None
             };
             let brush = brush.or_else(|| find_ancestor_brush(hwnd));
-            if let Some(brush) = brush {
+            if brush.is_some() {
                 let mut ps = windows::Win32::Graphics::Gdi::PAINTSTRUCT::default();
                 let hdc = windows::Win32::Graphics::Gdi::BeginPaint(hwnd, &mut ps);
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
-                let _ = FillRect(hdc, &rect, brush);
+                // Create a fresh brush from stored color to rule out stale brush handle
+                let paint_brush = if let Some(color) = super::get_bg_color(handle) {
+                    windows::Win32::Graphics::Gdi::CreateSolidBrush(COLORREF(color))
+                } else if let Some(b) = brush {
+                    b
+                } else {
+                    HBRUSH(std::ptr::null_mut())
+                };
+                let _ = FillRect(hdc, &rect, paint_brush);
+                // Clean up temporary brush if we created one
+                if super::get_bg_color(handle).is_some() {
+                    let _ = windows::Win32::Graphics::Gdi::DeleteObject(paint_brush);
+                }
                 windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);
                 return LRESULT(0);
             }
