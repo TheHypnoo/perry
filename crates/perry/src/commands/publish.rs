@@ -200,6 +200,10 @@ struct IosConfig {
     /// If true, adds ITSAppUsesNonExemptEncryption=NO to Info.plist
     /// (skips the export compliance prompt in App Store Connect)
     encryption_exempt: Option<bool>,
+    /// Custom Info.plist entries (key-value pairs added to the generated plist).
+    /// Use for privacy descriptions, custom URL schemes, etc.
+    /// Example: { NSMicrophoneUsageDescription = "Measures ambient sound levels" }
+    info_plist: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -339,6 +343,9 @@ struct BuildManifest {
     ios_distribute: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ios_encryption_exempt: Option<bool>,
+    /// Custom Info.plist entries for iOS (e.g. NSMicrophoneUsageDescription)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ios_info_plist: Option<std::collections::HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     macos_distribute: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -745,6 +752,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let ios_capabilities = config.ios.as_ref().and_then(|i| i.capabilities.clone());
     let mut ios_distribute = config.ios.as_ref().and_then(|i| i.distribute.clone());
     let ios_encryption_exempt = config.ios.as_ref().and_then(|i| i.encryption_exempt);
+    let ios_info_plist = config.ios.as_ref().and_then(|i| i.info_plist.clone());
     let macos_encryption_exempt = config.macos.as_ref().and_then(|m| m.encryption_exempt);
 
     // Android-specific config from perry.toml
@@ -1595,6 +1603,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         ios_capabilities: if is_ios { ios_capabilities } else { None },
         ios_distribute: if is_ios { ios_distribute } else { None },
         ios_encryption_exempt: if is_ios { ios_encryption_exempt } else { None },
+        ios_info_plist: if is_ios { ios_info_plist } else { None },
         macos_distribute: if is_macos { macos_distribute } else { None },
         macos_encryption_exempt: if is_macos { macos_encryption_exempt } else { None },
         android_min_sdk: if is_android { android_min_sdk } else { None },

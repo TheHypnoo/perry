@@ -4762,6 +4762,48 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         } else {
             info_plist
         };
+
+        // Append custom Info.plist entries from [ios.info_plist] in perry.toml
+        let custom_plist_entries = (|| -> Option<String> {
+            let mut dir = args.input.canonicalize().ok()?;
+            for _ in 0..5 {
+                dir = dir.parent()?.to_path_buf();
+                let toml_path = dir.join("perry.toml");
+                if toml_path.exists() {
+                    let data = fs::read_to_string(&toml_path).ok()?;
+                    let doc: toml::Table = data.parse().ok()?;
+                    let ios = doc.get("ios")?.as_table()?;
+                    let info_plist_table = ios.get("info_plist")?.as_table()?;
+                    let mut entries = String::new();
+                    for (key, value) in info_plist_table {
+                        if let Some(s) = value.as_str() {
+                            entries.push_str(&format!(
+                                "    <key>{}</key>\n    <string>{}</string>\n",
+                                key, s
+                            ));
+                        } else if let Some(b) = value.as_bool() {
+                            entries.push_str(&format!(
+                                "    <key>{}</key>\n    <{}/>",
+                                key, if b { "true" } else { "false" }
+                            ));
+                        }
+                    }
+                    if !entries.is_empty() {
+                        return Some(entries);
+                    }
+                }
+            }
+            None
+        })().unwrap_or_default();
+        let info_plist = if !custom_plist_entries.is_empty() {
+            info_plist.replace(
+                "</dict>\n</plist>",
+                &format!("{}</dict>\n</plist>", custom_plist_entries),
+            )
+        } else {
+            info_plist
+        };
+
         fs::write(app_dir.join("Info.plist"), info_plist)?;
 
         // Read splash screen config from package.json perry.splash section
