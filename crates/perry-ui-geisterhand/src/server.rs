@@ -120,13 +120,40 @@ pub fn run_server(port: u16) {
                             Ok(v) => v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string(),
                             Err(_) => body.clone(),
                         };
-                        // Queue SetText action: sets Win32 Edit text AND fires onChange on main thread
-                        extern "C" {
-                            fn perry_geisterhand_queue_set_text(handle: i64, text_ptr: *const u8, text_len: usize);
+                        // Use SendMessageW directly from this thread (thread-safe Win32 call)
+                        // to set the Edit control text, bypassing the action queue.
+                        // HWND lookup uses perry-ui-geisterhand's own static (single copy,
+                        // avoids the dual perry-runtime static instance issue).
+                        let hwnd_val = crate::perry_geisterhand_lookup_hwnd(handle);
+                        if hwnd_val != 0 {
+                            #[cfg(target_os = "windows")]
+                            {
+                                // Use raw Win32 FFI — no windows crate dependency needed
+                                extern "system" {
+                                    fn SendMessageW(hwnd: usize, msg: u32, wparam: usize, lparam: isize) -> isize;
+                                }
+                                const WM_SETTEXT: u32 = 0x000C;
+                                let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+                                unsafe {
+                                    SendMessageW(hwnd_val, WM_SETTEXT, 0, wide.as_ptr() as isize);
+                                }
+                            }
+                            // Also fire onChange callback via the action queue
+                            let closure = unsafe { perry_geisterhand_get_closure(handle, CB_ON_CHANGE) };
+                            if closure != 0.0 {
+                                extern "C" {
+                                    fn js_string_from_bytes(ptr: *const u8, len: usize) -> *mut u8;
+                                    fn js_nanbox_string(ptr: i64) -> f64;
+                                }
+                                let text_bytes = text.as_bytes();
+                                let str_ptr = unsafe { js_string_from_bytes(text_bytes.as_ptr(), text_bytes.len()) };
+                                let nanboxed = unsafe { js_nanbox_string(str_ptr as i64) };
+                                unsafe { perry_geisterhand_queue_action1(closure, nanboxed); }
+                            }
+                            ok_json(r#"{"ok":true}"#)
+                        } else {
+                            error_json(404, "no HWND for this handle")
                         }
-                        let text_bytes = text.as_bytes();
-                        unsafe { perry_geisterhand_queue_set_text(handle, text_bytes.as_ptr(), text_bytes.len()); }
-                        ok_json(r#"{"ok":true}"#)
                     }
                     None => error_json(400, "invalid handle"),
                 }

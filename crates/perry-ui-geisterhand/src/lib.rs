@@ -5,11 +5,37 @@
 //! chaos-mode random fuzzing.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::collections::HashMap;
 
 mod server;
 mod chaos;
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// HWND map: widget handle → Win32 HWND (as usize).
+/// Stored here (not in perry-runtime) because perry-runtime may be linked twice
+/// (from perry-stdlib and trimmed UI lib), creating separate static instances.
+/// This crate is only linked once.
+static HWND_MAP: Mutex<Option<HashMap<i64, usize>>> = Mutex::new(None);
+
+/// Store a Win32 HWND for a widget handle. Called from perry-ui-windows during widget creation.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_store_hwnd(handle: i64, hwnd: usize) {
+    if let Ok(mut map) = HWND_MAP.lock() {
+        let m = map.get_or_insert_with(HashMap::new);
+        m.insert(handle, hwnd);
+    }
+}
+
+/// Retrieve the Win32 HWND for a widget handle. Called from the server's /type endpoint.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_lookup_hwnd(handle: i64) -> usize {
+    match HWND_MAP.lock() {
+        Ok(map) => map.as_ref().and_then(|m| m.get(&handle).copied()).unwrap_or(0),
+        Err(_) => 0,
+    }
+}
 
 /// Start the geisterhand HTTP server on a background thread.
 /// Called from compiled binary's main() when --enable-geisterhand was used.

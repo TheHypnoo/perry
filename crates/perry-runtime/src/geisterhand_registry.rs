@@ -36,8 +36,8 @@ pub struct RegisteredWidget {
 pub enum PendingAction {
     InvokeCallback { closure_f64: f64, args: Vec<f64> },
     SetState { handle: i64, value: f64 },
-    SetText { handle: i64, text: String },
     CaptureScreenshot,
+    SetText { handle: i64, text: String },
 }
 
 static REGISTRY: Mutex<Vec<RegisteredWidget>> = Mutex::new(Vec::new());
