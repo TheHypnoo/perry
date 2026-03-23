@@ -246,13 +246,13 @@ fn detect_android_locale() -> Option<String> {
         fn __system_property_get(name: *const u8, value: *mut u8) -> i32;
     }
 
-    let props = [
+    let props: &[&[u8]] = &[
         b"persist.sys.locale\0",
         b"ro.product.locale\0",
         b"persist.sys.language\0",
     ];
 
-    for prop in &props {
+    for prop in props {
         let mut buf = [0u8; 92]; // PROP_VALUE_MAX = 92
         let len = unsafe { __system_property_get(prop.as_ptr(), buf.as_mut_ptr()) };
         if len > 0 {
