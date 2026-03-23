@@ -9,7 +9,7 @@ use cranelift_codegen::ir::AbiParam;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Init, Linkage, Module};
 use cranelift_object::ObjectModule;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use perry_hir::{
     CallArg, Class, ClassField, CompareOp, Decorator, Expr, Function, Stmt,
@@ -43,8 +43,8 @@ impl crate::codegen::Compiler {
 
         // Start with own fields only - inheritance will be resolved later
         // If there's a native parent, field 0 is reserved for the native handle
-        let mut field_indices = BTreeMap::new();
-        let mut field_types = BTreeMap::new();
+        let mut field_indices = HashMap::new();
+        let mut field_types = HashMap::new();
         if native_parent.is_some() {
             field_indices.insert("__native_handle__".to_string(), 0);
         }
@@ -54,13 +54,13 @@ impl crate::codegen::Compiler {
         }
 
         // Collect method return types for type-aware console.log handling
-        let mut method_return_types = BTreeMap::new();
+        let mut method_return_types = HashMap::new();
         for method in &class.methods {
             method_return_types.insert(method.name.clone(), method.return_type.clone());
         }
 
         // Collect static method return types for singleton pattern (getInstance() etc.)
-        let mut static_method_return_types = BTreeMap::new();
+        let mut static_method_return_types = HashMap::new();
         for method in &class.static_methods {
             static_method_return_types.insert(method.name.clone(), method.return_type.clone());
         }
@@ -69,7 +69,7 @@ impl crate::codegen::Compiler {
         let type_params: Vec<String> = class.type_params.iter().map(|tp| tp.name.clone()).collect();
 
         // Collect field default initializer expressions
-        let mut field_inits = BTreeMap::new();
+        let mut field_inits = HashMap::new();
         for field in &class.fields {
             if let Some(ref init) = field.init {
                 field_inits.insert(field.name.clone(), init.clone());
@@ -87,12 +87,12 @@ impl crate::codegen::Compiler {
             field_indices,
             field_types,
             constructor_id: None,
-            method_ids: BTreeMap::new(),
-            method_param_counts: BTreeMap::new(),
-            getter_ids: BTreeMap::new(),
-            setter_ids: BTreeMap::new(),
-            static_method_ids: BTreeMap::new(),
-            static_field_ids: BTreeMap::new(),
+            method_ids: HashMap::new(),
+            method_param_counts: HashMap::new(),
+            getter_ids: HashMap::new(),
+            setter_ids: HashMap::new(),
+            static_method_ids: HashMap::new(),
+            static_field_ids: HashMap::new(),
             method_return_types,
             static_method_return_types,
             type_params,
@@ -296,7 +296,7 @@ impl crate::codegen::Compiler {
             builder.def_var(this_var, this_val);
 
             // Create variables for other parameters
-            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
             let mut next_var = 1usize;
             for (i, param) in method.params.iter().enumerate() {
                 let var = Variable::new(next_var);
@@ -617,7 +617,7 @@ impl crate::codegen::Compiler {
             builder.def_var(this_var, this_val);
 
             // No other parameters for getters
-            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
             let mut next_var = 1usize;
 
             // Load module-level variables from their global slots
@@ -753,7 +753,7 @@ impl crate::codegen::Compiler {
             builder.def_var(this_var, this_val);
 
             // Create variables for value parameters
-            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
             let mut next_var = 1usize;
             for (i, param) in setter.params.iter().enumerate() {
                 let var = Variable::new(next_var);
@@ -965,7 +965,7 @@ impl crate::codegen::Compiler {
             builder.seal_block(entry_block);
 
             // Create variables for parameters (no 'this')
-            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
             let mut next_var = 0usize;
             for (i, param) in method.params.iter().enumerate() {
                 let var = Variable::new(next_var);
@@ -1202,7 +1202,7 @@ impl crate::codegen::Compiler {
             let obj_ptr = builder.block_params(entry_block)[0];
 
             // 'this' is the object pointer
-            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
             let this_var = Variable::new(0);
             builder.declare_var(this_var, types::I64);
             builder.def_var(this_var, obj_ptr);

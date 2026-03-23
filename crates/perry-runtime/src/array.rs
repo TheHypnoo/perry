@@ -1266,4 +1266,138 @@ mod tests {
         js_array_set_f64(arr, 1, 99.0);
         assert_eq!(js_array_get_f64(arr, 1), 99.0);
     }
+
+    #[test]
+    fn test_array_get_unchecked_basic() {
+        let arr = js_array_alloc(4);
+        js_array_push_f64(arr, 10.0);
+        js_array_push_f64(arr, 20.0);
+        js_array_push_f64(arr, 30.0);
+
+        assert_eq!(js_array_get_f64_unchecked(arr, 0), 10.0);
+        assert_eq!(js_array_get_f64_unchecked(arr, 1), 20.0);
+        assert_eq!(js_array_get_f64_unchecked(arr, 2), 30.0);
+    }
+
+    #[test]
+    fn test_array_get_unchecked_out_of_bounds() {
+        let arr = js_array_alloc(4);
+        js_array_push_f64(arr, 1.0);
+
+        // Out of bounds should return NaN
+        assert!(js_array_get_f64_unchecked(arr, 1).is_nan());
+        assert!(js_array_get_f64_unchecked(arr, 100).is_nan());
+    }
+
+    #[test]
+    fn test_array_get_f64_vs_unchecked_parity() {
+        let arr = js_array_alloc(8);
+        let values = [1.0, 2.5, -3.0, 0.0, 100.0, f64::INFINITY, f64::NEG_INFINITY];
+        for &v in &values {
+            js_array_push_f64(arr, v);
+        }
+
+        // Both functions should return identical results for plain arrays
+        for i in 0..values.len() as u32 {
+            let checked = js_array_get_f64(arr, i);
+            let unchecked = js_array_get_f64_unchecked(arr, i);
+            assert_eq!(checked.to_bits(), unchecked.to_bits(),
+                "parity mismatch at index {}: checked={}, unchecked={}", i, checked, unchecked);
+        }
+
+        // Out of bounds parity
+        assert!(js_array_get_f64(arr, 100).is_nan());
+        assert!(js_array_get_f64_unchecked(arr, 100).is_nan());
+    }
+
+    #[test]
+    fn test_array_grow_capacity() {
+        let mut arr = js_array_alloc(2);
+
+        // Push well beyond initial capacity (push returns new ptr on grow)
+        for i in 0..50 {
+            arr = js_array_push_f64(arr, i as f64);
+        }
+
+        assert_eq!(js_array_length(arr), 50);
+
+        // Verify all values preserved after growth
+        for i in 0..50 {
+            assert_eq!(js_array_get_f64(arr, i), i as f64,
+                "value at index {} should be {}", i, i);
+        }
+    }
+
+    #[test]
+    fn test_array_set_unchecked_basic() {
+        let arr = js_array_alloc(4);
+        js_array_push_f64(arr, 1.0);
+        js_array_push_f64(arr, 2.0);
+        js_array_push_f64(arr, 3.0);
+
+        js_array_set_f64_unchecked(arr, 1, 99.0);
+        assert_eq!(js_array_get_f64_unchecked(arr, 1), 99.0);
+        // Other elements unchanged
+        assert_eq!(js_array_get_f64_unchecked(arr, 0), 1.0);
+        assert_eq!(js_array_get_f64_unchecked(arr, 2), 3.0);
+    }
+
+    #[test]
+    fn test_array_pop_and_push() {
+        let arr = js_array_alloc(4);
+        let arr = js_array_push_f64(arr, 1.0);
+        let arr = js_array_push_f64(arr, 2.0);
+        let arr = js_array_push_f64(arr, 3.0);
+
+        let popped = js_array_pop_f64(arr);
+        assert_eq!(popped, 3.0);
+        assert_eq!(js_array_length(arr), 2);
+
+        let arr = js_array_push_f64(arr, 4.0);
+        assert_eq!(js_array_length(arr), 3);
+        assert_eq!(js_array_get_f64(arr, 2), 4.0);
+    }
+
+    #[test]
+    fn test_array_indexOf() {
+        let arr = js_array_alloc(4);
+        js_array_push_f64(arr, 10.0);
+        js_array_push_f64(arr, 20.0);
+        js_array_push_f64(arr, 30.0);
+
+        assert_eq!(js_array_indexOf_f64(arr, 10.0), 0);
+        assert_eq!(js_array_indexOf_f64(arr, 20.0), 1);
+        assert_eq!(js_array_indexOf_f64(arr, 30.0), 2);
+        assert_eq!(js_array_indexOf_f64(arr, 99.0), -1);
+    }
+
+    #[test]
+    fn test_array_includes() {
+        let arr = js_array_alloc(4);
+        js_array_push_f64(arr, 1.0);
+        js_array_push_f64(arr, 2.0);
+
+        assert_eq!(js_array_includes_f64(arr, 1.0), 1);
+        assert_eq!(js_array_includes_f64(arr, 2.0), 1);
+        assert_eq!(js_array_includes_f64(arr, 3.0), 0);
+    }
+
+    #[test]
+    fn test_array_from_f64_and_length() {
+        let values = [5.0, 10.0, 15.0];
+        let arr = js_array_from_f64(values.as_ptr(), 3);
+
+        assert_eq!(js_array_length(arr), 3);
+        for i in 0..3 {
+            assert_eq!(js_array_get_f64(arr, i), values[i as usize]);
+        }
+    }
+
+    #[test]
+    fn test_array_null_safety() {
+        // Null array pointer should not crash
+        assert!(js_array_get_f64(std::ptr::null(), 0).is_nan());
+        assert!(js_array_get_f64_unchecked(std::ptr::null(), 0).is_nan());
+        assert_eq!(js_array_length(std::ptr::null()), 0);
+    }
 }

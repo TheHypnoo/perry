@@ -1,6 +1,6 @@
 //! Type definitions for the codegen module.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use cranelift::prelude::*;
 use cranelift_codegen::ir::Block;
 use cranelift_frontend::Variable;
@@ -100,32 +100,32 @@ pub(crate) struct ClassMeta {
     /// Total number of fields (including inherited)
     pub field_count: u32,
     /// Mapping from field name to index (includes inherited fields)
-    pub field_indices: BTreeMap<String, u32>,
+    pub field_indices: HashMap<String, u32>,
     /// Mapping from field name to type (includes inherited fields)
-    pub field_types: BTreeMap<String, perry_types::Type>,
+    pub field_types: HashMap<String, perry_types::Type>,
     /// Constructor function ID (if any)
     pub constructor_id: Option<cranelift_module::FuncId>,
     /// Method function IDs: method name -> func_id (includes inherited methods)
-    pub method_ids: BTreeMap<String, cranelift_module::FuncId>,
+    pub method_ids: HashMap<String, cranelift_module::FuncId>,
     /// Getter function IDs: property name -> func_id
-    pub getter_ids: BTreeMap<String, cranelift_module::FuncId>,
+    pub getter_ids: HashMap<String, cranelift_module::FuncId>,
     /// Setter function IDs: property name -> func_id
-    pub setter_ids: BTreeMap<String, cranelift_module::FuncId>,
+    pub setter_ids: HashMap<String, cranelift_module::FuncId>,
     /// Static method function IDs: method name -> func_id
-    pub static_method_ids: BTreeMap<String, cranelift_module::FuncId>,
+    pub static_method_ids: HashMap<String, cranelift_module::FuncId>,
     /// Static field global IDs: field name -> (data_id, has_init)
-    pub static_field_ids: BTreeMap<String, cranelift_module::DataId>,
+    pub static_field_ids: HashMap<String, cranelift_module::DataId>,
     /// Method parameter counts: method name -> param count (for vtable registration)
-    pub method_param_counts: BTreeMap<String, usize>,
+    pub method_param_counts: HashMap<String, usize>,
     /// Method return types: method name -> return type (for determining if method returns string)
-    pub method_return_types: BTreeMap<String, perry_types::Type>,
+    pub method_return_types: HashMap<String, perry_types::Type>,
     /// Static method return types: method name -> return type (for singleton pattern getInstance() etc.)
-    pub static_method_return_types: BTreeMap<String, perry_types::Type>,
+    pub static_method_return_types: HashMap<String, perry_types::Type>,
     /// Type parameters of the class (e.g., ["T"] for class Box<T>)
     pub type_params: Vec<String>,
     /// Field default initializer expressions: field name -> init expr
     /// Used by Expr::New to initialize field defaults before calling constructor
-    pub field_inits: BTreeMap<String, Expr>,
+    pub field_inits: HashMap<String, Expr>,
 }
 
 /// Enum member value (resolved at compile time)

@@ -186,7 +186,7 @@ struct NodeView: View {
 
     var pickerView: some View {
         let count = Int(perry_watchos_node_picker_count(nodeId))
-        Picker(nodeText, selection: Binding(
+        return Picker(nodeText, selection: Binding(
             get: { Int(perry_watchos_node_picker_selected(nodeId)) },
             set: { perry_watchos_picker_changed(nodeId, Int64($0)) }
         )) {
@@ -214,7 +214,7 @@ struct NodeView: View {
 
     var children: some View {
         let count = perry_watchos_node_child_count(nodeId)
-        ForEach(0..<Int(count), id: \.self) { i in
+        return ForEach(0..<Int(count), id: \.self) { i in
             NodeView(nodeId: perry_watchos_node_child(nodeId, Int32(i)), bridge: bridge)
         }
     }

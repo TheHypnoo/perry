@@ -10,7 +10,8 @@ use cranelift_codegen::ir::AbiParam;
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_module::{DataDescription, Init, Linkage, Module};
 use cranelift_object::ObjectModule;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 
 use perry_hir::{
     UpdateOp,
@@ -57,20 +58,20 @@ pub(crate) fn contains_loop_control(stmts: &[Stmt]) -> bool {
 pub(crate) fn compile_async_stmt(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
-    func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
-    closure_func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
-    func_wrapper_ids: &BTreeMap<u32, cranelift_module::FuncId>,
-    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
-    async_func_ids: &std::collections::BTreeSet<u32>,
-    closure_returning_funcs: &std::collections::BTreeSet<u32>,
-    classes: &BTreeMap<String, ClassMeta>,
-    enums: &BTreeMap<(String, String), EnumMemberValue>,
-    func_param_types: &BTreeMap<u32, Vec<types::Type>>, func_union_params: &BTreeMap<u32, Vec<bool>>,
-    func_return_types: &BTreeMap<u32, types::Type>,
-    func_hir_return_types: &BTreeMap<u32, perry_types::Type>,
-    func_rest_param_index: &BTreeMap<u32, usize>,
-    imported_func_param_counts: &BTreeMap<String, usize>,
-    locals: &mut BTreeMap<LocalId, LocalInfo>,
+    func_ids: &HashMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: &HashMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: &HashMap<u32, cranelift_module::FuncId>,
+    extern_funcs: &HashMap<Cow<'static, str>, cranelift_module::FuncId>,
+    async_func_ids: &HashSet<u32>,
+    closure_returning_funcs: &HashSet<u32>,
+    classes: &HashMap<String, ClassMeta>,
+    enums: &HashMap<(String, String), EnumMemberValue>,
+    func_param_types: &HashMap<u32, Vec<types::Type>>, func_union_params: &HashMap<u32, Vec<bool>>,
+    func_return_types: &HashMap<u32, types::Type>,
+    func_hir_return_types: &HashMap<u32, perry_types::Type>,
+    func_rest_param_index: &HashMap<u32, usize>,
+    imported_func_param_counts: &HashMap<String, usize>,
+    locals: &mut HashMap<LocalId, LocalInfo>,
     next_var: &mut usize,
     stmt: &Stmt,
     promise_var: Variable,
@@ -85,7 +86,7 @@ pub(crate) fn compile_async_stmt(
 
             // Helper to detect if an expression returns a Promise
             // This is needed for Promise unwrapping - when returning a Promise from async function
-            fn is_promise_expr(expr: &Expr, async_func_ids: &std::collections::BTreeSet<u32>) -> bool {
+            fn is_promise_expr(expr: &Expr, async_func_ids: &HashSet<u32>) -> bool {
                 match expr {
                     // new Promise(...) returns a Promise
                     Expr::New { class_name, .. } if class_name == "Promise" => true,
@@ -102,7 +103,7 @@ pub(crate) fn compile_async_stmt(
             }
 
             // Helper to detect if an expression is an object/array (pointer type)
-            fn is_object_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, async_func_ids: &std::collections::BTreeSet<u32>) -> bool {
+            fn is_object_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>, async_func_ids: &HashSet<u32>) -> bool {
                 // Promises are handled separately - don't treat them as generic objects
                 if is_promise_expr(expr, async_func_ids) {
                     return false;
@@ -117,7 +118,7 @@ pub(crate) fn compile_async_stmt(
             }
 
             // Check if a Call expression invokes a function that returns a string
-            fn is_string_returning_call(expr: &Expr, func_hir_return_types: &BTreeMap<u32, perry_types::Type>) -> bool {
+            fn is_string_returning_call(expr: &Expr, func_hir_return_types: &HashMap<u32, perry_types::Type>) -> bool {
                 match expr {
                     Expr::Call { callee, .. } => {
                         match callee.as_ref() {
@@ -141,7 +142,7 @@ pub(crate) fn compile_async_stmt(
             }
 
             // Helper to detect if an expression is a string
-            fn is_string_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::StringFromCharCode(_) => true,  // String.fromCharCode() returns a string
@@ -318,7 +319,7 @@ pub(crate) fn compile_async_stmt(
 pub(crate) fn emit_try_end_cleanup(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
-    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
+    extern_funcs: &HashMap<Cow<'static, str>, cranelift_module::FuncId>,
     count: usize,
 ) -> Result<()> {
     if count > 0 {
@@ -335,20 +336,20 @@ pub(crate) fn emit_try_end_cleanup(
 pub(crate) fn compile_stmt(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
-    func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
-    closure_func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
-    func_wrapper_ids: &BTreeMap<u32, cranelift_module::FuncId>,
-    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
-    async_func_ids: &std::collections::BTreeSet<u32>,
-    closure_returning_funcs: &std::collections::BTreeSet<u32>,
-    classes: &BTreeMap<String, ClassMeta>,
-    enums: &BTreeMap<(String, String), EnumMemberValue>,
-    func_param_types: &BTreeMap<u32, Vec<types::Type>>, func_union_params: &BTreeMap<u32, Vec<bool>>,
-    func_return_types: &BTreeMap<u32, types::Type>,
-    func_hir_return_types: &BTreeMap<u32, perry_types::Type>,
-    func_rest_param_index: &BTreeMap<u32, usize>,
-    imported_func_param_counts: &BTreeMap<String, usize>,
-    locals: &mut BTreeMap<LocalId, LocalInfo>,
+    func_ids: &HashMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: &HashMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: &HashMap<u32, cranelift_module::FuncId>,
+    extern_funcs: &HashMap<Cow<'static, str>, cranelift_module::FuncId>,
+    async_func_ids: &HashSet<u32>,
+    closure_returning_funcs: &HashSet<u32>,
+    classes: &HashMap<String, ClassMeta>,
+    enums: &HashMap<(String, String), EnumMemberValue>,
+    func_param_types: &HashMap<u32, Vec<types::Type>>, func_union_params: &HashMap<u32, Vec<bool>>,
+    func_return_types: &HashMap<u32, types::Type>,
+    func_hir_return_types: &HashMap<u32, perry_types::Type>,
+    func_rest_param_index: &HashMap<u32, usize>,
+    imported_func_param_counts: &HashMap<String, usize>,
+    locals: &mut HashMap<LocalId, LocalInfo>,
     next_var: &mut usize,
     stmt: &Stmt,
     this_ctx: Option<&ThisContext>,
@@ -378,7 +379,7 @@ pub(crate) fn compile_stmt(
 
             // Helper to detect if an expression produces a string (fallback for untyped cases)
             // Note: EnvGet is NOT included here because it can return undefined if the env var doesn't exist
-            fn is_string_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::StringFromCharCode(_) => true,
@@ -476,7 +477,7 @@ pub(crate) fn compile_stmt(
             }
 
             // Helper to detect if an expression produces a BigInt
-            fn is_bigint_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>, classes: &BTreeMap<String, ClassMeta>) -> bool {
+            fn is_bigint_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>, func_hir_return_types: &HashMap<u32, perry_types::Type>, classes: &HashMap<String, ClassMeta>) -> bool {
                 match expr {
                     Expr::BigInt(_) => true,
                     Expr::BigIntCoerce(_) => true,
@@ -526,7 +527,7 @@ pub(crate) fn compile_stmt(
             }
 
             // Helper to detect if an expression produces a Closure
-            fn is_closure_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, closure_returning_funcs: &std::collections::BTreeSet<u32>) -> bool {
+            fn is_closure_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>, closure_returning_funcs: &HashSet<u32>) -> bool {
                 match expr {
                     Expr::Closure { .. } => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_closure).unwrap_or(false),
@@ -542,7 +543,7 @@ pub(crate) fn compile_stmt(
             }
 
             // Helper to detect if an expression produces an integer value (for native i64 optimization)
-            fn is_integer_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_integer_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     // Integer literals
                     Expr::Integer(_) => true,
@@ -582,7 +583,7 @@ pub(crate) fn compile_stmt(
             let is_typed_generic_object = matches!(ty, HirType::Named(_) | HirType::Object(_) | HirType::Any);
 
             // Helper to detect mixed-type array from expression
-            fn is_mixed_array_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_mixed_array_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::Array(elements) => {
                         // Check if array contains both strings and numbers
@@ -1385,7 +1386,7 @@ pub(crate) fn compile_stmt(
         }
         Stmt::Return(expr) => {
             // Helper to detect if a return expression is a string value
-            fn is_string_return_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_return_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::StringFromCharCode(_) => true,
@@ -1415,7 +1416,7 @@ pub(crate) fn compile_stmt(
             }
 
             // Check if a Call expression invokes a function that returns a string
-            fn is_string_returning_call_r(expr: &Expr, func_hir_return_types: &BTreeMap<u32, perry_types::Type>) -> bool {
+            fn is_string_returning_call_r(expr: &Expr, func_hir_return_types: &HashMap<u32, perry_types::Type>) -> bool {
                 match expr {
                     Expr::Call { callee, .. } => {
                         match callee.as_ref() {
@@ -1851,7 +1852,7 @@ pub(crate) fn compile_stmt(
             }
 
             // Create cache variables for product pairs and set up product_cache in LocalInfo
-            let mut product_cache_vars: BTreeMap<(LocalId, LocalId), Variable> = BTreeMap::new();
+            let mut product_cache_vars: HashMap<(LocalId, LocalId), Variable> = HashMap::new();
             for (id1, id2) in &cse_product_pairs {
                 let cache_var = Variable::new(*next_var);
                 *next_var += 1;
@@ -3861,7 +3862,7 @@ pub(crate) fn compile_stmt(
             // allocator may move variables around in ways that don't survive longjmp.
             // Saving ALL pre-existing locals ensures correctness in the catch block.
             // Map: LocalId -> (StackSlot, actual_var_type, original_var, was_i32)
-            let mut try_var_slots: BTreeMap<LocalId, (StackSlot, types::Type, Variable, bool)> = BTreeMap::new();
+            let mut try_var_slots: HashMap<LocalId, (StackSlot, types::Type, Variable, bool)> = HashMap::new();
             for (local_id, info) in locals.iter() {
                     let val = builder.use_var(info.var);
                     let var_type = builder.func.dfg.value_type(val);
@@ -4298,33 +4299,33 @@ pub(crate) fn compile_stmt_with_this(
 
     module: &mut ObjectModule,
 
-    func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    func_ids: &HashMap<u32, cranelift_module::FuncId>,
 
-    closure_func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: &HashMap<u32, cranelift_module::FuncId>,
 
-    func_wrapper_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: &HashMap<u32, cranelift_module::FuncId>,
 
-    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
+    extern_funcs: &HashMap<Cow<'static, str>, cranelift_module::FuncId>,
 
-    async_func_ids: &std::collections::BTreeSet<u32>,
+    async_func_ids: &HashSet<u32>,
 
-    closure_returning_funcs: &std::collections::BTreeSet<u32>,
+    closure_returning_funcs: &HashSet<u32>,
 
-    classes: &BTreeMap<String, ClassMeta>,
+    classes: &HashMap<String, ClassMeta>,
 
-    enums: &BTreeMap<(String, String), EnumMemberValue>,
+    enums: &HashMap<(String, String), EnumMemberValue>,
 
-    func_param_types: &BTreeMap<u32, Vec<types::Type>>, func_union_params: &BTreeMap<u32, Vec<bool>>,
+    func_param_types: &HashMap<u32, Vec<types::Type>>, func_union_params: &HashMap<u32, Vec<bool>>,
 
-    func_return_types: &BTreeMap<u32, types::Type>,
+    func_return_types: &HashMap<u32, types::Type>,
 
-    func_hir_return_types: &BTreeMap<u32, perry_types::Type>,
+    func_hir_return_types: &HashMap<u32, perry_types::Type>,
 
-    func_rest_param_index: &BTreeMap<u32, usize>,
+    func_rest_param_index: &HashMap<u32, usize>,
 
-    imported_func_param_counts: &BTreeMap<String, usize>,
+    imported_func_param_counts: &HashMap<String, usize>,
 
-    locals: &mut BTreeMap<LocalId, LocalInfo>,
+    locals: &mut HashMap<LocalId, LocalInfo>,
 
     next_var: &mut usize,
 

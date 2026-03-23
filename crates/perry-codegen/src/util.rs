@@ -4,8 +4,9 @@ use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 use cranelift_object::ObjectModule;
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use perry_hir::{BinaryOp, Expr, Stmt, UnaryOp, LogicalOp};
@@ -117,7 +118,7 @@ pub(crate) fn next_js_data_id() -> usize {
 }
 
 /// Resolve class_name from a type annotation by checking if the type refers to a known class
-pub(crate) fn resolve_class_name_from_type(ty: &perry_types::Type, classes: &BTreeMap<String, ClassMeta>) -> Option<String> {
+pub(crate) fn resolve_class_name_from_type(ty: &perry_types::Type, classes: &HashMap<String, ClassMeta>) -> Option<String> {
     match ty {
         perry_types::Type::Named(name) => {
             if classes.contains_key(name) {
@@ -253,7 +254,7 @@ pub(crate) fn unbox_bool_to_number(builder: &mut FunctionBuilder, val: Value) ->
 pub(crate) fn inline_truthiness_check(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
-    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
+    extern_funcs: &HashMap<Cow<'static, str>, cranelift_module::FuncId>,
     val: Value,
 ) -> Value {
     let val_f64 = ensure_f64(builder, val);
@@ -501,20 +502,20 @@ pub(crate) fn all_returns_are_bigint(stmts: &[Stmt]) -> bool {
 pub(crate) fn compile_condition_to_bool(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
-    func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
-    closure_func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
-    func_wrapper_ids: &BTreeMap<u32, cranelift_module::FuncId>,
-    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
-    async_func_ids: &std::collections::BTreeSet<u32>,
-    classes: &BTreeMap<String, ClassMeta>,
-    enums: &BTreeMap<(String, String), EnumMemberValue>,
-    func_param_types: &BTreeMap<u32, Vec<types::Type>>,
-    func_union_params: &BTreeMap<u32, Vec<bool>>,
-    func_return_types: &BTreeMap<u32, types::Type>,
-    func_hir_return_types: &BTreeMap<u32, perry_types::Type>,
-    func_rest_param_index: &BTreeMap<u32, usize>,
-    imported_func_param_counts: &BTreeMap<String, usize>,
-    locals: &BTreeMap<LocalId, LocalInfo>,
+    func_ids: &HashMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: &HashMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: &HashMap<u32, cranelift_module::FuncId>,
+    extern_funcs: &HashMap<Cow<'static, str>, cranelift_module::FuncId>,
+    async_func_ids: &HashSet<u32>,
+    classes: &HashMap<String, ClassMeta>,
+    enums: &HashMap<(String, String), EnumMemberValue>,
+    func_param_types: &HashMap<u32, Vec<types::Type>>,
+    func_union_params: &HashMap<u32, Vec<bool>>,
+    func_return_types: &HashMap<u32, types::Type>,
+    func_hir_return_types: &HashMap<u32, perry_types::Type>,
+    func_rest_param_index: &HashMap<u32, usize>,
+    imported_func_param_counts: &HashMap<String, usize>,
+    locals: &HashMap<LocalId, LocalInfo>,
     expr: &Expr,
     this_ctx: Option<&ThisContext>,
 ) -> anyhow::Result<Value> {
@@ -575,7 +576,7 @@ pub(crate) fn compile_condition_to_bool(
 pub(crate) fn try_compile_index_as_i32(
     builder: &mut FunctionBuilder,
     expr: &Expr,
-    locals: &BTreeMap<LocalId, LocalInfo>,
+    locals: &HashMap<LocalId, LocalInfo>,
 ) -> Option<Value> {
     match expr {
         Expr::Integer(n) if *n >= 0 && *n <= i32::MAX as i64 => {
@@ -630,5 +631,28 @@ pub(crate) fn try_compile_index_as_i32(
             })
         }
         _ => None,
+    }
+}
+
+/// Check whether an expression is statically known to produce a plain Array
+/// (not Buffer, Set, Map, or a union type). When true, the codegen can safely
+/// emit `js_array_get_f64_unchecked` / `js_array_set_f64_unchecked` instead
+/// of the checked variants that probe 3 thread-local registries per access.
+pub(crate) fn is_known_plain_array_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+    match expr {
+        // Local variable with type info from HIR lowering
+        Expr::LocalGet(id) => {
+            locals.get(id).map(|i| {
+                i.is_array && !i.is_union && !i.is_buffer && !i.is_set && !i.is_map
+            }).unwrap_or(false)
+        }
+        // These expressions always return a freshly-allocated plain Array
+        Expr::ArrayFrom(_) |
+        Expr::ArraySlice { .. } |
+        Expr::ObjectKeys(_) |
+        Expr::ObjectValues(_) |
+        Expr::ObjectEntries(_) |
+        Expr::ProcessArgv => true,
+        _ => false,
     }
 }

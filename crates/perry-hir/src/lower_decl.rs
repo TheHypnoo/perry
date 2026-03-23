@@ -149,11 +149,14 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
 
 pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::ClassDecl, is_exported: bool) -> Result<Class> {
     let name = class_decl.ident.sym.to_string();
-    let class_id = ctx.lookup_class(&name).unwrap_or_else(|| {
-        let id = ctx.fresh_class();
-        ctx.classes.push((name.clone(), id));
-        id
-    });
+    let class_id = match ctx.lookup_class(&name) {
+        Some(id) => id,
+        None => {
+            let id = ctx.fresh_class();
+            ctx.register_class(name.clone(), id);
+            id
+        }
+    };
 
     // Set current class for arrow function `this` capture tracking
     let old_class = ctx.current_class.take();
@@ -395,11 +398,14 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
 /// Lower a class expression (ast::Class) to HIR.
 /// Used for anonymous class expressions like `new (class extends Command { ... })()`.
 pub(crate) fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class, name: &str, is_exported: bool) -> Result<Class> {
-    let class_id = ctx.lookup_class(name).unwrap_or_else(|| {
-        let id = ctx.fresh_class();
-        ctx.classes.push((name.to_string(), id));
-        id
-    });
+    let class_id = match ctx.lookup_class(name) {
+        Some(id) => id,
+        None => {
+            let id = ctx.fresh_class();
+            ctx.register_class(name.to_string(), id);
+            id
+        }
+    };
 
     let old_class = ctx.current_class.take();
     ctx.current_class = Some(name.to_string());
@@ -1138,7 +1144,7 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             // Skip if a class with the same name already exists (avoids duplicate definitions
             // when the same class name appears at both module level and function body level)
             let already_exists = ctx.pending_classes.iter().any(|c| c.name == class_name)
-                || ctx.classes.iter().any(|(name, _)| name == &class_name);
+                || ctx.classes_index.contains_key(&class_name);
             if !already_exists {
                 let class = lower_class_decl(ctx, class_decl, false)?;
                 ctx.pending_classes.push(class);

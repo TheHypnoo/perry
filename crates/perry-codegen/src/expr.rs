@@ -9,7 +9,8 @@ use cranelift_codegen::ir::AbiParam;
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_module::{DataDescription, Init, Linkage, Module};
 use cranelift_object::ObjectModule;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 
 use perry_hir::{
     ArrayElement, BinaryOp, CallArg, CompareOp, Expr, LogicalOp, Stmt, UnaryOp, UpdateOp,
@@ -155,19 +156,19 @@ pub(crate) fn detect_state_condition(expr: &Expr) -> Option<&Expr> {
 pub(crate) fn compile_expr(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
-    func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
-    closure_func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
-    func_wrapper_ids: &BTreeMap<u32, cranelift_module::FuncId>,
-    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
-    async_func_ids: &std::collections::BTreeSet<u32>,
-    classes: &BTreeMap<String, ClassMeta>,
-    enums: &BTreeMap<(String, String), EnumMemberValue>,
-    func_param_types: &BTreeMap<u32, Vec<types::Type>>, func_union_params: &BTreeMap<u32, Vec<bool>>,
-    func_return_types: &BTreeMap<u32, types::Type>,
-    func_hir_return_types: &BTreeMap<u32, perry_types::Type>,
-    func_rest_param_index: &BTreeMap<u32, usize>,
-    imported_func_param_counts: &BTreeMap<String, usize>,
-    locals: &BTreeMap<LocalId, LocalInfo>,
+    func_ids: &HashMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: &HashMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: &HashMap<u32, cranelift_module::FuncId>,
+    extern_funcs: &HashMap<Cow<'static, str>, cranelift_module::FuncId>,
+    async_func_ids: &HashSet<u32>,
+    classes: &HashMap<String, ClassMeta>,
+    enums: &HashMap<(String, String), EnumMemberValue>,
+    func_param_types: &HashMap<u32, Vec<types::Type>>, func_union_params: &HashMap<u32, Vec<bool>>,
+    func_return_types: &HashMap<u32, types::Type>,
+    func_hir_return_types: &HashMap<u32, perry_types::Type>,
+    func_rest_param_index: &HashMap<u32, usize>,
+    imported_func_param_counts: &HashMap<String, usize>,
+    locals: &HashMap<LocalId, LocalInfo>,
     expr: &Expr,
     this_ctx: Option<&ThisContext>,
 ) -> Result<Value> {
@@ -1094,7 +1095,7 @@ pub(crate) fn compile_expr(
         }
         Expr::JsonStringify(value_expr) => {
             // Check if the value is a string expression - need to call specialized stringify
-            fn is_string_value_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_value_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -4333,7 +4334,7 @@ pub(crate) fn compile_expr(
         }
         Expr::LocalSet(id, value) => {
             // Helper to detect if an expression produces a string
-            fn is_string_expr_for_union(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_expr_for_union(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
@@ -4433,7 +4434,7 @@ pub(crate) fn compile_expr(
                             // Use js_string_append for in-place appending
 
                             // Helper to check if expression is a string
-                            fn is_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                            fn is_string_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                 match expr {
                                     Expr::String(_) => true,
                                     Expr::StringFromCharCode(_) => true,
@@ -4869,7 +4870,7 @@ pub(crate) fn compile_expr(
         }
         Expr::Binary { op, left, right } => {
             // CONSTANT FOLDING: Evaluate constant expressions at compile time
-            fn get_constant_value(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> Option<f64> {
+            fn get_constant_value(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> Option<f64> {
                 match expr {
                     Expr::Integer(n) => Some(*n as f64),
                     Expr::Number(f) => Some(*f),
@@ -4899,7 +4900,7 @@ pub(crate) fn compile_expr(
 
             // Check if this is string concatenation (recursively for nested binary expressions)
             // Note: EnvGet is NOT included because it can return undefined (handled as union type)
-            fn is_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::StringFromCharCode(_) => true,
@@ -4931,7 +4932,7 @@ pub(crate) fn compile_expr(
             }
 
             // Check if an expression produces a NaN-boxed string (from Conditional)
-            fn is_nanboxed_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_nanboxed_string_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::Conditional { then_expr, else_expr, .. } => {
                         is_string_operand(then_expr, locals) && is_string_operand(else_expr, locals)
@@ -4943,7 +4944,7 @@ pub(crate) fn compile_expr(
 
             // Check if an expression is a union type (NaN-boxed, could be any value)
             // These need js_jsvalue_to_string to handle both strings and numbers
-            fn is_union_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_union_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union).unwrap_or(false),
                     // EnvGet returns NaN-boxed string or undefined - treat as union
@@ -5103,7 +5104,7 @@ pub(crate) fn compile_expr(
             }
 
             // Check if this is BigInt arithmetic (recursive check for nested BigInt expressions)
-            fn is_bigint_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>, classes: &BTreeMap<String, ClassMeta>) -> bool {
+            fn is_bigint_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>, func_hir_return_types: &HashMap<u32, perry_types::Type>, classes: &HashMap<String, ClassMeta>) -> bool {
                 match expr {
                     Expr::BigInt(_) => true,
                     Expr::BigIntCoerce(_) => true,
@@ -5217,7 +5218,7 @@ pub(crate) fn compile_expr(
             // Check for union-typed arithmetic: dispatch to BigInt or float at runtime.
             // When a local has is_union=true (Type::Any parameter), it may hold a BigInt
             // at runtime (BIGINT_TAG). Use js_dynamic_* functions that check NaN-box tags.
-            fn is_union_arith_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_union_arith_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union && !i.is_bigint).unwrap_or(false),
                     Expr::Binary { left, right, .. } => {
@@ -5269,7 +5270,7 @@ pub(crate) fn compile_expr(
             }
 
             // Check if both operands are integers for native i64 arithmetic optimization
-            fn is_int_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_int_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::Integer(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_integer).unwrap_or(false),
@@ -5451,7 +5452,7 @@ pub(crate) fn compile_expr(
 
             // Check if either operand might be a NaN-boxed boolean (from comparisons or bool literals).
             // If so, we need to convert TAG_TRUE->1.0 / TAG_FALSE->0.0 before arithmetic.
-            fn may_produce_boolean(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn may_produce_boolean(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::Compare { .. } | Expr::Bool(_) => true,
                     Expr::Unary { op: UnaryOp::Not, .. } => true,
@@ -5592,7 +5593,7 @@ pub(crate) fn compile_expr(
         Expr::Unary { op, operand } => {
             // Check if operand is a bigint expression for unary negation
             if matches!(op, UnaryOp::Neg) {
-                fn is_bigint_unary_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>, classes: &BTreeMap<String, ClassMeta>) -> bool {
+                fn is_bigint_unary_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>, func_hir_return_types: &HashMap<u32, perry_types::Type>, classes: &HashMap<String, ClassMeta>) -> bool {
                     match expr {
                         Expr::BigInt(_) => true,
                         Expr::BigIntCoerce(_) => true,
@@ -5755,7 +5756,7 @@ pub(crate) fn compile_expr(
             // - One side is a string literal
             // - One side is a string local variable
             // - One side is a PropertyGet (might return a NaN-boxed string)
-            fn is_known_string_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_known_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::TypeOf(_) => true,
                     Expr::String(_) => true,
@@ -5777,7 +5778,7 @@ pub(crate) fn compile_expr(
                     _ => false,
                 }
             }
-            fn may_be_string_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn may_be_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::PropertyGet { .. } => true,
                     Expr::IndexGet { .. } => true,
@@ -5977,7 +5978,7 @@ pub(crate) fn compile_expr(
                 }
             } else {
                 // Check if this is a BigInt comparison
-                fn is_bigint_compare_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, classes: &BTreeMap<String, ClassMeta>) -> bool {
+                fn is_bigint_compare_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>, classes: &HashMap<String, ClassMeta>) -> bool {
                     match expr {
                         Expr::BigInt(_) => true,
                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
@@ -6053,7 +6054,7 @@ pub(crate) fn compile_expr(
                         // use js_jsvalue_equals for Eq/Ne instead of fcmp (which compares bit
                         // patterns and would fail for two BigInts with the same value but
                         // different heap allocations, e.g., eql: (a, b) => a === b).
-                        fn is_union_typed_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                        fn is_union_typed_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                             match expr {
                                 Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union).unwrap_or(false),
                                 _ => false,
@@ -6415,7 +6416,7 @@ pub(crate) fn compile_expr(
                     // Helper to check if argument expression is a string
                     // Detects string literals, local variables known to be strings,
                     // template literals, and function calls that return String type
-                    fn is_string_arg_expr(arg: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>) -> bool {
+                    fn is_string_arg_expr(arg: &Expr, locals: &HashMap<LocalId, LocalInfo>, func_hir_return_types: &HashMap<u32, perry_types::Type>) -> bool {
                         match arg {
                             Expr::String(_) => true,
                             // Template literals are lowered to string concat, not a separate variant
@@ -6608,7 +6609,7 @@ pub(crate) fn compile_expr(
                     if let Some(ns_name) = static_class_name {
                         if tl_is_namespace_import(ns_name) {
                             let scoped_key = format!("__scoped_wrapper__{}", property);
-                            if let Some(&scoped_func_id) = extern_funcs.get(&scoped_key) {
+                            if let Some(&scoped_func_id) = extern_funcs.get(scoped_key.as_str()) {
                                 // Direct call through the pre-declared scoped wrapper
                                 let func_ref = module.declare_func_in_func(scoped_func_id, builder.func);
                                 let param_count = imported_func_param_counts
@@ -6772,7 +6773,7 @@ pub(crate) fn compile_expr(
                                                         }
                                                     };
 
-                                                    let push_func = extern_funcs.get(&push_func_name)
+                                                    let push_func = extern_funcs.get(push_func_name.as_str())
                                                         .ok_or_else(|| anyhow!("{} not declared", push_func_name))?;
                                                     let push_ref = module.declare_func_in_func(*push_func, builder.func);
                                                     let push_call = builder.ins().call(push_ref, &[arr_ptr, push_val]);
@@ -6943,7 +6944,7 @@ pub(crate) fn compile_expr(
                         if args.len() > 1 {
                             if let Some(spread_func) = extern_funcs.get("js_console_log_spread") {
                                 // Helper to check if an expression produces a string
-                                fn is_string_expr_for_multi(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                                fn is_string_expr_for_multi(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::String(_) => true,
                                         Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
@@ -6980,7 +6981,7 @@ pub(crate) fn compile_expr(
                                 }
 
                                 // Helper to check if an expression needs dynamic printing (union types)
-                                fn is_union_expr_for_multi(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                                fn is_union_expr_for_multi(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union).unwrap_or(false),
                                         Expr::Conditional { .. } => true,
@@ -7002,7 +7003,7 @@ pub(crate) fn compile_expr(
                                 }
 
                                 // Helper to check if an expression is an array
-                                fn is_array_expr_for_multi(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                                fn is_array_expr_for_multi(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::Array(_) | Expr::ArraySpread(_) | Expr::ProcessArgv => true,
                                         Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } | Expr::ArraySlice { .. } | Expr::ArraySplice { .. } => true,
@@ -7139,7 +7140,7 @@ pub(crate) fn compile_expr(
                                 }
                                 // Binary Add with string operands (from template literals)
                                 Expr::Binary { op: BinaryOp::Add, left, right } => {
-                                    fn is_string_in_binary(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                                    fn is_string_in_binary(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                         match expr {
                                             Expr::String(_) => true,
                                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -7396,7 +7397,7 @@ pub(crate) fn compile_expr(
                         if args.len() > 1 {
                             if let Some(spread_func) = extern_funcs.get("js_console_error_spread") {
                                 // Reuse the same helper functions from console.log
-                                fn is_string_expr_for_error(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                                fn is_string_expr_for_error(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::String(_) => true,
                                         Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
@@ -7429,7 +7430,7 @@ pub(crate) fn compile_expr(
                                     }
                                 }
 
-                                fn is_union_expr_for_error(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                                fn is_union_expr_for_error(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union).unwrap_or(false),
                                         Expr::Conditional { .. } => true,
@@ -7450,7 +7451,7 @@ pub(crate) fn compile_expr(
                                     }
                                 }
 
-                                fn is_array_expr_for_error(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                                fn is_array_expr_for_error(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::Array(_) | Expr::ArraySpread(_) | Expr::ProcessArgv => true,
                                         Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } | Expr::ArraySlice { .. } | Expr::ArraySplice { .. } => true,
@@ -7560,7 +7561,7 @@ pub(crate) fn compile_expr(
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
                                 Expr::Binary { op: BinaryOp::Add, left, right } => {
-                                    fn is_string_in_binary(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                                    fn is_string_in_binary(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                         match expr {
                                             Expr::String(_) => true,
                                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -7742,7 +7743,7 @@ pub(crate) fn compile_expr(
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
                                 Expr::Binary { op: BinaryOp::Add, left, right } => {
-                                    fn is_string_in_binary(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                                    fn is_string_in_binary(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                         match expr {
                                             Expr::String(_) => true,
                                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -11154,7 +11155,7 @@ pub(crate) fn compile_expr(
                         arg_vals.len()
                     };
 
-                    let (func_id, full_param_count) = if let Some(&scoped_func_id) = extern_funcs.get(&scoped_key) {
+                    let (func_id, full_param_count) = if let Some(&scoped_func_id) = extern_funcs.get(scoped_key.as_str()) {
                         // Use pre-declared scoped wrapper (module-prefixed symbol name)
                         (scoped_func_id, initial_param_count)
                     } else {
@@ -11488,9 +11489,10 @@ pub(crate) fn compile_expr(
                         let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
                         let arr_ptr = ensure_i64(builder, arr_val);
 
-                        // Get array elements
-                        let get_func = extern_funcs.get("js_array_get_f64")
-                            .ok_or_else(|| anyhow!("js_array_get_f64 not declared"))?;
+                        // Get array elements — use unchecked for known plain arrays (skips buffer/set/map checks)
+                        let get_func_name = if is_known_plain_array_expr(spread_expr, locals) { "js_array_get_f64_unchecked" } else { "js_array_get_f64" };
+                        let get_func = extern_funcs.get(get_func_name)
+                            .ok_or_else(|| anyhow!("{} not declared", get_func_name))?;
                         let get_ref = module.declare_func_in_func(*get_func, builder.func);
 
                         // Extract elements from the array based on expected params from actual signature
@@ -11603,17 +11605,13 @@ pub(crate) fn compile_expr(
                                 .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
                             let push_ref = module.declare_func_in_func(*push_func, builder.func);
 
-                            let get_func = extern_funcs.get("js_array_get_f64")
-                                .ok_or_else(|| anyhow!("js_array_get_f64 not declared"))?;
-                            let get_ref = module.declare_func_in_func(*get_func, builder.func);
-
                             // Get nanbox_string function for string values
                             let nanbox_string_func = extern_funcs.get("js_nanbox_string")
                                 .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
                             let nanbox_string_ref = module.declare_func_in_func(*nanbox_string_func, builder.func);
 
                             // Helper to check if an expression produces a string
-                            fn is_string_expr_for_spread(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                            fn is_string_expr_for_spread(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                 match expr {
                                     Expr::String(_) => true,
                                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
@@ -11656,6 +11654,12 @@ pub(crate) fn compile_expr(
                                         let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
                                         // Array might be i64 (from closure params) or f64 (from other sources)
                                         let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
+
+                                        // Use unchecked for known plain arrays (skips buffer/set/map checks)
+                                        let get_func_name = if is_known_plain_array_expr(spread_expr, locals) { "js_array_get_f64_unchecked" } else { "js_array_get_f64" };
+                                        let get_func = extern_funcs.get(get_func_name)
+                                            .ok_or_else(|| anyhow!("{} not declared", get_func_name))?;
+                                        let get_ref = module.declare_func_in_func(*get_func, builder.func);
 
                                         // Get length of spread array (inline load: ArrayHeader.length at offset 0)
                                         let spread_len = builder.ins().load(types::I32, MemFlags::new(), spread_arr_ptr, 0);
@@ -11825,10 +11829,6 @@ pub(crate) fn compile_expr(
                             .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
                         let push_ref = module.declare_func_in_func(*push_func, builder.func);
 
-                        let get_func = extern_funcs.get("js_array_get_f64")
-                            .ok_or_else(|| anyhow!("js_array_get_f64 not declared"))?;
-                        let get_ref = module.declare_func_in_func(*get_func, builder.func);
-
                         // Process arguments in order (regular args and spreads)
                         for arg in args {
                             match arg {
@@ -11845,6 +11845,12 @@ pub(crate) fn compile_expr(
                                     // Spread argument - iterate and push each element
                                     let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
                                     let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
+
+                                    // Use unchecked for known plain arrays (skips buffer/set/map checks)
+                                    let get_func_name = if is_known_plain_array_expr(spread_expr, locals) { "js_array_get_f64_unchecked" } else { "js_array_get_f64" };
+                                    let get_func = extern_funcs.get(get_func_name)
+                                        .ok_or_else(|| anyhow!("{} not declared", get_func_name))?;
+                                    let get_ref = module.declare_func_in_func(*get_func, builder.func);
 
                                     // Get length of spread array (inline load: ArrayHeader.length at offset 0)
                                     let spread_len = builder.ins().load(types::I32, MemFlags::new(), spread_arr_ptr, 0);
@@ -11942,9 +11948,6 @@ pub(crate) fn compile_expr(
                         let push_func = extern_funcs.get("js_array_push_f64")
                             .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
                         let push_ref = module.declare_func_in_func(*push_func, builder.func);
-                        let get_func = extern_funcs.get("js_array_get_f64")
-                            .ok_or_else(|| anyhow!("js_array_get_f64 not declared"))?;
-                        let get_ref = module.declare_func_in_func(*get_func, builder.func);
 
                         for arg in args {
                             match arg {
@@ -11959,6 +11962,12 @@ pub(crate) fn compile_expr(
                                 CallArg::Spread(spread_expr) => {
                                     let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
                                     let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
+
+                                    // Use unchecked for known plain arrays (skips buffer/set/map checks)
+                                    let get_func_name = if is_known_plain_array_expr(spread_expr, locals) { "js_array_get_f64_unchecked" } else { "js_array_get_f64" };
+                                    let get_func = extern_funcs.get(get_func_name)
+                                        .ok_or_else(|| anyhow!("{} not declared", get_func_name))?;
+                                    let get_ref = module.declare_func_in_func(*get_func, builder.func);
 
                                     // Inline load: ArrayHeader.length at offset 0
                                     let spread_len = builder.ins().load(types::I32, MemFlags::new(), spread_arr_ptr, 0);
@@ -12019,7 +12028,7 @@ pub(crate) fn compile_expr(
         }
         Expr::Conditional { condition, then_expr, else_expr } => {
             // Helper to detect if an expression produces a string at the HIR level
-            fn is_string_conditional_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_conditional_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
@@ -13425,7 +13434,7 @@ pub(crate) fn compile_expr(
             // Also handles obj[key]++ with string keys
 
             // Helper to check if an expression produces a string
-            fn is_string_index(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_index(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -13489,12 +13498,8 @@ pub(crate) fn compile_expr(
                     builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
                 };
 
-                // Check if object is a known array variable -- use unchecked (no polymorphic dispatch)
-                let is_known_array = if let Expr::LocalGet(id) = object.as_ref() {
-                    locals.get(id).map(|i| i.is_array && !i.is_union).unwrap_or(false)
-                } else {
-                    false
-                };
+                // Check if object is a known plain array -- use unchecked (no polymorphic dispatch)
+                let is_known_array = is_known_plain_array_expr(object, locals);
 
                 // Get current value: use unchecked variant for known arrays (skips buffer/set/map checks)
                 let get_func_name = if is_known_array { "js_array_get_f64_unchecked" } else { "js_array_get_f64" };
@@ -14213,7 +14218,7 @@ pub(crate) fn compile_expr(
         }
         Expr::Array(elements) => {
             // Helper to detect if an expression is a string
-            fn is_string_element(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_element(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
@@ -14233,7 +14238,7 @@ pub(crate) fn compile_expr(
             }
 
             // Helper to detect if an expression is an object/array (pointer type)
-            fn is_object_element(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_object_element(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::Object(_) | Expr::ObjectSpread { .. } | Expr::Array(_) | Expr::ArraySpread(_) => true,
                     Expr::Call { .. } | Expr::New { .. } | Expr::NativeMethodCall { .. } => true,
@@ -14395,10 +14400,6 @@ pub(crate) fn compile_expr(
                 .ok_or_else(|| anyhow!("js_array_push_jsvalue not declared"))?;
             let push_jsvalue_ref = module.declare_func_in_func(*push_jsvalue_func, builder.func);
 
-            let get_func = extern_funcs.get("js_array_get_f64")
-                .ok_or_else(|| anyhow!("js_array_get_f64 not declared"))?;
-            let get_ref = module.declare_func_in_func(*get_func, builder.func);
-
             for element in elements {
                 match element {
                     ArrayElement::Expr(expr) => {
@@ -14439,6 +14440,12 @@ pub(crate) fn compile_expr(
                         // Spread element - iterate over source array and push each element
                         let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
                         let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
+
+                        // Use unchecked for known plain arrays (skips buffer/set/map checks)
+                        let get_func_name = if is_known_plain_array_expr(spread_expr, locals) { "js_array_get_f64_unchecked" } else { "js_array_get_f64" };
+                        let get_func = extern_funcs.get(get_func_name)
+                            .ok_or_else(|| anyhow!("{} not declared", get_func_name))?;
+                        let get_ref = module.declare_func_in_func(*get_func, builder.func);
 
                         // Get length of spread array (inline load: ArrayHeader.length at offset 0)
                         let spread_len = builder.ins().load(types::I32, MemFlags::new(), spread_arr_ptr, 0);
@@ -14570,7 +14577,7 @@ pub(crate) fn compile_expr(
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
                     Expr::Binary { left, right, .. } => {
                         // BigInt binary op: check if either operand is BigInt
-                        fn is_bigint_op(e: &Expr, locals: &std::collections::BTreeMap<perry_types::LocalId, LocalInfo>) -> bool {
+                        fn is_bigint_op(e: &Expr, locals: &std::collections::HashMap<perry_types::LocalId, LocalInfo>) -> bool {
                             match e {
                                 Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
                                 Expr::LocalGet(id) => locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
@@ -15046,7 +15053,7 @@ pub(crate) fn compile_expr(
             // This handles cases like: result.rows[0], obj[key], or variables not marked as arrays
 
             // Helper to check if an expression produces a string
-            fn is_string_index_expr_get(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_index_expr_get(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -15103,7 +15110,7 @@ pub(crate) fn compile_expr(
             } else {
                 // Integer index - check if object is a string for character access
                 // Helper to check if an expression is a string (for character access)
-                fn is_string_object_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                fn is_string_object_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                     match expr {
                         Expr::String(_) => true,
                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -15291,7 +15298,7 @@ pub(crate) fn compile_expr(
                         if info.is_mixed_array {
                             // For mixed-type arrays, we need to properly encode the value
                             // Check if the value being assigned is a string (needs NaN-boxing)
-                            fn is_string_value(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                            fn is_string_value(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                 match expr {
                                     Expr::String(_) => true,
                                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -15465,7 +15472,7 @@ pub(crate) fn compile_expr(
             // where the object is not a simple LocalGet with known array type
 
             // Helper to check if an expression produces a string
-            fn is_string_index_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_index_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -15519,7 +15526,7 @@ pub(crate) fn compile_expr(
                 let val_type = builder.func.dfg.value_type(val);
                 let val_f64 = if val_type == types::I64 {
                     // Detect if the value is a string
-                    fn is_string_value_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                    fn is_string_value_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                         match expr {
                             Expr::String(_) => true,
                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -16251,7 +16258,7 @@ pub(crate) fn compile_expr(
                         fn create_field_name_str(
                             module: &mut dyn cranelift_module::Module,
                             builder: &mut FunctionBuilder,
-                            extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
+                            extern_funcs: &HashMap<Cow<'static, str>, cranelift_module::FuncId>,
                             name: &str,
                         ) -> Result<Value> {
                             use cranelift_module::Linkage;
@@ -21204,8 +21211,9 @@ pub(crate) fn compile_expr(
             let nanbox_str_func = extern_funcs.get("js_nanbox_string")
                 .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
             let nanbox_str_ref = module.declare_func_in_func(*nanbox_str_func, builder.func);
-            let arr_set_func = extern_funcs.get("js_array_set_f64")
-                .ok_or_else(|| anyhow!("js_array_set_f64 not declared"))?;
+            // Use unchecked: keys_arr is a freshly-allocated plain array (not buffer/set/map)
+            let arr_set_func = extern_funcs.get("js_array_set_f64_unchecked")
+                .ok_or_else(|| anyhow!("js_array_set_f64_unchecked not declared"))?;
             let arr_set_ref = module.declare_func_in_func(*arr_set_func, builder.func);
 
             for (i, key) in exclude_keys.iter().enumerate() {
@@ -21223,7 +21231,7 @@ pub(crate) fn compile_expr(
                 // NaN-box the string to get f64
                 let nanbox_call = builder.ins().call(nanbox_str_ref, &[str_ptr]);
                 let nanboxed_f64 = builder.inst_results(nanbox_call)[0]; // f64
-                // Store in the exclude keys array (js_array_set_f64 takes i64, i32, f64)
+                // Store in the exclude keys array (js_array_set_f64_unchecked: i64, i32, f64)
                 let idx = builder.ins().iconst(types::I32, i as i64);
                 builder.ins().call(arr_set_ref, &[keys_arr, idx, nanboxed_f64]);
             }
@@ -21854,7 +21862,7 @@ pub(crate) fn compile_expr(
                 let args_ptr = builder.ins().stack_addr(types::I64, stack_slot, 0);
 
                 // Helper to detect if an expression is a string
-                fn is_string_js_arg(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                fn is_string_js_arg(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                     match expr {
                         Expr::String(_) => true,
                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -21866,7 +21874,7 @@ pub(crate) fn compile_expr(
                 }
 
                 // Helper to detect if an expression is a bigint
-                fn is_bigint_js_arg(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                fn is_bigint_js_arg(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                     match expr {
                         Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_bigint).unwrap_or(false),

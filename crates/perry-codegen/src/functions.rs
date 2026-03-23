@@ -9,7 +9,7 @@ use cranelift_codegen::ir::AbiParam;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{Linkage, Module};
 use cranelift_object::ObjectModule;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use perry_hir::{
     CompareOp,
@@ -287,7 +287,7 @@ impl crate::codegen::Compiler {
             builder.seal_block(entry_block);
 
             // Create variables for parameters using sequential indices (0, 1, 2, ...)
-            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
             for (i, param) in func.params.iter().enumerate() {
                 let var = Variable::new(i);  // Use sequential index, not param.id
                 let abi_type = param_abi_types[i];
@@ -908,7 +908,7 @@ impl crate::codegen::Compiler {
 
         // Build type info map for cross-chunk variable pre-creation
         use perry_types::Type as HirType;
-        let mut local_type_info: BTreeMap<perry_types::LocalId, SplitLocalInfo> = BTreeMap::new();
+        let mut local_type_info: HashMap<perry_types::LocalId, SplitLocalInfo> = HashMap::new();
         for param in &func.params {
             let (abi_type, is_pointer, is_string, is_union) = {
                 let is_s = matches!(param.ty, HirType::String);
@@ -989,7 +989,7 @@ impl crate::codegen::Compiler {
                 builder.switch_to_block(entry);
                 builder.seal_block(entry);
 
-                let mut locals: BTreeMap<perry_types::LocalId, LocalInfo> = BTreeMap::new();
+                let mut locals: HashMap<perry_types::LocalId, LocalInfo> = HashMap::new();
                 let mut next_var = 0usize;
 
                 // Collect LocalIds that are DEFINED in this chunk (via Stmt::Let).

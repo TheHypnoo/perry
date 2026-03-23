@@ -17,6 +17,38 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use perry_types::{FuncId, ObjectType, Type};
 use crate::ir::*;
 
+/// Pre-built index for O(1) lookups into module collections.
+/// Built once from the original module state before any specializations are added.
+struct ModuleIndex {
+    /// Map from function ID to its index in module.functions
+    func_by_id: HashMap<FuncId, usize>,
+    /// Map from class name to its index in module.classes
+    class_by_name: HashMap<String, usize>,
+    /// Map from interface name to its index in module.interfaces
+    interface_by_name: HashMap<String, usize>,
+}
+
+impl ModuleIndex {
+    fn new(module: &Module) -> Self {
+        let func_by_id: HashMap<FuncId, usize> = module.functions.iter()
+            .enumerate()
+            .map(|(i, f)| (f.id, i))
+            .collect();
+
+        let class_by_name: HashMap<String, usize> = module.classes.iter()
+            .enumerate()
+            .map(|(i, c)| (c.name.clone(), i))
+            .collect();
+
+        let interface_by_name: HashMap<String, usize> = module.interfaces.iter()
+            .enumerate()
+            .map(|(i, iface)| (iface.name.clone(), i))
+            .collect();
+
+        Self { func_by_id, class_by_name, interface_by_name }
+    }
+}
+
 /// Key for function specialization (func_id, mangled_type_args)
 type FuncSpecKey = (FuncId, String);
 
@@ -213,7 +245,7 @@ fn mangle_type(ty: &Type) -> String {
 
 /// Infer the type of an expression from its structure
 /// Returns None if the type cannot be determined
-fn infer_expr_type(expr: &Expr, module: &Module) -> Option<Type> {
+fn infer_expr_type(expr: &Expr, module: &Module, idx: &ModuleIndex) -> Option<Type> {
     match expr {
         // Literals have known types
         Expr::Number(_) => Some(Type::Number),
@@ -226,7 +258,7 @@ fn infer_expr_type(expr: &Expr, module: &Module) -> Option<Type> {
         // Array literals - infer element type from first element
         Expr::Array(elems) => {
             if let Some(first) = elems.first() {
-                if let Some(elem_ty) = infer_expr_type(first, module) {
+                if let Some(elem_ty) = infer_expr_type(first, module, idx) {
                     return Some(Type::Array(Box::new(elem_ty)));
                 }
             }
@@ -240,7 +272,8 @@ fn infer_expr_type(expr: &Expr, module: &Module) -> Option<Type> {
         // Function calls - try to get return type
         Expr::Call { callee, type_args, .. } => {
             if let Expr::FuncRef(func_id) = callee.as_ref() {
-                if let Some(func) = module.functions.iter().find(|f| f.id == *func_id) {
+                if let Some(&fi) = idx.func_by_id.get(func_id) {
+                    let func = &module.functions[fi];
                     // If explicit type args provided, substitute them
                     if !type_args.is_empty() && !func.type_params.is_empty() {
                         let subs: HashMap<String, Type> = func.type_params.iter()
@@ -263,7 +296,7 @@ fn infer_expr_type(expr: &Expr, module: &Module) -> Option<Type> {
 
         // Await unwraps a Promise
         Expr::Await(inner) => {
-            if let Some(Type::Promise(inner_ty)) = infer_expr_type(inner, module) {
+            if let Some(Type::Promise(inner_ty)) = infer_expr_type(inner, module, idx) {
                 Some(*inner_ty)
             } else {
                 None
@@ -272,7 +305,7 @@ fn infer_expr_type(expr: &Expr, module: &Module) -> Option<Type> {
 
         // Conditional returns the type of branches (assuming they match)
         Expr::Conditional { then_expr, .. } => {
-            infer_expr_type(then_expr, module)
+            infer_expr_type(then_expr, module, idx)
         }
 
         // Binary operations
@@ -293,13 +326,13 @@ fn infer_expr_type(expr: &Expr, module: &Module) -> Option<Type> {
             match op {
                 LogicalOp::And | LogicalOp::Or => {
                     // Returns one of the operands, try to infer from left
-                    infer_expr_type(left, module)
-                        .or_else(|| infer_expr_type(right, module))
+                    infer_expr_type(left, module, idx)
+                        .or_else(|| infer_expr_type(right, module, idx))
                 }
                 LogicalOp::Coalesce => {
                     // Returns non-null operand
-                    infer_expr_type(left, module)
-                        .or_else(|| infer_expr_type(right, module))
+                    infer_expr_type(left, module, idx)
+                        .or_else(|| infer_expr_type(right, module, idx))
                 }
             }
         }
@@ -419,6 +452,7 @@ fn infer_type_args(
     func: &Function,
     args: &[Expr],
     module: &Module,
+    idx: &ModuleIndex,
 ) -> Option<Vec<Type>> {
     if func.type_params.is_empty() {
         return None; // Not a generic function
@@ -434,7 +468,7 @@ fn infer_type_args(
         }
 
         // Try to infer the argument's type
-        if let Some(arg_ty) = infer_expr_type(arg, module) {
+        if let Some(arg_ty) = infer_expr_type(arg, module, idx) {
             // Unify parameter type with argument type
             if !unify_types(&param.ty, &arg_ty, &mut bindings) {
                 // Unification failed - can't infer
@@ -484,6 +518,7 @@ fn infer_type_args_for_class(
     constructor: &Function,
     args: &[Expr],
     module: &Module,
+    idx: &ModuleIndex,
 ) -> Option<Vec<Type>> {
     if class.type_params.is_empty() {
         return None; // Not a generic class
@@ -499,7 +534,7 @@ fn infer_type_args_for_class(
         }
 
         // Try to infer the argument's type
-        if let Some(arg_ty) = infer_expr_type(arg, module) {
+        if let Some(arg_ty) = infer_expr_type(arg, module, idx) {
             // Unify parameter type with argument type
             if !unify_types(&param.ty, &arg_ty, &mut bindings) {
                 // Unification failed - can't infer
@@ -598,11 +633,12 @@ pub fn check_constraint(
     concrete_type: &Type,
     constraint: &Type,
     module: &Module,
+    idx: &ModuleIndex,
 ) -> Result<(), ConstraintError> {
     match constraint {
         // Named constraint - check if concrete type is or implements the interface
         Type::Named(name) => {
-            check_named_constraint(type_param, concrete_type, name, module)
+            check_named_constraint(type_param, concrete_type, name, module, idx)
         }
 
         // Primitive constraints - simple type checking
@@ -621,7 +657,7 @@ pub fn check_constraint(
         // Array constraint
         Type::Array(elem_constraint) => {
             if let Type::Array(elem_type) = concrete_type {
-                check_constraint(type_param, elem_type, elem_constraint, module)
+                check_constraint(type_param, elem_type, elem_constraint, module, idx)
             } else {
                 Err(ConstraintError::TypeMismatch {
                     type_param: type_param.to_string(),
@@ -634,7 +670,7 @@ pub fn check_constraint(
         // Union constraint - concrete type must satisfy at least one branch
         Type::Union(branches) => {
             for branch in branches {
-                if check_constraint(type_param, concrete_type, branch, module).is_ok() {
+                if check_constraint(type_param, concrete_type, branch, module, idx).is_ok() {
                     return Ok(());
                 }
             }
@@ -669,6 +705,7 @@ fn check_named_constraint(
     concrete_type: &Type,
     constraint_name: &str,
     module: &Module,
+    idx: &ModuleIndex,
 ) -> Result<(), ConstraintError> {
     // If the concrete type is the same named type, it satisfies
     if let Type::Named(name) = concrete_type {
@@ -678,12 +715,13 @@ fn check_named_constraint(
     }
 
     // Look up the interface to check structural compatibility
-    if let Some(interface) = module.interfaces.iter().find(|i| i.name == constraint_name) {
-        return check_interface_satisfaction(type_param, concrete_type, interface, module);
+    if let Some(&ii) = idx.interface_by_name.get(constraint_name) {
+        let interface = &module.interfaces[ii];
+        return check_interface_satisfaction(type_param, concrete_type, interface, module, idx);
     }
 
     // Look up class constraints
-    if let Some(_class) = module.classes.iter().find(|c| c.name == constraint_name) {
+    if let Some(&_ci) = idx.class_by_name.get(constraint_name) {
         // For class constraints, the concrete type must be that class or a subclass
         if let Type::Named(name) = concrete_type {
             if name == constraint_name {
@@ -707,6 +745,7 @@ fn check_interface_satisfaction(
     concrete_type: &Type,
     interface: &Interface,
     module: &Module,
+    idx: &ModuleIndex,
 ) -> Result<(), ConstraintError> {
     // Check built-in types against common interfaces
     match concrete_type {
@@ -757,7 +796,8 @@ fn check_interface_satisfaction(
         }
         Type::Named(name) => {
             // Look up the named type (could be a class)
-            if let Some(class) = module.classes.iter().find(|c| &c.name == name) {
+            if let Some(&ci) = idx.class_by_name.get(name.as_str()) {
+                let class = &module.classes[ci];
                 // Check all required interface properties exist in class fields
                 for prop in &interface.properties {
                     if prop.optional {
@@ -814,12 +854,13 @@ pub fn check_function_constraints(
     func: &Function,
     type_args: &[Type],
     module: &Module,
+    idx: &ModuleIndex,
 ) -> Result<(), Vec<ConstraintError>> {
     let mut errors = Vec::new();
 
     for (param, arg) in func.type_params.iter().zip(type_args.iter()) {
         if let Some(ref constraint) = param.constraint {
-            if let Err(e) = check_constraint(&param.name, arg, constraint, module) {
+            if let Err(e) = check_constraint(&param.name, arg, constraint, module, idx) {
                 errors.push(e);
             }
         }
@@ -837,12 +878,13 @@ pub fn check_class_constraints(
     class: &Class,
     type_args: &[Type],
     module: &Module,
+    idx: &ModuleIndex,
 ) -> Result<(), Vec<ConstraintError>> {
     let mut errors = Vec::new();
 
     for (param, arg) in class.type_params.iter().zip(type_args.iter()) {
         if let Some(ref constraint) = param.constraint {
-            if let Err(e) = check_constraint(&param.name, arg, constraint, module) {
+            if let Err(e) = check_constraint(&param.name, arg, constraint, module, idx) {
                 errors.push(e);
             }
         }
@@ -1530,9 +1572,10 @@ pub fn specialize_class(
 /// Processes the module and generates specialized versions of generic functions/classes
 pub fn monomorphize_module(module: &mut Module) {
     let mut ctx = MonomorphizationContext::new(module);
+    let idx = ModuleIndex::new(module);
 
     // First pass: collect all generic instantiations from the code
-    collect_instantiations(module, &mut ctx);
+    collect_instantiations(module, &mut ctx, &idx);
 
     // Process work queues until empty
     let mut new_functions = Vec::new();
@@ -1549,9 +1592,10 @@ pub fn monomorphize_module(module: &mut Module) {
             ctx.processed_funcs.insert(key);
 
             // Find the original function
-            if let Some(original) = module.functions.iter().find(|f| f.id == request.original_id) {
+            if let Some(&fi) = idx.func_by_id.get(&request.original_id) {
+                let original = &module.functions[fi];
                 // Check type parameter constraints
-                if let Err(errors) = check_function_constraints(original, &request.type_args, module) {
+                if let Err(errors) = check_function_constraints(original, &request.type_args, module, &idx) {
                     for err in errors {
                         eprintln!("Warning: Constraint violation in function '{}': {:?}", original.name, err);
                     }
@@ -1572,9 +1616,10 @@ pub fn monomorphize_module(module: &mut Module) {
             ctx.processed_classes.insert(key);
 
             // Find the original class
-            if let Some(original) = module.classes.iter().find(|c| c.name == request.original_name) {
+            if let Some(&ci) = idx.class_by_name.get(&request.original_name) {
+                let original = &module.classes[ci];
                 // Check type parameter constraints
-                if let Err(errors) = check_class_constraints(original, &request.type_args, module) {
+                if let Err(errors) = check_class_constraints(original, &request.type_args, module, &idx) {
                     for err in errors {
                         eprintln!("Warning: Constraint violation in class '{}': {:?}", original.name, err);
                     }
@@ -1599,112 +1644,113 @@ pub fn monomorphize_module(module: &mut Module) {
 }
 
 /// Collect all generic instantiations from the module
-fn collect_instantiations(module: &Module, ctx: &mut MonomorphizationContext) {
+fn collect_instantiations(module: &Module, ctx: &mut MonomorphizationContext, idx: &ModuleIndex) {
     // Scan all functions for generic calls
     for func in &module.functions {
-        collect_instantiations_in_stmts(&func.body, ctx, module);
+        collect_instantiations_in_stmts(&func.body, ctx, module, idx);
     }
 
     // Scan all class methods
     for class in &module.classes {
         if let Some(ref ctor) = class.constructor {
-            collect_instantiations_in_stmts(&ctor.body, ctx, module);
+            collect_instantiations_in_stmts(&ctor.body, ctx, module, idx);
         }
         for method in &class.methods {
-            collect_instantiations_in_stmts(&method.body, ctx, module);
+            collect_instantiations_in_stmts(&method.body, ctx, module, idx);
         }
     }
 
     // Scan init statements
-    collect_instantiations_in_stmts(&module.init, ctx, module);
+    collect_instantiations_in_stmts(&module.init, ctx, module, idx);
 }
 
-fn collect_instantiations_in_stmts(stmts: &[Stmt], ctx: &mut MonomorphizationContext, module: &Module) {
+fn collect_instantiations_in_stmts(stmts: &[Stmt], ctx: &mut MonomorphizationContext, module: &Module, idx: &ModuleIndex) {
     for stmt in stmts {
-        collect_instantiations_in_stmt(stmt, ctx, module);
+        collect_instantiations_in_stmt(stmt, ctx, module, idx);
     }
 }
 
-fn collect_instantiations_in_stmt(stmt: &Stmt, ctx: &mut MonomorphizationContext, module: &Module) {
+fn collect_instantiations_in_stmt(stmt: &Stmt, ctx: &mut MonomorphizationContext, module: &Module, idx: &ModuleIndex) {
     match stmt {
         Stmt::Let { init, .. } => {
             if let Some(expr) = init {
-                collect_instantiations_in_expr(expr, ctx, module);
+                collect_instantiations_in_expr(expr, ctx, module, idx);
             }
         }
-        Stmt::Expr(expr) => collect_instantiations_in_expr(expr, ctx, module),
+        Stmt::Expr(expr) => collect_instantiations_in_expr(expr, ctx, module, idx),
         Stmt::Return(expr) => {
             if let Some(e) = expr {
-                collect_instantiations_in_expr(e, ctx, module);
+                collect_instantiations_in_expr(e, ctx, module, idx);
             }
         }
         Stmt::If { condition, then_branch, else_branch } => {
-            collect_instantiations_in_expr(condition, ctx, module);
-            collect_instantiations_in_stmts(then_branch, ctx, module);
+            collect_instantiations_in_expr(condition, ctx, module, idx);
+            collect_instantiations_in_stmts(then_branch, ctx, module, idx);
             if let Some(else_b) = else_branch {
-                collect_instantiations_in_stmts(else_b, ctx, module);
+                collect_instantiations_in_stmts(else_b, ctx, module, idx);
             }
         }
         Stmt::While { condition, body } => {
-            collect_instantiations_in_expr(condition, ctx, module);
-            collect_instantiations_in_stmts(body, ctx, module);
+            collect_instantiations_in_expr(condition, ctx, module, idx);
+            collect_instantiations_in_stmts(body, ctx, module, idx);
         }
         Stmt::For { init, condition, update, body } => {
             if let Some(init_stmt) = init {
-                collect_instantiations_in_stmt(init_stmt, ctx, module);
+                collect_instantiations_in_stmt(init_stmt, ctx, module, idx);
             }
             if let Some(cond) = condition {
-                collect_instantiations_in_expr(cond, ctx, module);
+                collect_instantiations_in_expr(cond, ctx, module, idx);
             }
             if let Some(upd) = update {
-                collect_instantiations_in_expr(upd, ctx, module);
+                collect_instantiations_in_expr(upd, ctx, module, idx);
             }
-            collect_instantiations_in_stmts(body, ctx, module);
+            collect_instantiations_in_stmts(body, ctx, module, idx);
         }
-        Stmt::Throw(expr) => collect_instantiations_in_expr(expr, ctx, module),
+        Stmt::Throw(expr) => collect_instantiations_in_expr(expr, ctx, module, idx),
         Stmt::Try { body, catch, finally } => {
-            collect_instantiations_in_stmts(body, ctx, module);
+            collect_instantiations_in_stmts(body, ctx, module, idx);
             if let Some(c) = catch {
-                collect_instantiations_in_stmts(&c.body, ctx, module);
+                collect_instantiations_in_stmts(&c.body, ctx, module, idx);
             }
             if let Some(f) = finally {
-                collect_instantiations_in_stmts(f, ctx, module);
+                collect_instantiations_in_stmts(f, ctx, module, idx);
             }
         }
         Stmt::Switch { discriminant, cases } => {
-            collect_instantiations_in_expr(discriminant, ctx, module);
+            collect_instantiations_in_expr(discriminant, ctx, module, idx);
             for case in cases {
                 if let Some(ref test) = case.test {
-                    collect_instantiations_in_expr(test, ctx, module);
+                    collect_instantiations_in_expr(test, ctx, module, idx);
                 }
-                collect_instantiations_in_stmts(&case.body, ctx, module);
+                collect_instantiations_in_stmts(&case.body, ctx, module, idx);
             }
         }
         Stmt::Break | Stmt::Continue => {}
     }
 }
 
-fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext, module: &Module) {
+fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext, module: &Module, idx: &ModuleIndex) {
     match expr {
         // Check for generic function calls
         Expr::Call { callee, args, type_args } => {
             // First collect in the callee and args
-            collect_instantiations_in_expr(callee, ctx, module);
+            collect_instantiations_in_expr(callee, ctx, module, idx);
             for arg in args {
-                collect_instantiations_in_expr(arg, ctx, module);
+                collect_instantiations_in_expr(arg, ctx, module, idx);
             }
 
             // Check if callee is a function reference
             if let Expr::FuncRef(func_id) = callee.as_ref() {
                 // Find the function and check if it's generic
-                if let Some(func) = module.functions.iter().find(|f| f.id == *func_id) {
+                if let Some(&fi) = idx.func_by_id.get(func_id) {
+                    let func = &module.functions[fi];
                     if !func.type_params.is_empty() {
                         // Use explicit type args if provided, otherwise try to infer
                         let resolved_type_args = if !type_args.is_empty() {
                             Some(type_args.clone())
                         } else {
                             // Try to infer type arguments from the call arguments
-                            infer_type_args(func, args, module)
+                            infer_type_args(func, args, module, idx)
                         };
 
                         if let Some(ta) = resolved_type_args {
@@ -1718,18 +1764,19 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
         // Check for generic class instantiation
         Expr::New { class_name, args, type_args } => {
             for arg in args {
-                collect_instantiations_in_expr(arg, ctx, module);
+                collect_instantiations_in_expr(arg, ctx, module, idx);
             }
 
             // Find the class
-            if let Some(class) = module.classes.iter().find(|c| &c.name == class_name) {
+            if let Some(&ci) = idx.class_by_name.get(class_name.as_str()) {
+                let class = &module.classes[ci];
                 if !class.type_params.is_empty() {
                     // Use explicit type args if provided, otherwise try to infer from constructor
                     let resolved_type_args = if !type_args.is_empty() {
                         Some(type_args.clone())
                     } else if let Some(ref ctor) = class.constructor {
                         // Try to infer from constructor parameters
-                        infer_type_args_for_class(class, ctor, args, module)
+                        infer_type_args_for_class(class, ctor, args, module, idx)
                     } else {
                         None
                     };
@@ -1743,203 +1790,203 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
 
         // Recurse into other expressions
         Expr::LocalSet(_, val) | Expr::GlobalSet(_, val) => {
-            collect_instantiations_in_expr(val, ctx, module);
+            collect_instantiations_in_expr(val, ctx, module, idx);
         }
         Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. } |
         Expr::Logical { left, right, .. } => {
-            collect_instantiations_in_expr(left, ctx, module);
-            collect_instantiations_in_expr(right, ctx, module);
+            collect_instantiations_in_expr(left, ctx, module, idx);
+            collect_instantiations_in_expr(right, ctx, module, idx);
         }
         Expr::Unary { operand, .. } => {
-            collect_instantiations_in_expr(operand, ctx, module);
+            collect_instantiations_in_expr(operand, ctx, module, idx);
         }
         Expr::PropertyGet { object, .. } => {
-            collect_instantiations_in_expr(object, ctx, module);
+            collect_instantiations_in_expr(object, ctx, module, idx);
         }
         Expr::PropertySet { object, value, .. } => {
-            collect_instantiations_in_expr(object, ctx, module);
-            collect_instantiations_in_expr(value, ctx, module);
+            collect_instantiations_in_expr(object, ctx, module, idx);
+            collect_instantiations_in_expr(value, ctx, module, idx);
         }
         Expr::PropertyUpdate { object, .. } => {
-            collect_instantiations_in_expr(object, ctx, module);
+            collect_instantiations_in_expr(object, ctx, module, idx);
         }
         Expr::IndexGet { object, index } => {
-            collect_instantiations_in_expr(object, ctx, module);
-            collect_instantiations_in_expr(index, ctx, module);
+            collect_instantiations_in_expr(object, ctx, module, idx);
+            collect_instantiations_in_expr(index, ctx, module, idx);
         }
         Expr::IndexSet { object, index, value } => {
-            collect_instantiations_in_expr(object, ctx, module);
-            collect_instantiations_in_expr(index, ctx, module);
-            collect_instantiations_in_expr(value, ctx, module);
+            collect_instantiations_in_expr(object, ctx, module, idx);
+            collect_instantiations_in_expr(index, ctx, module, idx);
+            collect_instantiations_in_expr(value, ctx, module, idx);
         }
         Expr::Object(props) => {
             for (_, v) in props {
-                collect_instantiations_in_expr(v, ctx, module);
+                collect_instantiations_in_expr(v, ctx, module, idx);
             }
         }
         Expr::ObjectSpread { parts } => {
             for (_, v) in parts {
-                collect_instantiations_in_expr(v, ctx, module);
+                collect_instantiations_in_expr(v, ctx, module, idx);
             }
         }
         Expr::Array(elems) => {
             for e in elems {
-                collect_instantiations_in_expr(e, ctx, module);
+                collect_instantiations_in_expr(e, ctx, module, idx);
             }
         }
         Expr::ArraySpread(elems) => {
             for e in elems {
                 match e {
-                    ArrayElement::Expr(expr) => collect_instantiations_in_expr(expr, ctx, module),
-                    ArrayElement::Spread(expr) => collect_instantiations_in_expr(expr, ctx, module),
+                    ArrayElement::Expr(expr) => collect_instantiations_in_expr(expr, ctx, module, idx),
+                    ArrayElement::Spread(expr) => collect_instantiations_in_expr(expr, ctx, module, idx),
                 }
             }
         }
         Expr::Conditional { condition, then_expr, else_expr } => {
-            collect_instantiations_in_expr(condition, ctx, module);
-            collect_instantiations_in_expr(then_expr, ctx, module);
-            collect_instantiations_in_expr(else_expr, ctx, module);
+            collect_instantiations_in_expr(condition, ctx, module, idx);
+            collect_instantiations_in_expr(then_expr, ctx, module, idx);
+            collect_instantiations_in_expr(else_expr, ctx, module, idx);
         }
-        Expr::TypeOf(inner) => collect_instantiations_in_expr(inner, ctx, module),
-        Expr::Void(inner) => collect_instantiations_in_expr(inner, ctx, module),
+        Expr::TypeOf(inner) => collect_instantiations_in_expr(inner, ctx, module, idx),
+        Expr::Void(inner) => collect_instantiations_in_expr(inner, ctx, module, idx),
         Expr::Yield { value, .. } => {
-            if let Some(v) = value { collect_instantiations_in_expr(v, ctx, module); }
+            if let Some(v) = value { collect_instantiations_in_expr(v, ctx, module, idx); }
         }
-        Expr::InstanceOf { expr, .. } => collect_instantiations_in_expr(expr, ctx, module),
-        Expr::Await(inner) => collect_instantiations_in_expr(inner, ctx, module),
+        Expr::InstanceOf { expr, .. } => collect_instantiations_in_expr(expr, ctx, module, idx),
+        Expr::Await(inner) => collect_instantiations_in_expr(inner, ctx, module, idx),
         Expr::SuperCall(args) => {
             for arg in args {
-                collect_instantiations_in_expr(arg, ctx, module);
+                collect_instantiations_in_expr(arg, ctx, module, idx);
             }
         }
         Expr::SuperMethodCall { args, .. } => {
             for arg in args {
-                collect_instantiations_in_expr(arg, ctx, module);
+                collect_instantiations_in_expr(arg, ctx, module, idx);
             }
         }
-        Expr::FsReadFileSync(path) => collect_instantiations_in_expr(path, ctx, module),
+        Expr::FsReadFileSync(path) => collect_instantiations_in_expr(path, ctx, module, idx),
         Expr::FsWriteFileSync(path, content) => {
-            collect_instantiations_in_expr(path, ctx, module);
-            collect_instantiations_in_expr(content, ctx, module);
+            collect_instantiations_in_expr(path, ctx, module, idx);
+            collect_instantiations_in_expr(content, ctx, module, idx);
         }
         Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path) => {
-            collect_instantiations_in_expr(path, ctx, module);
+            collect_instantiations_in_expr(path, ctx, module, idx);
         }
         Expr::FsAppendFileSync(path, content) => {
-            collect_instantiations_in_expr(path, ctx, module);
-            collect_instantiations_in_expr(content, ctx, module);
+            collect_instantiations_in_expr(path, ctx, module, idx);
+            collect_instantiations_in_expr(content, ctx, module, idx);
         }
         Expr::PathJoin(a, b) => {
-            collect_instantiations_in_expr(a, ctx, module);
-            collect_instantiations_in_expr(b, ctx, module);
+            collect_instantiations_in_expr(a, ctx, module, idx);
+            collect_instantiations_in_expr(b, ctx, module, idx);
         }
         Expr::PathDirname(p) | Expr::PathBasename(p) | Expr::PathExtname(p) | Expr::PathResolve(p) | Expr::PathIsAbsolute(p) => {
-            collect_instantiations_in_expr(p, ctx, module);
+            collect_instantiations_in_expr(p, ctx, module, idx);
         }
         Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } | Expr::ArrayPushSpread { source: value, .. } => {
-            collect_instantiations_in_expr(value, ctx, module);
+            collect_instantiations_in_expr(value, ctx, module, idx);
         }
         Expr::ArrayIndexOf { array, value } | Expr::ArrayIncludes { array, value } => {
-            collect_instantiations_in_expr(array, ctx, module);
-            collect_instantiations_in_expr(value, ctx, module);
+            collect_instantiations_in_expr(array, ctx, module, idx);
+            collect_instantiations_in_expr(value, ctx, module, idx);
         }
         Expr::ArraySlice { array, start, end } => {
-            collect_instantiations_in_expr(array, ctx, module);
-            collect_instantiations_in_expr(start, ctx, module);
+            collect_instantiations_in_expr(array, ctx, module, idx);
+            collect_instantiations_in_expr(start, ctx, module, idx);
             if let Some(e) = end {
-                collect_instantiations_in_expr(e, ctx, module);
+                collect_instantiations_in_expr(e, ctx, module, idx);
             }
         }
         Expr::ArraySplice { array_id: _, start, delete_count, items } => {
-            collect_instantiations_in_expr(start, ctx, module);
+            collect_instantiations_in_expr(start, ctx, module, idx);
             if let Some(dc) = delete_count {
-                collect_instantiations_in_expr(dc, ctx, module);
+                collect_instantiations_in_expr(dc, ctx, module, idx);
             }
             for item in items {
-                collect_instantiations_in_expr(item, ctx, module);
+                collect_instantiations_in_expr(item, ctx, module, idx);
             }
         }
         Expr::StringSplit(string, delimiter) => {
-            collect_instantiations_in_expr(string, ctx, module);
-            collect_instantiations_in_expr(delimiter, ctx, module);
+            collect_instantiations_in_expr(string, ctx, module, idx);
+            collect_instantiations_in_expr(delimiter, ctx, module, idx);
         }
         Expr::StringFromCharCode(code) => {
-            collect_instantiations_in_expr(code, ctx, module);
+            collect_instantiations_in_expr(code, ctx, module, idx);
         }
         Expr::MapNew => {}
         Expr::MapSet { map, key, value } => {
-            collect_instantiations_in_expr(map, ctx, module);
-            collect_instantiations_in_expr(key, ctx, module);
-            collect_instantiations_in_expr(value, ctx, module);
+            collect_instantiations_in_expr(map, ctx, module, idx);
+            collect_instantiations_in_expr(key, ctx, module, idx);
+            collect_instantiations_in_expr(value, ctx, module, idx);
         }
         Expr::MapGet { map, key } | Expr::MapHas { map, key } | Expr::MapDelete { map, key } => {
-            collect_instantiations_in_expr(map, ctx, module);
-            collect_instantiations_in_expr(key, ctx, module);
+            collect_instantiations_in_expr(map, ctx, module, idx);
+            collect_instantiations_in_expr(key, ctx, module, idx);
         }
         Expr::MapSize(map) | Expr::MapClear(map) |
         Expr::MapEntries(map) | Expr::MapKeys(map) | Expr::MapValues(map) => {
-            collect_instantiations_in_expr(map, ctx, module);
+            collect_instantiations_in_expr(map, ctx, module, idx);
         }
         Expr::SetNew => {}
-        Expr::SetNewFromArray(expr) => { collect_instantiations_in_expr(expr, ctx, module); }
+        Expr::SetNewFromArray(expr) => { collect_instantiations_in_expr(expr, ctx, module, idx); }
         Expr::SetAdd { set_id: _, value } => {
-            collect_instantiations_in_expr(value, ctx, module);
+            collect_instantiations_in_expr(value, ctx, module, idx);
         }
         Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
-            collect_instantiations_in_expr(set, ctx, module);
-            collect_instantiations_in_expr(value, ctx, module);
+            collect_instantiations_in_expr(set, ctx, module, idx);
+            collect_instantiations_in_expr(value, ctx, module, idx);
         }
         Expr::SetSize(set) | Expr::SetClear(set) | Expr::SetValues(set) => {
-            collect_instantiations_in_expr(set, ctx, module);
+            collect_instantiations_in_expr(set, ctx, module, idx);
         }
         // JSON operations
         Expr::JsonParse(expr) | Expr::JsonStringify(expr) => {
-            collect_instantiations_in_expr(expr, ctx, module);
+            collect_instantiations_in_expr(expr, ctx, module, idx);
         }
         // Math operations
         Expr::MathFloor(expr) | Expr::MathCeil(expr) | Expr::MathRound(expr) |
         Expr::MathAbs(expr) | Expr::MathSqrt(expr) |
         Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) => {
-            collect_instantiations_in_expr(expr, ctx, module);
+            collect_instantiations_in_expr(expr, ctx, module, idx);
         }
         Expr::MathPow(base, exp) | Expr::MathImul(base, exp) => {
-            collect_instantiations_in_expr(base, ctx, module);
-            collect_instantiations_in_expr(exp, ctx, module);
+            collect_instantiations_in_expr(base, ctx, module, idx);
+            collect_instantiations_in_expr(exp, ctx, module, idx);
         }
         Expr::MathMin(args) | Expr::MathMax(args) => {
             for arg in args {
-                collect_instantiations_in_expr(arg, ctx, module);
+                collect_instantiations_in_expr(arg, ctx, module, idx);
             }
         }
         Expr::MathMinSpread(e) | Expr::MathMaxSpread(e) => {
-            collect_instantiations_in_expr(e, ctx, module);
+            collect_instantiations_in_expr(e, ctx, module, idx);
         }
         Expr::MathRandom => {}
         // Crypto operations
         Expr::CryptoRandomBytes(expr) | Expr::CryptoSha256(expr) | Expr::CryptoMd5(expr) => {
-            collect_instantiations_in_expr(expr, ctx, module);
+            collect_instantiations_in_expr(expr, ctx, module, idx);
         }
         Expr::CryptoRandomUUID => {}
         // Date operations
         Expr::DateNow => {}
         Expr::DateNew(timestamp) => {
             if let Some(ts) = timestamp {
-                collect_instantiations_in_expr(ts, ctx, module);
+                collect_instantiations_in_expr(ts, ctx, module, idx);
             }
         }
         Expr::DateGetTime(date) | Expr::DateToISOString(date) |
         Expr::DateGetFullYear(date) | Expr::DateGetMonth(date) | Expr::DateGetDate(date) |
         Expr::DateGetHours(date) | Expr::DateGetMinutes(date) | Expr::DateGetSeconds(date) |
         Expr::DateGetMilliseconds(date) => {
-            collect_instantiations_in_expr(date, ctx, module);
+            collect_instantiations_in_expr(date, ctx, module, idx);
         }
         Expr::Sequence(exprs) => {
             for e in exprs {
-                collect_instantiations_in_expr(e, ctx, module);
+                collect_instantiations_in_expr(e, ctx, module, idx);
             }
         }
         Expr::Closure { body, .. } => {
-            collect_instantiations_in_stmts(body, ctx, module);
+            collect_instantiations_in_stmts(body, ctx, module, idx);
         }
         // Primitives and simple references don't need processing
         _ => {}

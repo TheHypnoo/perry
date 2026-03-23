@@ -245,6 +245,8 @@ struct BuildConfig {
 #[derive(Debug, Deserialize)]
 struct PublishConfig {
     server: Option<String>,
+    /// Extra directories to exclude from the upload tarball (e.g. ["screenshots", "docs"])
+    exclude: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -440,6 +442,14 @@ pub fn run(args: PublishArgs, format: OutputFormat, use_color: bool, _verbose: u
 
 async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> Result<()> {
     let project_dir = args.project.canonicalize().unwrap_or(args.project.clone());
+
+    // Load .env file from project directory (if present) so users can set
+    // PERRY_ANDROID_KEYSTORE_PASSWORD, PERRY_LICENSE_KEY, etc. without
+    // polluting their shell profile.
+    let env_path = project_dir.join(".env");
+    if env_path.exists() {
+        let _ = dotenvy::from_path(&env_path);
+    }
 
     // Load saved config
     let mut saved = load_config();
@@ -1657,7 +1667,10 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         std::io::stdout().flush().ok();
     }
 
-    let tarball = create_project_tarball(&project_dir)
+    let publish_excludes = config.publish.as_ref()
+        .and_then(|p| p.exclude.clone())
+        .unwrap_or_default();
+    let tarball = create_project_tarball_with_excludes(&project_dir, &publish_excludes)
         .context("Failed to create project tarball")?;
 
     let tarball_size = tarball.len();
@@ -2070,11 +2083,15 @@ fn resolve_file_deps(project_dir: &Path) -> Vec<(String, PathBuf)> {
 }
 
 pub(crate) fn create_project_tarball(project_dir: &Path) -> Result<Vec<u8>> {
+    create_project_tarball_with_excludes(project_dir, &[])
+}
+
+pub(crate) fn create_project_tarball_with_excludes(project_dir: &Path, extra_excludes: &[String]) -> Result<Vec<u8>> {
     let buf = Vec::new();
     let encoder = GzEncoder::new(buf, Compression::default());
     let mut ar = tar::Builder::new(encoder);
 
-    let exclude_dirs = [
+    let builtin_exclude_dirs: Vec<&str> = vec![
         "node_modules",
         ".git",
         "dist",
@@ -2089,7 +2106,10 @@ pub(crate) fn create_project_tarball(project_dir: &Path) -> Result<Vec<u8>> {
         .into_iter()
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
-            if exclude_dirs.iter().any(|ex| name == *ex) {
+            if builtin_exclude_dirs.iter().any(|ex| name == *ex) {
+                return false;
+            }
+            if extra_excludes.iter().any(|ex| name == *ex) {
                 return false;
             }
             if name.ends_with(".app") {

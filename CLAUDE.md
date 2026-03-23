@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.0
+**Current Version:** 0.4.1
 
 ## Workflow Requirements
 
@@ -139,6 +139,13 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.1
+- Performance: Set O(n)→O(1) via HashMap side-table, string comparison via SIMD memcmp
+- Performance: GC pass consolidation (4→3 passes), expanded `_unchecked` array access paths in codegen
+- Performance: BTreeMap→HashMap across codegen Compiler struct (20+ fields), `Cow<'static, str>` for 950 extern func keys
+- Performance: HashMap indices for HIR lowering (functions, classes, imports) and monomorphization lookups
+- Tests: 50+ new Rust unit tests for Set, GC, Array, String, HIR lowering, monomorphization
 
 ### v0.4.0
 - `perry/thread` module: `parallelMap`, `parallelFilter`, and `spawn` — real OS threads with compile-time safety. `SerializedValue` deep-copy, thread-local arenas with `Drop`, promise integration via `PENDING_THREAD_RESULTS`.

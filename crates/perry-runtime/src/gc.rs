@@ -262,10 +262,9 @@ fn gc_collect_inner() {
     trace_marked_objects(&valid_ptrs);
 
     // === SWEEP PHASE ===
+    // sweep() now clears mark bits on surviving objects inline,
+    // eliminating 2 redundant heap walks (arena + malloc).
     let freed_bytes = sweep();
-
-    // Clear mark bits on survivors
-    clear_marks();
 
     let elapsed_us = start.elapsed().as_micros() as u64;
 
@@ -834,7 +833,8 @@ fn sweep() -> u64 {
             let header = list[i];
             unsafe {
                 if (*header).gc_flags & GC_FLAG_PINNED != 0 {
-                    // Pinned objects are always kept alive
+                    // Pinned objects are always kept alive — clear mark bit inline
+                    (*header).gc_flags &= !GC_FLAG_MARKED;
                     i += 1;
                     continue;
                 }
@@ -867,6 +867,8 @@ fn sweep() -> u64 {
                     list.swap_remove(i);
                     // Don't increment i — swap_remove moved last element here
                 } else {
+                    // Surviving object — clear mark bit inline to avoid separate heap walk
+                    (*header).gc_flags &= !GC_FLAG_MARKED;
                     i += 1;
                 }
             }
@@ -878,6 +880,8 @@ fn sweep() -> u64 {
         let header = header_ptr as *mut GcHeader;
         unsafe {
             if (*header).gc_flags & GC_FLAG_PINNED != 0 {
+                // Pinned objects are always kept alive — clear mark bit inline
+                (*header).gc_flags &= !GC_FLAG_MARKED;
                 return;
             }
             if (*header).gc_flags & GC_FLAG_MARKED == 0 {
@@ -900,6 +904,9 @@ fn sweep() -> u64 {
                 ARENA_FREE_LIST.with(|fl| {
                     fl.borrow_mut().push((user_ptr, payload_size));
                 });
+            } else {
+                // Surviving object — clear mark bit inline to avoid separate heap walk
+                (*header).gc_flags &= !GC_FLAG_MARKED;
             }
         }
     });
@@ -989,4 +996,174 @@ pub extern "C" fn js_gc_stats(out_collections: *mut u64, out_freed: *mut u64, ou
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gc_malloc_basic() {
+        // Allocate a string-type object
+        let ptr = gc_malloc(64, GC_TYPE_STRING);
+        assert!(!ptr.is_null());
+
+        // Verify header is set correctly
+        unsafe {
+            let header = header_from_user_ptr(ptr);
+            assert_eq!((*header).obj_type, GC_TYPE_STRING);
+            assert_eq!((*header).gc_flags, 0); // not arena, not marked
+            assert_eq!((*header).size as usize, GC_HEADER_SIZE + 64);
+        }
+
+        // Verify it's tracked in MALLOC_OBJECTS
+        let tracked = MALLOC_SET.with(|set| {
+            let header = unsafe { header_from_user_ptr(ptr) };
+            set.borrow().contains(&(header as usize))
+        });
+        assert!(tracked, "allocated object should be tracked in MALLOC_SET");
+    }
+
+    #[test]
+    fn test_gc_malloc_different_types() {
+        let string_ptr = gc_malloc(32, GC_TYPE_STRING);
+        let closure_ptr = gc_malloc(48, GC_TYPE_CLOSURE);
+        let bigint_ptr = gc_malloc(16, GC_TYPE_BIGINT);
+
+        unsafe {
+            assert_eq!((*header_from_user_ptr(string_ptr)).obj_type, GC_TYPE_STRING);
+            assert_eq!((*header_from_user_ptr(closure_ptr)).obj_type, GC_TYPE_CLOSURE);
+            assert_eq!((*header_from_user_ptr(bigint_ptr)).obj_type, GC_TYPE_BIGINT);
+        }
+    }
+
+    #[test]
+    fn test_gc_collect_updates_stats() {
+        // Get initial stats
+        let initial_count = GC_STATS.with(|s| s.borrow().collection_count);
+
+        // Run GC
+        gc_collect_inner();
+
+        // Stats should have incremented
+        let new_count = GC_STATS.with(|s| s.borrow().collection_count);
+        assert_eq!(new_count, initial_count + 1, "collection count should increment");
+    }
+
+    #[test]
+    fn test_gc_header_size() {
+        assert_eq!(GC_HEADER_SIZE, 8, "GC header should be 8 bytes");
+    }
+
+    #[test]
+    fn test_gc_realloc_basic() {
+        let ptr = gc_malloc(32, GC_TYPE_STRING);
+        assert!(!ptr.is_null());
+
+        // Write some data
+        unsafe {
+            std::ptr::write_bytes(ptr, 0xAB, 32);
+        }
+
+        // Reallocate to larger size
+        let new_ptr = gc_realloc(ptr, 128);
+        assert!(!new_ptr.is_null());
+
+        // Verify old data preserved (first 32 bytes should still be 0xAB)
+        unsafe {
+            for i in 0..32 {
+                assert_eq!(*new_ptr.add(i), 0xAB,
+                    "byte {} should be preserved after realloc", i);
+            }
+        }
+
+        // Verify tracking updated
+        let tracked = MALLOC_SET.with(|set| {
+            let header = unsafe { header_from_user_ptr(new_ptr) };
+            set.borrow().contains(&(header as usize))
+        });
+        assert!(tracked, "reallocated object should be tracked");
+    }
+
+    #[test]
+    fn test_gc_realloc_null_allocates_fresh() {
+        let ptr = gc_realloc(std::ptr::null_mut(), 64);
+        assert!(!ptr.is_null(), "realloc(null) should allocate fresh");
+    }
+
+    #[test]
+    fn test_gc_mark_flags() {
+        let ptr = gc_malloc(32, GC_TYPE_STRING);
+        unsafe {
+            let header = header_from_user_ptr(ptr);
+
+            // Initially not marked
+            assert_eq!((*header).gc_flags & GC_FLAG_MARKED, 0);
+
+            // Mark it
+            (*header).gc_flags |= GC_FLAG_MARKED;
+            assert_ne!((*header).gc_flags & GC_FLAG_MARKED, 0);
+
+            // Clear mark
+            (*header).gc_flags &= !GC_FLAG_MARKED;
+            assert_eq!((*header).gc_flags & GC_FLAG_MARKED, 0);
+        }
+    }
+
+    #[test]
+    fn test_gc_pinned_flag() {
+        let ptr = gc_malloc(32, GC_TYPE_STRING);
+        unsafe {
+            let header = header_from_user_ptr(ptr);
+
+            // Pin it
+            (*header).gc_flags |= GC_FLAG_PINNED;
+
+            // Run GC - pinned objects should survive
+            gc_collect_inner();
+
+            // Verify still tracked
+            let tracked = MALLOC_SET.with(|set| {
+                set.borrow().contains(&(header as usize))
+            });
+            assert!(tracked, "pinned object should survive GC");
+
+            // Unpin
+            (*header).gc_flags &= !GC_FLAG_PINNED;
+        }
+    }
+
+    #[test]
+    fn test_build_valid_pointer_set() {
+        // Allocate some objects
+        let ptr1 = gc_malloc(32, GC_TYPE_STRING);
+        let ptr2 = gc_malloc(64, GC_TYPE_CLOSURE);
+
+        let valid_set = build_valid_pointer_set();
+
+        // Our malloc objects should be in the valid set
+        assert!(valid_set.contains(&(ptr1 as usize)), "ptr1 should be in valid set");
+        assert!(valid_set.contains(&(ptr2 as usize)), "ptr2 should be in valid set");
+    }
+
+    #[test]
+    fn test_clear_marks_resets_all() {
+        // Allocate and mark some objects
+        let ptr1 = gc_malloc(32, GC_TYPE_STRING);
+        let ptr2 = gc_malloc(64, GC_TYPE_CLOSURE);
+
+        unsafe {
+            (*header_from_user_ptr(ptr1)).gc_flags |= GC_FLAG_MARKED;
+            (*header_from_user_ptr(ptr2)).gc_flags |= GC_FLAG_MARKED;
+        }
+
+        clear_marks();
+
+        unsafe {
+            assert_eq!((*header_from_user_ptr(ptr1)).gc_flags & GC_FLAG_MARKED, 0,
+                "mark should be cleared on ptr1");
+            assert_eq!((*header_from_user_ptr(ptr2)).gc_flags & GC_FLAG_MARKED, 0,
+                "mark should be cleared on ptr2");
+        }
+    }
 }

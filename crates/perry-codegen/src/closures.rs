@@ -9,7 +9,7 @@ use cranelift_codegen::ir::AbiParam;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Init, Linkage, Module};
 use cranelift_object::ObjectModule;
-use std::collections::BTreeMap;
+use std::collections::{HashMap, HashSet};
 
 use perry_hir::{
     UpdateOp,
@@ -1136,13 +1136,13 @@ impl crate::codegen::Compiler {
 
     /// Collect FuncRef expressions that are used as values (not as call callees)
     /// These need wrapper functions for closure-compatible calling convention
-    pub(crate) fn collect_func_refs_needing_wrappers_from_stmts(&self, stmts: &[Stmt], func_refs: &mut std::collections::BTreeSet<u32>) {
+    pub(crate) fn collect_func_refs_needing_wrappers_from_stmts(&self, stmts: &[Stmt], func_refs: &mut HashSet<u32>) {
         for stmt in stmts {
             self.collect_func_refs_from_stmt(stmt, func_refs);
         }
     }
 
-    pub(crate) fn collect_func_refs_from_stmt(&self, stmt: &Stmt, func_refs: &mut std::collections::BTreeSet<u32>) {
+    pub(crate) fn collect_func_refs_from_stmt(&self, stmt: &Stmt, func_refs: &mut HashSet<u32>) {
         match stmt {
             Stmt::Let { init: Some(expr), .. } => {
                 self.collect_func_refs_from_expr(expr, func_refs);
@@ -1180,7 +1180,7 @@ impl crate::codegen::Compiler {
         }
     }
 
-    pub(crate) fn collect_func_refs_from_expr(&self, expr: &Expr, func_refs: &mut std::collections::BTreeSet<u32>) {
+    pub(crate) fn collect_func_refs_from_expr(&self, expr: &Expr, func_refs: &mut HashSet<u32>) {
         match expr {
             Expr::Call { callee, args, .. } => {
                 // Callee FuncRef is NOT a wrapper candidate (it's being called directly)
@@ -1354,7 +1354,7 @@ impl crate::codegen::Compiler {
             builder.def_var(closure_ptr_var, closure_ptr);
 
             // Create variables for regular parameters
-            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
             let mut next_var = 1usize;
 
             for (i, param) in params.iter().enumerate() {
@@ -1715,19 +1715,19 @@ impl crate::codegen::Compiler {
                         native_parent: None,
                         own_field_count: 0,
                         field_count: 0,
-                        field_indices: std::collections::BTreeMap::new(),
-                        field_types: std::collections::BTreeMap::new(),
+                        field_indices: std::collections::HashMap::new(),
+                        field_types: std::collections::HashMap::new(),
                         constructor_id: None,
-                        method_ids: std::collections::BTreeMap::new(),
-                        getter_ids: std::collections::BTreeMap::new(),
-                        setter_ids: std::collections::BTreeMap::new(),
-                        static_method_ids: std::collections::BTreeMap::new(),
-                        static_field_ids: std::collections::BTreeMap::new(),
-                        method_param_counts: std::collections::BTreeMap::new(),
-                        method_return_types: std::collections::BTreeMap::new(),
-                        static_method_return_types: std::collections::BTreeMap::new(),
+                        method_ids: std::collections::HashMap::new(),
+                        getter_ids: std::collections::HashMap::new(),
+                        setter_ids: std::collections::HashMap::new(),
+                        static_method_ids: std::collections::HashMap::new(),
+                        static_field_ids: std::collections::HashMap::new(),
+                        method_param_counts: std::collections::HashMap::new(),
+                        method_return_types: std::collections::HashMap::new(),
+                        static_method_return_types: std::collections::HashMap::new(),
                         type_params: Vec::new(),
-                        field_inits: std::collections::BTreeMap::new(),
+                        field_inits: std::collections::HashMap::new(),
                     }
                 });
                 Some(ThisContext {

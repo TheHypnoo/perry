@@ -10,7 +10,8 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Init, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use perry_hir::{
@@ -31,36 +32,36 @@ pub struct Compiler {
     /// Function builder context (reused across functions)
     pub(crate) func_ctx: FunctionBuilderContext,
     /// Mapping from HIR function IDs to Cranelift function IDs
-    pub(crate) func_ids: BTreeMap<u32, cranelift_module::FuncId>,
+    pub(crate) func_ids: HashMap<u32, cranelift_module::FuncId>,
     /// Mapping from external function names to their IDs
-    pub(crate) extern_funcs: BTreeMap<String, cranelift_module::FuncId>,
+    pub(crate) extern_funcs: HashMap<Cow<'static, str>, cranelift_module::FuncId>,
     /// Class metadata: class name -> metadata
-    pub(crate) classes: BTreeMap<String, ClassMeta>,
+    pub(crate) classes: HashMap<String, ClassMeta>,
     /// Enum member values: (enum_name, member_name) -> value
-    pub(crate) enums: BTreeMap<(String, String), EnumMemberValue>,
+    pub(crate) enums: HashMap<(String, String), EnumMemberValue>,
     /// String literal data: string content -> data ID
-    pub(crate) string_data: BTreeMap<String, cranelift_module::DataId>,
+    pub(crate) string_data: HashMap<String, cranelift_module::DataId>,
     /// Closure function IDs: closure HIR func_id -> Cranelift func_id
-    pub(crate) closure_func_ids: BTreeMap<u32, cranelift_module::FuncId>,
+    pub(crate) closure_func_ids: HashMap<u32, cranelift_module::FuncId>,
     /// Set of async function IDs (for proper return type handling)
-    pub(crate) async_func_ids: std::collections::BTreeSet<u32>,
+    pub(crate) async_func_ids: HashSet<u32>,
     /// Set of function IDs that return closures
-    pub(crate) closure_returning_funcs: std::collections::BTreeSet<u32>,
+    pub(crate) closure_returning_funcs: HashSet<u32>,
     /// Wrapper functions for named functions used as callbacks: HIR func_id -> wrapper Cranelift func_id
-    pub(crate) func_wrapper_ids: BTreeMap<u32, cranelift_module::FuncId>,
+    pub(crate) func_wrapper_ids: HashMap<u32, cranelift_module::FuncId>,
     /// HIR functions (needed for wrapper generation)
     pub(crate) hir_functions: Vec<Function>,
     /// Function parameter ABI types: func_id -> Vec<abi_type>
-    pub(crate) func_param_types: BTreeMap<u32, Vec<types::Type>>,
+    pub(crate) func_param_types: HashMap<u32, Vec<types::Type>>,
     /// Function return ABI types: func_id -> abi_type
-    pub(crate) func_return_types: BTreeMap<u32, types::Type>,
+    pub(crate) func_return_types: HashMap<u32, types::Type>,
     /// Function HIR return types: func_id -> full HirType (for detecting Map, Set, etc.)
-    pub(crate) func_hir_return_types: BTreeMap<u32, perry_types::Type>,
+    pub(crate) func_hir_return_types: HashMap<u32, perry_types::Type>,
     /// Rest parameter info: func_id -> index of rest parameter (if any)
     /// The rest parameter collects all arguments from this index onwards into an array
-    pub(crate) func_rest_param_index: BTreeMap<u32, usize>,
+    pub(crate) func_rest_param_index: HashMap<u32, usize>,
     /// Union parameter info: func_id -> Vec<bool> (true if parameter is union type)
-    pub(crate) func_union_params: BTreeMap<u32, Vec<bool>>,
+    pub(crate) func_union_params: HashMap<u32, Vec<bool>>,
     /// Whether the JS runtime is needed for this module
     pub(crate) needs_js_runtime: bool,
     /// Whether perry-stdlib is needed (controls stdlib function declarations)
@@ -74,38 +75,38 @@ pub struct Compiler {
     /// JavaScript module specifiers that need to be loaded at runtime
     pub(crate) js_modules: Vec<String>,
     /// Exported native instance data IDs: variable name -> data ID
-    pub(crate) exported_native_instance_ids: BTreeMap<String, cranelift_module::DataId>,
+    pub(crate) exported_native_instance_ids: HashMap<String, cranelift_module::DataId>,
     /// Exported object literal data IDs: variable name -> data ID
-    pub(crate) exported_object_ids: BTreeMap<String, cranelift_module::DataId>,
+    pub(crate) exported_object_ids: HashMap<String, cranelift_module::DataId>,
     /// Exported function data IDs: function name -> (data ID, FuncId)
     /// These are functions that need globals so they can be passed as values to other modules
-    pub(crate) exported_function_ids: BTreeMap<String, (cranelift_module::DataId, u32)>,
+    pub(crate) exported_function_ids: HashMap<String, (cranelift_module::DataId, u32)>,
     /// Module-level variable data IDs: LocalId -> data ID
     /// These are variables defined at module scope that need to be accessible from functions
-    pub(crate) module_var_data_ids: BTreeMap<LocalId, cranelift_module::DataId>,
+    pub(crate) module_var_data_ids: HashMap<LocalId, cranelift_module::DataId>,
     /// Module-level variable info: LocalId -> LocalInfo
     /// Populated during compile_init, used by compile_function for GlobalGet
-    pub(crate) module_level_locals: BTreeMap<LocalId, LocalInfo>,
+    pub(crate) module_level_locals: HashMap<LocalId, LocalInfo>,
     /// Imported function parameter counts: function name -> param count
     /// Used to ensure consistent wrapper signatures for functions with optional params
-    pub(crate) imported_func_param_counts: BTreeMap<String, usize>,
+    pub(crate) imported_func_param_counts: HashMap<String, usize>,
     /// Imported function return types: function name -> HIR return type
     /// Used to resolve types for await expressions on cross-module async function calls
-    pub(crate) imported_func_return_types: BTreeMap<String, perry_types::Type>,
+    pub(crate) imported_func_return_types: HashMap<String, perry_types::Type>,
     /// Module symbol prefix for scoping cross-module symbols (sanitized module path)
     pub(crate) module_symbol_prefix: String,
     /// Mapping from imported function name -> source module's symbol prefix
     /// Used to construct the correct scoped wrapper name when calling cross-module functions
-    pub(crate) import_module_prefixes: BTreeMap<String, String>,
+    pub(crate) import_module_prefixes: HashMap<String, String>,
     /// Maps local import name -> full scoped export name for imports where local != export name.
     /// E.g., `import bs58 from 'bs58'` maps "bs58" -> "__export_{bs58_prefix}__default".
-    pub(crate) import_local_to_scoped: BTreeMap<String, String>,
+    pub(crate) import_local_to_scoped: HashMap<String, String>,
     /// Pre-declared import wrapper function IDs: unscoped func_name -> (scoped FuncId, param_count)
     /// Populated by pre_declare_import_wrapper before compile_module
-    pub(crate) pre_declared_import_wrappers: BTreeMap<String, (cranelift_module::FuncId, usize)>,
+    pub(crate) pre_declared_import_wrappers: HashMap<String, (cranelift_module::FuncId, usize)>,
     /// Set of import names that are namespace imports (import * as X from './module')
     /// Used to intercept PropertyGet(ExternFuncRef { name: X }, prop) and resolve prop directly
-    pub(crate) namespace_imports: std::collections::BTreeSet<String>,
+    pub(crate) namespace_imports: HashSet<String>,
     /// Static fields that need runtime initialization (strings, expressions)
     /// Collected during compile_static_field, processed in compile_init
     pub(crate) static_field_runtime_inits: Vec<(cranelift_module::DataId, Expr)>,
@@ -229,39 +230,39 @@ impl Compiler {
             module,
             ctx,
             func_ctx: FunctionBuilderContext::new(),
-            func_ids: BTreeMap::new(),
-            extern_funcs: BTreeMap::new(),
-            classes: BTreeMap::new(),
-            enums: BTreeMap::new(),
-            string_data: BTreeMap::new(),
-            closure_func_ids: BTreeMap::new(),
-            async_func_ids: std::collections::BTreeSet::new(),
-            closure_returning_funcs: std::collections::BTreeSet::new(),
-            func_wrapper_ids: BTreeMap::new(),
+            func_ids: HashMap::new(),
+            extern_funcs: HashMap::new(),
+            classes: HashMap::new(),
+            enums: HashMap::new(),
+            string_data: HashMap::new(),
+            closure_func_ids: HashMap::new(),
+            async_func_ids: HashSet::new(),
+            closure_returning_funcs: HashSet::new(),
+            func_wrapper_ids: HashMap::new(),
             hir_functions: Vec::new(),
-            func_param_types: BTreeMap::new(),
-            func_return_types: BTreeMap::new(),
-            func_hir_return_types: BTreeMap::new(),
-            func_rest_param_index: BTreeMap::new(),
-            func_union_params: BTreeMap::new(),
+            func_param_types: HashMap::new(),
+            func_return_types: HashMap::new(),
+            func_hir_return_types: HashMap::new(),
+            func_rest_param_index: HashMap::new(),
+            func_union_params: HashMap::new(),
             needs_js_runtime: false,
             needs_stdlib: true,  // Default to true for backwards compatibility
             needs_dotenv_init: false,
             is_entry_module: true,  // Default to true for single-module compilation
             native_module_inits: Vec::new(),
             js_modules: Vec::new(),
-            exported_native_instance_ids: BTreeMap::new(),
-            exported_object_ids: BTreeMap::new(),
-            exported_function_ids: BTreeMap::new(),
-            module_var_data_ids: BTreeMap::new(),
-            module_level_locals: BTreeMap::new(),
-            imported_func_param_counts: BTreeMap::new(),
-            imported_func_return_types: BTreeMap::new(),
+            exported_native_instance_ids: HashMap::new(),
+            exported_object_ids: HashMap::new(),
+            exported_function_ids: HashMap::new(),
+            module_var_data_ids: HashMap::new(),
+            module_level_locals: HashMap::new(),
+            imported_func_param_counts: HashMap::new(),
+            imported_func_return_types: HashMap::new(),
             module_symbol_prefix: String::new(),
-            import_module_prefixes: BTreeMap::new(),
-            import_local_to_scoped: BTreeMap::new(),
-            pre_declared_import_wrappers: BTreeMap::new(),
-            namespace_imports: std::collections::BTreeSet::new(),
+            import_module_prefixes: HashMap::new(),
+            import_local_to_scoped: HashMap::new(),
+            pre_declared_import_wrappers: HashMap::new(),
+            namespace_imports: HashSet::new(),
             static_field_runtime_inits: Vec::new(),
             output_type: "executable".to_string(),
             bundled_extensions: Vec::new(),
@@ -419,7 +420,7 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::F64));
         }
         sig.returns.push(AbiParam::new(types::F64));
-        let key = format!("__scoped_wrapper__{}", func_name);
+        let key: Cow<'static, str> = format!("__scoped_wrapper__{}", func_name).into();
         match self.module.declare_function(&scoped_name, Linkage::Import, &sig) {
             Ok(func_id) => {
                 self.extern_funcs.insert(key, func_id);
@@ -443,8 +444,8 @@ impl Compiler {
     /// Used when local name differs from export name (e.g., default imports).
     pub fn register_import_wrapper_alias(&mut self, local_name: &str, export_name: &str, param_count: usize) {
         let export_key = format!("__scoped_wrapper__{}", export_name);
-        if let Some(&func_id) = self.extern_funcs.get(&export_key) {
-            let local_key = format!("__scoped_wrapper__{}", local_name);
+        if let Some(&func_id) = self.extern_funcs.get(export_key.as_str()) {
+            let local_key: Cow<'static, str> = format!("__scoped_wrapper__{}", local_name).into();
             self.extern_funcs.insert(local_key, func_id);
             self.imported_func_param_counts.entry(local_name.to_string()).or_insert(param_count);
         }
@@ -491,21 +492,21 @@ impl Compiler {
         }
 
         // Build field indices and types
-        let mut field_indices = BTreeMap::new();
-        let mut field_types = BTreeMap::new();
+        let mut field_indices = HashMap::new();
+        let mut field_types = HashMap::new();
         for (i, field) in class.fields.iter().enumerate() {
             field_indices.insert(field.name.clone(), i as u32);
             field_types.insert(field.name.clone(), field.ty.clone());
         }
 
         // Collect method return types
-        let mut method_return_types = BTreeMap::new();
+        let mut method_return_types = HashMap::new();
         for method in &class.methods {
             method_return_types.insert(method.name.clone(), method.return_type.clone());
         }
 
         // Collect static method return types
-        let mut static_method_return_types = BTreeMap::new();
+        let mut static_method_return_types = HashMap::new();
         for method in &class.static_methods {
             static_method_return_types.insert(method.name.clone(), method.return_type.clone());
         }
@@ -514,7 +515,7 @@ impl Compiler {
         let type_params: Vec<String> = class.type_params.iter().map(|tp| tp.name.clone()).collect();
 
         // Collect field default initializer expressions
-        let mut field_inits = BTreeMap::new();
+        let mut field_inits = HashMap::new();
         for field in &class.fields {
             if let Some(ref init) = field.init {
                 field_inits.insert(field.name.clone(), init.clone());
@@ -532,12 +533,12 @@ impl Compiler {
             field_indices,
             field_types,
             constructor_id: None,
-            method_ids: BTreeMap::new(),
-            method_param_counts: BTreeMap::new(),
-            getter_ids: BTreeMap::new(),
-            setter_ids: BTreeMap::new(),
-            static_method_ids: BTreeMap::new(),
-            static_field_ids: BTreeMap::new(),
+            method_ids: HashMap::new(),
+            method_param_counts: HashMap::new(),
+            getter_ids: HashMap::new(),
+            setter_ids: HashMap::new(),
+            static_method_ids: HashMap::new(),
+            static_field_ids: HashMap::new(),
             method_return_types,
             static_method_return_types,
             type_params,
@@ -1114,7 +1115,7 @@ impl Compiler {
         // function from a native library manifest, remap the func_id to the extern function.
         // Also override func_param_types with the manifest's declared types so that
         // call-site argument coercion (f64→i64 for string pointers) works correctly.
-        let native_lib_param_types: BTreeMap<String, Vec<types::Type>> = self.native_library_functions.iter()
+        let native_lib_param_types: HashMap<String, Vec<types::Type>> = self.native_library_functions.iter()
             .map(|(name, params, _)| {
                 let types: Vec<types::Type> = params.iter().map(|p| Self::parse_cranelift_type(p)).collect();
                 (name.clone(), types)
@@ -1122,7 +1123,7 @@ impl Compiler {
             .collect();
         for func in &hir.functions {
             if func.body.is_empty() {
-                if let Some(extern_id) = self.extern_funcs.get(&func.name) {
+                if let Some(extern_id) = self.extern_funcs.get(func.name.as_str()) {
                     self.func_ids.insert(func.id, *extern_id);
                     // Override param types from the native library manifest
                     if let Some(manifest_types) = native_lib_param_types.get(&func.name) {
@@ -1220,7 +1221,7 @@ impl Compiler {
 
         // Collect FuncRef expressions that need closure-compatible wrappers
         // NOTE: This must be done BEFORE compiling closures, as closures may use FuncRefs
-        let mut func_refs_needing_wrappers: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        let mut func_refs_needing_wrappers: HashSet<u32> = HashSet::new();
         for func in &hir.functions {
             self.collect_func_refs_needing_wrappers_from_stmts(&func.body, &mut func_refs_needing_wrappers);
         }

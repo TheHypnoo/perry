@@ -6,12 +6,55 @@
 
 use std::alloc::{alloc, realloc, Layout};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::ptr;
 use crate::string::StringHeader;
 
 thread_local! {
     static SET_REGISTRY: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+}
+
+/// A wrapper around f64 JSValues that implements Hash and Eq using
+/// content-based comparison for strings (matching jsvalue_eq semantics).
+#[derive(Clone)]
+struct JSValueKey(f64);
+
+impl Hash for JSValueKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let bits = self.0.to_bits();
+        let ptr = extract_string_ptr_from_value(bits);
+        if !ptr.is_null() && (ptr as usize) >= 0x1000 {
+            // String value: hash by content so that identical strings
+            // with different pointers/tags produce the same hash.
+            unsafe {
+                let len = (*ptr).length;
+                // Use a distinct domain tag so string hashes don't collide
+                // with non-string bit patterns.
+                0xFFFF_FFFFu32.hash(state);
+                len.hash(state);
+                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                let slice = std::slice::from_raw_parts(data, len as usize);
+                slice.hash(state);
+            }
+        } else {
+            bits.hash(state);
+        }
+    }
+}
+
+impl PartialEq for JSValueKey {
+    fn eq(&self, other: &Self) -> bool {
+        jsvalue_eq(self.0, other.0)
+    }
+}
+impl Eq for JSValueKey {}
+
+/// Side-table mapping set_ptr -> (JSValueKey -> index_in_elements).
+/// Provides O(1) lookup for `find_value_index` instead of O(n) linear scan.
+thread_local! {
+    static SET_INDEX: RefCell<HashMap<usize, HashMap<JSValueKey, u32>>> =
+        RefCell::new(HashMap::new());
 }
 
 fn register_set(ptr: *mut SetHeader) {
@@ -70,6 +113,10 @@ unsafe fn strings_equal(a: *const StringHeader, b: *const StringHeader) -> bool 
     if a.is_null() || b.is_null() || (a as usize) < 0x1000 || (b as usize) < 0x1000 {
         return a == b;
     }
+    // Fast path: same pointer means same string
+    if std::ptr::eq(a, b) {
+        return true;
+    }
     let len_a = (*a).length;
     let len_b = (*b).length;
     if len_a != len_b {
@@ -77,12 +124,10 @@ unsafe fn strings_equal(a: *const StringHeader, b: *const StringHeader) -> bool 
     }
     let data_a = (a as *const u8).add(std::mem::size_of::<StringHeader>());
     let data_b = (b as *const u8).add(std::mem::size_of::<StringHeader>());
-    for i in 0..len_a as usize {
-        if *data_a.add(i) != *data_b.add(i) {
-            return false;
-        }
-    }
-    true
+    // Use slice comparison which leverages SIMD-optimized memcmp
+    let slice_a = std::slice::from_raw_parts(data_a, len_a as usize);
+    let slice_b = std::slice::from_raw_parts(data_b, len_a as usize);
+    slice_a == slice_b
 }
 
 /// Extract a string pointer from a value that might be NaN-boxed with various tags.
@@ -122,19 +167,20 @@ fn jsvalue_eq(a: f64, b: f64) -> bool {
     false
 }
 
-/// Find the index of a value in the set, or -1 if not found
+/// Find the index of a value in the set, or -1 if not found.
+/// Uses the O(1) hash index side-table.
 unsafe fn find_value_index(set: *const SetHeader, value: f64) -> i32 {
-    let size = (*set).size;
-    let elements = elements_ptr(set);
-
-    for i in 0..size {
-        let element = ptr::read(elements.add(i as usize));
-        if jsvalue_eq(element, value) {
-            return i as i32;
+    SET_INDEX.with(|idx| {
+        let idx = idx.borrow();
+        if let Some(map) = idx.get(&(set as usize)) {
+            if let Some(&index) = map.get(&JSValueKey(value)) {
+                if index < (*set).size {
+                    return index as i32;
+                }
+            }
         }
-    }
-
-    -1
+        -1
+    })
 }
 
 /// Grow the elements array if needed (header stays at same address)
@@ -184,6 +230,11 @@ pub extern "C" fn js_set_alloc(capacity: u32) -> *mut SetHeader {
         // Register in set registry for runtime type detection
         register_set(ptr);
 
+        // Initialize O(1) lookup index
+        SET_INDEX.with(|idx| {
+            idx.borrow_mut().insert(ptr as usize, HashMap::new());
+        });
+
         ptr
     }
 }
@@ -232,6 +283,14 @@ pub extern "C" fn js_set_add(set: *mut SetHeader, value: f64) -> *mut SetHeader 
         // Write the value
         ptr::write(elements.add(size as usize), value);
 
+        // Update the hash index
+        SET_INDEX.with(|idx| {
+            let mut idx = idx.borrow_mut();
+            if let Some(map) = idx.get_mut(&(set as usize)) {
+                map.insert(JSValueKey(value), size);
+            }
+        });
+
         (*set).size = size + 1;
         set
     }
@@ -260,6 +319,22 @@ pub extern "C" fn js_set_delete(set: *mut SetHeader, value: f64) -> i32 {
         let size = (*set).size;
         let elements = elements_ptr_mut(set);
 
+        // Update the hash index: remove the deleted value,
+        // and if we swap-remove, update the swapped element's index.
+        SET_INDEX.with(|sidx| {
+            let mut sidx = sidx.borrow_mut();
+            if let Some(map) = sidx.get_mut(&(set as usize)) {
+                map.remove(&JSValueKey(value));
+                if (idx as u32) < size - 1 {
+                    let last_value = ptr::read(elements.add((size - 1) as usize));
+                    // Update the last element's index to the position of the deleted element
+                    if let Some(entry) = map.get_mut(&JSValueKey(last_value)) {
+                        *entry = idx as u32;
+                    }
+                }
+            }
+        });
+
         // If not the last element, swap with the last element
         if (idx as u32) < size - 1 {
             let last_value = ptr::read(elements.add((size - 1) as usize));
@@ -277,6 +352,12 @@ pub extern "C" fn js_set_clear(set: *mut SetHeader) {
     unsafe {
         (*set).size = 0;
     }
+    SET_INDEX.with(|idx| {
+        let mut idx = idx.borrow_mut();
+        if let Some(map) = idx.get_mut(&(set as usize)) {
+            map.clear();
+        }
+    });
 }
 
 /// Convert a Set to an Array (for Array.from(set))
@@ -316,4 +397,261 @@ pub extern "C" fn js_set_from_array(arr: *const crate::array::ArrayHeader) -> *m
         }
     }
     set
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::string::js_string_from_bytes;
+
+    #[test]
+    fn test_set_add_and_has() {
+        let set = js_set_alloc(4);
+        js_set_add(set, 1.0);
+        js_set_add(set, 2.0);
+        js_set_add(set, 3.0);
+
+        assert_eq!(js_set_has(set, 1.0), 1);
+        assert_eq!(js_set_has(set, 2.0), 1);
+        assert_eq!(js_set_has(set, 3.0), 1);
+        assert_eq!(js_set_has(set, 4.0), 0);
+        assert_eq!(js_set_has(set, 0.0), 0);
+    }
+
+    #[test]
+    fn test_set_add_duplicate() {
+        let set = js_set_alloc(4);
+        js_set_add(set, 42.0);
+        js_set_add(set, 42.0);
+        js_set_add(set, 42.0);
+
+        assert_eq!(js_set_size(set), 1);
+    }
+
+    #[test]
+    fn test_set_delete() {
+        let set = js_set_alloc(4);
+        js_set_add(set, 1.0);
+        js_set_add(set, 2.0);
+        js_set_add(set, 3.0);
+
+        // Delete existing value
+        assert_eq!(js_set_delete(set, 2.0), 1);
+        assert_eq!(js_set_size(set), 2);
+        assert_eq!(js_set_has(set, 2.0), 0);
+
+        // Other values still present
+        assert_eq!(js_set_has(set, 1.0), 1);
+        assert_eq!(js_set_has(set, 3.0), 1);
+
+        // Delete non-existing value
+        assert_eq!(js_set_delete(set, 99.0), 0);
+        assert_eq!(js_set_size(set), 2);
+    }
+
+    #[test]
+    fn test_set_clear() {
+        let set = js_set_alloc(4);
+        js_set_add(set, 1.0);
+        js_set_add(set, 2.0);
+        js_set_add(set, 3.0);
+
+        js_set_clear(set);
+        assert_eq!(js_set_size(set), 0);
+        assert_eq!(js_set_has(set, 1.0), 0);
+        assert_eq!(js_set_has(set, 2.0), 0);
+        assert_eq!(js_set_has(set, 3.0), 0);
+    }
+
+    #[test]
+    fn test_set_size_tracking() {
+        let set = js_set_alloc(4);
+        assert_eq!(js_set_size(set), 0);
+
+        js_set_add(set, 1.0);
+        assert_eq!(js_set_size(set), 1);
+
+        js_set_add(set, 2.0);
+        assert_eq!(js_set_size(set), 2);
+
+        // Duplicate doesn't increase size
+        js_set_add(set, 1.0);
+        assert_eq!(js_set_size(set), 2);
+
+        js_set_delete(set, 1.0);
+        assert_eq!(js_set_size(set), 1);
+    }
+
+    #[test]
+    fn test_set_grow_beyond_initial_capacity() {
+        let set = js_set_alloc(2);
+        // Add more elements than initial capacity
+        for i in 0..20 {
+            js_set_add(set, i as f64);
+        }
+
+        assert_eq!(js_set_size(set), 20);
+        for i in 0..20 {
+            assert_eq!(js_set_has(set, i as f64), 1, "should contain {}", i);
+        }
+        assert_eq!(js_set_has(set, 20.0), 0);
+    }
+
+    #[test]
+    fn test_set_string_values() {
+        // Create two string headers with identical content at different addresses
+        let s1 = js_string_from_bytes(b"hello".as_ptr(), 5);
+        let s2 = js_string_from_bytes(b"hello".as_ptr(), 5);
+
+        // Verify they are at different addresses
+        assert_ne!(s1 as usize, s2 as usize);
+
+        // NaN-box with STRING_TAG (0x7FFF)
+        let val1 = f64::from_bits(0x7FFF_0000_0000_0000 | (s1 as u64 & 0x0000_FFFF_FFFF_FFFF));
+        let val2 = f64::from_bits(0x7FFF_0000_0000_0000 | (s2 as u64 & 0x0000_FFFF_FFFF_FFFF));
+
+        let set = js_set_alloc(4);
+        js_set_add(set, val1);
+
+        // Adding string with same content (different pointer) should be duplicate
+        js_set_add(set, val2);
+        assert_eq!(js_set_size(set), 1, "strings with same content should be deduplicated");
+
+        // has() should find by content
+        assert_eq!(js_set_has(set, val2), 1);
+    }
+
+    #[test]
+    fn test_set_mixed_number_values() {
+        let set = js_set_alloc(4);
+
+        // Various number values
+        js_set_add(set, 0.0);
+        js_set_add(set, -1.0);
+        js_set_add(set, 3.14);
+        js_set_add(set, f64::INFINITY);
+        js_set_add(set, f64::NEG_INFINITY);
+
+        assert_eq!(js_set_size(set), 5);
+        assert_eq!(js_set_has(set, 0.0), 1);
+        assert_eq!(js_set_has(set, -1.0), 1);
+        assert_eq!(js_set_has(set, 3.14), 1);
+        assert_eq!(js_set_has(set, f64::INFINITY), 1);
+        assert_eq!(js_set_has(set, f64::NEG_INFINITY), 1);
+    }
+
+    #[test]
+    fn test_set_large() {
+        let set = js_set_alloc(4);
+        let n = 1000;
+
+        for i in 0..n {
+            js_set_add(set, i as f64);
+        }
+        assert_eq!(js_set_size(set), n);
+
+        // Verify all values present
+        for i in 0..n {
+            assert_eq!(js_set_has(set, i as f64), 1, "should contain {}", i);
+        }
+
+        // Values outside range not present
+        assert_eq!(js_set_has(set, n as f64), 0);
+        assert_eq!(js_set_has(set, -1.0), 0);
+    }
+
+    #[test]
+    fn test_set_delete_and_re_add() {
+        let set = js_set_alloc(4);
+        js_set_add(set, 1.0);
+        js_set_add(set, 2.0);
+        js_set_add(set, 3.0);
+
+        js_set_delete(set, 2.0);
+        assert_eq!(js_set_has(set, 2.0), 0);
+
+        // Re-add the deleted value
+        js_set_add(set, 2.0);
+        assert_eq!(js_set_has(set, 2.0), 1);
+        assert_eq!(js_set_size(set), 3);
+    }
+
+    #[test]
+    fn test_set_to_array_roundtrip() {
+        let set = js_set_alloc(4);
+        js_set_add(set, 10.0);
+        js_set_add(set, 20.0);
+        js_set_add(set, 30.0);
+
+        let arr = js_set_to_array(set);
+        assert_eq!(crate::array::js_array_length(arr), 3);
+
+        // Verify all values are in the array
+        let mut found = [false; 3];
+        for i in 0..3 {
+            let val = crate::array::js_array_get_f64(arr, i);
+            if val == 10.0 { found[0] = true; }
+            if val == 20.0 { found[1] = true; }
+            if val == 30.0 { found[2] = true; }
+        }
+        assert!(found.iter().all(|&f| f), "all values should be in array");
+    }
+
+    // --- String comparison tests (Phase 0D) ---
+
+    #[test]
+    fn test_strings_equal_same_content() {
+        let s1 = js_string_from_bytes(b"test".as_ptr(), 4);
+        let s2 = js_string_from_bytes(b"test".as_ptr(), 4);
+        assert_ne!(s1 as usize, s2 as usize);
+        assert!(unsafe { strings_equal(s1, s2) });
+    }
+
+    #[test]
+    fn test_strings_equal_different_length() {
+        let s1 = js_string_from_bytes(b"hello".as_ptr(), 5);
+        let s2 = js_string_from_bytes(b"hi".as_ptr(), 2);
+        assert!(!unsafe { strings_equal(s1, s2) });
+    }
+
+    #[test]
+    fn test_strings_equal_same_pointer() {
+        let s1 = js_string_from_bytes(b"hello".as_ptr(), 5);
+        // Same pointer should be equal
+        assert!(unsafe { strings_equal(s1, s1) });
+    }
+
+    #[test]
+    fn test_strings_equal_empty() {
+        let s1 = js_string_from_bytes(std::ptr::null(), 0);
+        let s2 = js_string_from_bytes(std::ptr::null(), 0);
+        assert!(unsafe { strings_equal(s1, s2) });
+    }
+
+    #[test]
+    fn test_strings_equal_different_content() {
+        let s1 = js_string_from_bytes(b"abc".as_ptr(), 3);
+        let s2 = js_string_from_bytes(b"abd".as_ptr(), 3);
+        assert!(!unsafe { strings_equal(s1, s2) });
+    }
+
+    #[test]
+    fn test_jsvalue_eq_numbers() {
+        assert!(jsvalue_eq(1.0, 1.0));
+        assert!(jsvalue_eq(0.0, 0.0));
+        assert!(!jsvalue_eq(1.0, 2.0));
+    }
+
+    #[test]
+    fn test_jsvalue_eq_cross_tag_strings() {
+        let s1 = js_string_from_bytes(b"hello".as_ptr(), 5);
+        let s2 = js_string_from_bytes(b"hello".as_ptr(), 5);
+
+        // STRING_TAG
+        let val1 = f64::from_bits(0x7FFF_0000_0000_0000 | (s1 as u64 & 0x0000_FFFF_FFFF_FFFF));
+        // POINTER_TAG (different tag, same content)
+        let val2 = f64::from_bits(0x7FFD_0000_0000_0000 | (s2 as u64 & 0x0000_FFFF_FFFF_FFFF));
+
+        assert!(jsvalue_eq(val1, val2), "cross-tag strings with same content should be equal");
+    }
 }

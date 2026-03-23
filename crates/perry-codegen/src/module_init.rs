@@ -10,7 +10,7 @@ use cranelift_codegen::ir::AbiParam;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Init, Linkage, Module};
 use cranelift_object::ObjectModule;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use perry_hir::{
     Expr, Stmt,
@@ -384,7 +384,7 @@ impl crate::codegen::Compiler {
 
             // Runtime-initialize static fields that need heap allocation (strings, etc.)
             for (data_id, init_expr) in std::mem::take(&mut self.static_field_runtime_inits) {
-                let empty_locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+                let empty_locals: HashMap<LocalId, LocalInfo> = HashMap::new();
                 let val = compile_expr(
                     &mut builder, &mut self.module,
                     &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids,
@@ -403,7 +403,7 @@ impl crate::codegen::Compiler {
             // Runtime-initialize exported enum objects so Object.values(EnumName) works
             {
                 // Group enum members by enum name
-                let mut enum_groups: BTreeMap<String, Vec<(String, EnumMemberValue)>> = BTreeMap::new();
+                let mut enum_groups: HashMap<String, Vec<(String, EnumMemberValue)>> = HashMap::new();
                 for ((enum_name, member_name), value) in &self.enums {
                     enum_groups.entry(enum_name.clone())
                         .or_default()
@@ -548,7 +548,7 @@ impl crate::codegen::Compiler {
                 }
             }
 
-            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
             let mut next_var = 0;
 
             for stmt in stmts {
