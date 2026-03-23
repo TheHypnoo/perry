@@ -281,6 +281,23 @@ pub fn app_run(app_handle: i64) {
             }
         });
 
+        // Register UI function pointers for geisterhand dispatch
+        #[cfg(feature = "geisterhand")]
+        {
+            extern "C" {
+                fn perry_geisterhand_register_state_set(f: extern "C" fn(i64, f64));
+                fn perry_geisterhand_register_screenshot_capture(
+                    f: extern "C" fn(*mut usize) -> *mut u8,
+                );
+                fn perry_geisterhand_register_textfield_set_string(f: extern "C" fn(i64, i64));
+            }
+            unsafe {
+                perry_geisterhand_register_state_set(crate::perry_ui_state_set);
+                perry_geisterhand_register_screenshot_capture(crate::screenshot::perry_ui_screenshot_capture);
+                perry_geisterhand_register_textfield_set_string(crate::perry_ui_textfield_set_string);
+            }
+        }
+
         // Message loop
         unsafe {
             let mut msg = MSG::default();

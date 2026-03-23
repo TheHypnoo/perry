@@ -56,6 +56,35 @@ extern "C" {
     fn js_nanbox_get_pointer(value: f64) -> i64;
 }
 
+// Registered function pointers for UI operations. Platform UI crates call the register
+// functions below during initialization. This avoids extern "C" declarations that would
+// create hard linker dependencies on UI crate symbols.
+use std::sync::atomic::{AtomicPtr, Ordering};
+
+static UI_STATE_SET_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static UI_SCREENSHOT_CAPTURE_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static UI_TEXTFIELD_SET_STRING_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Register the platform UI crate's state_set function.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_register_state_set(f: extern "C" fn(i64, f64)) {
+    UI_STATE_SET_FN.store(f as *mut (), Ordering::Release);
+}
+
+/// Register the platform UI crate's screenshot_capture function.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_register_screenshot_capture(
+    f: extern "C" fn(*mut usize) -> *mut u8,
+) {
+    UI_SCREENSHOT_CAPTURE_FN.store(f as *mut (), Ordering::Release);
+}
+
+/// Register the platform UI crate's textfield_set_string function.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_register_textfield_set_string(f: extern "C" fn(i64, i64)) {
+    UI_TEXTFIELD_SET_STRING_FN.store(f as *mut (), Ordering::Release);
+}
+
 /// Register a widget callback in the global registry.
 /// Called from platform UI crates when widgets are created or callbacks attached.
 ///
@@ -161,45 +190,53 @@ pub extern "C" fn perry_geisterhand_pump() {
                 }
             }
             PendingAction::SetState { handle, value } => {
-                // state_set is in the UI crate — call via extern
-                extern "C" {
-                    fn perry_ui_state_set(handle: i64, value: f64);
+                let f = UI_STATE_SET_FN.load(Ordering::Acquire);
+                if !f.is_null() {
+                    unsafe {
+                        let func: extern "C" fn(i64, f64) = std::mem::transmute(f);
+                        func(handle, value);
+                    }
                 }
-                unsafe { perry_ui_state_set(handle, value); }
             }
             PendingAction::SetText { handle, text } => {
-                // Set text on the Win32 Edit control HWND, then fire onChange callback
-                extern "C" {
-                    fn perry_ui_textfield_set_string(handle: i64, text_ptr: i64);
-                    fn js_string_from_bytes(ptr: *const u8, len: usize) -> *mut u8;
-                    fn js_nanbox_string(ptr: i64) -> f64;
-                }
-                // Create a Perry StringHeader from the text bytes
-                let bytes = text.as_bytes();
-                let str_ptr = unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len()) };
-                unsafe { perry_ui_textfield_set_string(handle, str_ptr as i64); }
-                // Fire onChange callback if registered
-                if let Ok(reg) = REGISTRY.lock() {
-                    for w in reg.iter() {
-                        if w.handle == handle && w.callback_kind == CB_ON_CHANGE {
-                            let nanboxed = unsafe { js_nanbox_string(str_ptr as i64) };
-                            let ptr = unsafe { js_nanbox_get_pointer(w.closure_f64) } as *const u8;
-                            unsafe { js_closure_call1(ptr, nanboxed); }
-                            break;
+                let f = UI_TEXTFIELD_SET_STRING_FN.load(Ordering::Acquire);
+                if !f.is_null() {
+                    extern "C" {
+                        fn js_string_from_bytes(ptr: *const u8, len: usize) -> *mut u8;
+                        fn js_nanbox_string(ptr: i64) -> f64;
+                    }
+                    // Create a Perry StringHeader from the text bytes
+                    let bytes = text.as_bytes();
+                    let str_ptr = unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len()) };
+                    unsafe {
+                        let func: extern "C" fn(i64, i64) = std::mem::transmute(f);
+                        func(handle, str_ptr as i64);
+                    }
+                    // Fire onChange callback if registered
+                    if let Ok(reg) = REGISTRY.lock() {
+                        for w in reg.iter() {
+                            if w.handle == handle && w.callback_kind == CB_ON_CHANGE {
+                                let nanboxed = unsafe { js_nanbox_string(str_ptr as i64) };
+                                let ptr = unsafe { js_nanbox_get_pointer(w.closure_f64) } as *const u8;
+                                unsafe { js_closure_call1(ptr, nanboxed); }
+                                break;
+                            }
                         }
                     }
                 }
             }
             PendingAction::CaptureScreenshot => {
-                // Call platform-specific screenshot capture (implemented in each UI crate)
-                extern "C" {
-                    fn perry_ui_screenshot_capture(out_len: *mut usize) -> *mut u8;
-                }
-                let mut len: usize = 0;
-                let ptr = unsafe { perry_ui_screenshot_capture(&mut len) };
+                let f = UI_SCREENSHOT_CAPTURE_FN.load(Ordering::Acquire);
+                let (ptr, len) = if !f.is_null() {
+                    let mut len: usize = 0;
+                    let func: extern "C" fn(*mut usize) -> *mut u8 = unsafe { std::mem::transmute(f) };
+                    let ptr = func(&mut len);
+                    (ptr, len)
+                } else {
+                    (std::ptr::null_mut(), 0)
+                };
                 let png_data = if !ptr.is_null() && len > 0 {
                     let data = unsafe { std::slice::from_raw_parts(ptr, len).to_vec() };
-                    // Free the platform-allocated buffer
                     unsafe { libc::free(ptr as *mut libc::c_void); }
                     data
                 } else {

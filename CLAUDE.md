@@ -146,6 +146,7 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - Performance: BTreeMap→HashMap across codegen Compiler struct (20+ fields), `Cow<'static, str>` for 950 extern func keys
 - Performance: HashMap indices for HIR lowering (functions, classes, imports) and monomorphization lookups
 - Tests: 50+ new Rust unit tests for Set, GC, Array, String, HIR lowering, monomorphization
+- fix: Windows test builds — geisterhand UI dispatch uses registered function pointers instead of extern declarations, eliminating linker errors when UI crate is not linked.
 
 ### v0.4.0
 - `perry/thread` module: `parallelMap`, `parallelFilter`, and `spawn` — real OS threads with compile-time safety. `SerializedValue` deep-copy, thread-local arenas with `Drop`, promise integration via `PENDING_THREAD_RESULTS`.
