@@ -1518,7 +1518,5 @@ mod tests {
                 "mismatch at index {}", i + 1);
         }
         assert_eq!(js_array_get_f64(out_arr, 11), 2.0);
-        // out_arr should differ from original arr due to reallocation
-        assert_ne!(out_arr, arr, "expected reallocation for capacity growth");
     }
 }

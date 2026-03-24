@@ -207,9 +207,67 @@ pub fn set_alignment(handle: i64, alignment: i64) {
     }
 }
 
+/// Find the widget handle for an NSView pointer by scanning the WIDGETS vec.
+fn find_handle_for_view(view: &NSView) -> Option<i64> {
+    WIDGETS.with(|w| {
+        let widgets = w.borrow();
+        for (idx, widget) in widgets.iter().enumerate() {
+            if std::ptr::eq(Retained::as_ptr(widget), view as *const NSView) {
+                return Some((idx + 1) as i64);
+            }
+        }
+        None
+    })
+}
+
+/// Recursively collect widget handles for all descendants of a view.
+fn collect_subtree_handles(view: &NSView) -> Vec<i64> {
+    let mut handles = Vec::new();
+    let is_stack = if let Some(cls) = AnyClass::get(c"NSStackView") {
+        view.isKindOfClass(cls)
+    } else {
+        false
+    };
+    if is_stack {
+        let stack: &NSStackView = unsafe { &*(view as *const NSView as *const NSStackView) };
+        let subviews = stack.arrangedSubviews();
+        let count = subviews.len();
+        for i in 0..count {
+            let sv: *const NSView = unsafe { objc2::msg_send![&subviews, objectAtIndex: i] };
+            if !sv.is_null() {
+                let sv_ref = unsafe { &*sv };
+                if let Some(h) = find_handle_for_view(sv_ref) {
+                    handles.push(h);
+                }
+                // Recurse into nested stacks
+                handles.extend(collect_subtree_handles(sv_ref));
+            }
+        }
+    }
+    handles
+}
+
+/// Clean up metadata maps for a list of widget handles.
+fn cleanup_widget_maps(handles: &[i64]) {
+    for handle in handles {
+        PARENT_MAP.with(|m| { m.borrow_mut().remove(handle); });
+        BG_COLOR_MAP.with(|m| { m.borrow_mut().remove(handle); });
+        WIDTH_CONSTRAINTS.with(|wc| {
+            if let Some(old) = wc.borrow_mut().remove(handle) {
+                unsafe { let _: () = objc2::msg_send![&*old, setActive: false]; }
+            }
+        });
+        HEIGHT_CONSTRAINTS.with(|hc| {
+            if let Some(old) = hc.borrow_mut().remove(handle) {
+                unsafe { let _: () = objc2::msg_send![&*old, setActive: false]; }
+            }
+        });
+    }
+}
+
 /// Remove all arranged subviews from a container (NSStackView).
-/// Deactivates constraints referencing the stack before removal to avoid
-/// dangling constraint crashes (e.g. from widgetMatchParentWidth).
+/// Safe implementation: snapshots subviews before mutation, deactivates
+/// constraints in batch, removes in reverse order, and cleans up metadata maps.
 pub fn clear_children(handle: i64) {
     if let Some(parent) = get_widget(handle) {
         let is_stack = if let Some(cls) = AnyClass::get(c"NSStackView") {
@@ -219,23 +277,51 @@ pub fn clear_children(handle: i64) {
         };
         if is_stack {
             let stack: &NSStackView = unsafe { &*(Retained::as_ptr(&parent) as *const NSStackView) };
+
+            // Phase 1: Snapshot subviews into a Vec (avoid iterator invalidation)
             let subviews = stack.arrangedSubviews();
-            for sv in subviews.iter() {
-                // Deactivate all constraints on this view that reference
-                // the parent stack (created by e.g. match_parent_width)
+            let count = subviews.len();
+            let mut views: Vec<Retained<NSView>> = Vec::with_capacity(count);
+            for i in 0..count {
+                let sv: *const NSView = unsafe { objc2::msg_send![&subviews, objectAtIndex: i] };
+                if !sv.is_null() {
+                    if let Some(retained) = unsafe { Retained::retain(sv as *mut NSView) } {
+                        views.push(retained);
+                    }
+                }
+            }
+
+            // Phase 2: Collect all handles (including nested descendants)
+            let mut all_handles = Vec::new();
+            for sv in &views {
+                if let Some(h) = find_handle_for_view(sv) {
+                    all_handles.push(h);
+                }
+                all_handles.extend(collect_subtree_handles(sv));
+            }
+
+            // Phase 3: Batch deactivate constraints on all views
+            for sv in &views {
                 unsafe {
-                    let constraints: Retained<AnyObject> = msg_send![&**sv, constraints];
-                    let count: usize = msg_send![&*constraints, count];
-                    for i in 0..count {
-                        let c: *mut AnyObject = msg_send![&*constraints, objectAtIndex: i];
+                    let constraints: Retained<AnyObject> = objc2::msg_send![&**sv, constraints];
+                    let c_count: usize = objc2::msg_send![&*constraints, count];
+                    for i in 0..c_count {
+                        let c: *mut AnyObject = objc2::msg_send![&*constraints, objectAtIndex: i];
                         if !c.is_null() {
-                            let _: () = msg_send![c, setActive: false];
+                            let _: () = objc2::msg_send![c, setActive: false];
                         }
                     }
                 }
-                stack.removeArrangedSubview(&*sv);
+            }
+
+            // Phase 4: Remove views in reverse order
+            for sv in views.iter().rev() {
+                stack.removeArrangedSubview(sv);
                 sv.removeFromSuperview();
             }
+
+            // Phase 5: Clean up metadata maps for all removed widgets
+            cleanup_widget_maps(&all_handles);
         }
     }
 }
@@ -296,6 +382,7 @@ pub fn add_child(parent_handle: i64, child_handle: i64) {
 
 /// Remove a child view from a parent view.
 /// If the parent is an NSStackView, removes from arranged subviews first.
+/// Also cleans up metadata maps for the removed child and its descendants.
 pub fn remove_child(parent_handle: i64, child_handle: i64) {
     if let (Some(parent), Some(child)) = (get_widget(parent_handle), get_widget(child_handle)) {
         let is_stack = if let Some(cls) = AnyClass::get(c"NSStackView") {
@@ -304,11 +391,18 @@ pub fn remove_child(parent_handle: i64, child_handle: i64) {
             false
         };
 
+        // Collect handles for cleanup before removal
+        let mut handles_to_clean = vec![child_handle];
+        handles_to_clean.extend(collect_subtree_handles(&child));
+
         if is_stack {
             let stack: &NSStackView = unsafe { &*(Retained::as_ptr(&parent) as *const NSStackView) };
             stack.removeArrangedSubview(&child);
         }
         child.removeFromSuperview();
+
+        // Clean up metadata maps
+        cleanup_widget_maps(&handles_to_clean);
     }
 }
 

@@ -6798,6 +6798,7 @@ pub(crate) fn compile_expr(
 
                                                     return Ok(len_f64);
                                                 }
+
                                             }
                                         }
                                     }

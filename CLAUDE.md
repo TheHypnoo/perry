@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.5
+**Current Version:** 0.4.6
 
 ## Workflow Requirements
 
@@ -139,6 +139,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.6
+- fix: `this.field.splice()` on class fields caused memory corruption — HIR desugars to temp variable pattern
+- fix: i18n locale detection uses NSBundle.preferredLocalizations on iOS (respects per-app language settings)
+- fix: `perry_system_preferences_get` handles NSArray values (e.g., AppleLanguages) on iOS
+- fix: `clear_children`/`remove_child` safe subview removal — snapshot before mutation, reverse order, metadata map cleanup (macOS + iOS)
 
 ### v0.4.5
 - feat: `@perry/threads` npm package — standalone Web Worker parallelism (`parallelMap`, `parallelFilter`, `spawn`) + perry/thread WASM integration via worker pool with per-worker WASM instances

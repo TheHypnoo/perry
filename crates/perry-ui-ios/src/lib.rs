@@ -1053,6 +1053,28 @@ pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
                 return val;
             }
         }
+        // NSArray: return first element as string (for AppleLanguages etc.)
+        if let Some(arr_cls) = objc2::runtime::AnyClass::get(c"NSArray") {
+            let is_array: bool = objc2::msg_send![obj, isKindOfClass: arr_cls];
+            if is_array {
+                let count: usize = objc2::msg_send![obj, count];
+                if count > 0 {
+                    let first: *mut objc2::runtime::AnyObject = objc2::msg_send![obj, objectAtIndex: 0usize];
+                    if !first.is_null() {
+                        if let Some(str_cls2) = objc2::runtime::AnyClass::get(c"NSString") {
+                            let is_str: bool = objc2::msg_send![first, isKindOfClass: str_cls2];
+                            if is_str {
+                                let ns_str: &objc2_foundation::NSString = &*(first as *const objc2_foundation::NSString);
+                                let rust_str = ns_str.to_string();
+                                let bytes = rust_str.as_bytes();
+                                let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64);
+                                return js_nanbox_string(str_ptr as i64);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         f64::from_bits(0x7FFC_0000_0000_0001)
     }
 }

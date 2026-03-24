@@ -62,6 +62,8 @@ pub fn set_hidden(handle: i64, hidden: bool) {
 }
 
 /// Remove all arranged subviews from a container (UIStackView).
+/// Safe implementation: snapshots subviews before mutation, removes in reverse
+/// order, and cleans up HEIGHT_CONSTRAINTS for removed widgets.
 pub fn clear_children(handle: i64) {
     if let Some(parent) = get_widget(handle) {
         let is_stack = if let Some(cls) = AnyClass::get(c"UIStackView") {
@@ -71,12 +73,48 @@ pub fn clear_children(handle: i64) {
         };
         if is_stack {
             let stack: &UIStackView = unsafe { &*(Retained::as_ptr(&parent) as *const UIStackView) };
+
+            // Phase 1: Snapshot subviews into a Vec (avoid iterator invalidation)
             let subviews = stack.arrangedSubviews();
-            for sv in subviews.iter() {
+            let count = subviews.len();
+            let mut views: Vec<Retained<UIView>> = Vec::with_capacity(count);
+            for i in 0..count {
+                let sv: *const UIView = unsafe { objc2::msg_send![&subviews, objectAtIndex: i] };
+                if !sv.is_null() {
+                    if let Some(retained) = unsafe { Retained::retain(sv as *mut UIView) } {
+                        views.push(retained);
+                    }
+                }
+            }
+
+            // Phase 2: Collect handles for cleanup
+            let handles: Vec<i64> = views.iter().filter_map(|sv| {
+                WIDGETS.with(|w| {
+                    let widgets = w.borrow();
+                    for (idx, widget) in widgets.iter().enumerate() {
+                        if std::ptr::eq(Retained::as_ptr(widget), &**sv as *const UIView) {
+                            return Some((idx + 1) as i64);
+                        }
+                    }
+                    None
+                })
+            }).collect();
+
+            // Phase 3: Remove views in reverse order
+            for sv in views.iter().rev() {
                 unsafe {
                     let _: () = objc2::msg_send![stack, removeArrangedSubview: &**sv];
                     sv.removeFromSuperview();
                 }
+            }
+
+            // Phase 4: Clean up HEIGHT_CONSTRAINTS for removed widgets
+            for h in &handles {
+                HEIGHT_CONSTRAINTS.with(|hc| {
+                    if let Some(old) = hc.borrow_mut().remove(h) {
+                        unsafe { let _: () = objc2::msg_send![&*old, setActive: false]; }
+                    }
+                });
             }
         }
     }

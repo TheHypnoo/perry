@@ -154,19 +154,16 @@ fn match_locale(system_locale: &str, locales: &[&str]) -> Option<usize> {
 // Platform-native locale detection
 // ============================================================================
 
-/// Apple platforms (macOS + iOS): use CoreFoundation CFLocaleCopyCurrent.
-/// Works for GUI apps launched from Finder/SpringBoard where LANG is not set.
+/// Apple platforms (macOS + iOS): use NSBundle.mainBundle.preferredLocalizations
+/// to respect per-app language settings in iOS Settings.
+/// Falls back to CFLocaleCopyCurrent if NSBundle is unavailable.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn detect_apple_locale() -> Option<String> {
-    // CoreFoundation types and functions (always available, no extra linking needed)
     type CFTypeRef = *const std::ffi::c_void;
-    type CFLocaleRef = CFTypeRef;
     type CFStringRef = CFTypeRef;
     type CFIndex = isize;
 
     extern "C" {
-        fn CFLocaleCopyCurrent() -> CFLocaleRef;
-        fn CFLocaleGetIdentifier(locale: CFLocaleRef) -> CFStringRef;
         fn CFStringGetLength(string: CFStringRef) -> CFIndex;
         fn CFStringGetCString(
             string: CFStringRef,
@@ -175,44 +172,62 @@ fn detect_apple_locale() -> Option<String> {
             encoding: u32,
         ) -> bool;
         fn CFRelease(cf: CFTypeRef);
+        fn CFLocaleCopyCurrent() -> CFTypeRef;
+        fn CFLocaleGetIdentifier(locale: CFTypeRef) -> CFStringRef;
     }
 
     const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
 
-    unsafe {
-        let locale = CFLocaleCopyCurrent();
-        if locale.is_null() {
-            return None;
-        }
-
-        let identifier = CFLocaleGetIdentifier(locale);
-        if identifier.is_null() {
-            CFRelease(locale);
-            return None;
-        }
-
-        let len = CFStringGetLength(identifier);
-        if len <= 0 || len > 64 {
-            CFRelease(locale);
-            return None;
-        }
-
+    // Helper to convert CFString/NSString to Rust String
+    unsafe fn cfstring_to_string(s: CFStringRef) -> Option<String> {
+        if s.is_null() { return None; }
+        let len = CFStringGetLength(s);
+        if len <= 0 || len > 64 { return None; }
         let mut buf = [0u8; 128];
-        let ok = CFStringGetCString(
-            identifier,
-            buf.as_mut_ptr(),
-            buf.len() as CFIndex,
-            K_CF_STRING_ENCODING_UTF8,
-        );
-
-        CFRelease(locale);
-
+        let ok = CFStringGetCString(s, buf.as_mut_ptr(), buf.len() as CFIndex, K_CF_STRING_ENCODING_UTF8);
         if ok {
-            let c_str = std::ffi::CStr::from_ptr(buf.as_ptr() as *const i8);
-            c_str.to_str().ok().map(|s| s.to_string())
+            std::ffi::CStr::from_ptr(buf.as_ptr() as *const i8)
+                .to_str().ok().map(|s| s.to_string())
         } else {
             None
         }
+    }
+
+    // Try NSBundle.mainBundle.preferredLocalizations.firstObject first
+    // This respects per-app language settings on iOS
+    unsafe {
+        extern "C" {
+            fn objc_getClass(name: *const i8) -> *const std::ffi::c_void;
+            fn sel_registerName(name: *const i8) -> *const std::ffi::c_void;
+            fn objc_msgSend(receiver: *const std::ffi::c_void, sel: *const std::ffi::c_void, ...) -> *const std::ffi::c_void;
+        }
+
+        let ns_bundle = objc_getClass(b"NSBundle\0".as_ptr() as *const i8);
+        if !ns_bundle.is_null() {
+            let main_bundle_sel = sel_registerName(b"mainBundle\0".as_ptr() as *const i8);
+            let bundle = objc_msgSend(ns_bundle, main_bundle_sel);
+            if !bundle.is_null() {
+                let pref_sel = sel_registerName(b"preferredLocalizations\0".as_ptr() as *const i8);
+                let localizations = objc_msgSend(bundle, pref_sel);
+                if !localizations.is_null() {
+                    let first_sel = sel_registerName(b"firstObject\0".as_ptr() as *const i8);
+                    let first = objc_msgSend(localizations, first_sel);
+                    if let Some(lang) = cfstring_to_string(first as CFStringRef) {
+                        return Some(lang);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: CFLocaleCopyCurrent
+    unsafe {
+        let locale = CFLocaleCopyCurrent();
+        if locale.is_null() { return None; }
+        let identifier = CFLocaleGetIdentifier(locale);
+        let result = cfstring_to_string(identifier);
+        CFRelease(locale);
+        result
     }
 }
 
