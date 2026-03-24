@@ -863,11 +863,21 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     };
     let toml_signing_identity = if is_ios {
         config.ios.as_ref().and_then(|i| i.signing_identity.clone())
+    } else if args.notarize {
+        // --notarize: use Developer ID identity/cert instead of App Store ones
+        config.macos.as_ref()
+            .and_then(|m| m.notarize_signing_identity.clone())
+            .or_else(|| config.macos.as_ref().and_then(|m| m.signing_identity.clone()))
     } else {
         config.macos.as_ref().and_then(|m| m.signing_identity.clone())
     };
     let toml_certificate = if is_ios {
         config.ios.as_ref().and_then(|i| i.certificate.clone())
+    } else if args.notarize {
+        // --notarize: use the Developer ID cert for notarization
+        config.macos.as_ref()
+            .and_then(|m| m.notarize_certificate.clone())
+            .or_else(|| config.macos.as_ref().and_then(|m| m.certificate.clone()))
     } else {
         config.macos.as_ref().and_then(|m| m.certificate.clone())
     };
