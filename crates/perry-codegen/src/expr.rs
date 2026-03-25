@@ -9725,8 +9725,13 @@ pub(crate) fn compile_expr(
 
                             let call = builder.ins().call(func_ref, &call_args);
                             let result = builder.inst_results(call)[0];
-                            // Convert result back to f64 for uniform handling
-                            return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result));
+                            // NaN-box the i64 handle with POINTER_TAG so that
+                            // js_nanbox_get_pointer can extract it later.
+                            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                            let nb_call = builder.ins().call(nanbox_ref, &[result]);
+                            return Ok(builder.inst_results(nb_call)[0]);
                         }
                     }
 

@@ -13,6 +13,8 @@ use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::{HDC, HBRUSH, CreateSolidBrush, SetBkColor, InvalidateRect};
 
 use super::{WidgetKind, alloc_control_id, register_widget};
 
@@ -43,6 +45,9 @@ thread_local! {
     static TEXTFIELD_CALLBACKS: RefCell<HashMap<i64, *const u8>> = RefCell::new(HashMap::new());
     // Guard against re-entrant EN_CHANGE notifications during set_string_value
     static SUPPRESS_CHANGE: RefCell<bool> = RefCell::new(false);
+    /// Background color (COLORREF) and brush per textfield handle
+    #[cfg(target_os = "windows")]
+    static TEXTFIELD_BG: RefCell<HashMap<i64, (u32, HBRUSH)>> = RefCell::new(HashMap::new());
 }
 
 /// Create a TextField. Returns widget handle.
@@ -58,11 +63,11 @@ pub fn create(placeholder_ptr: *const u8, on_change: f64) -> i64 {
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
-                WS_EX_CLIENTEDGE,
+                WINDOW_EX_STYLE::default(),
                 windows::core::PCWSTR(class_name.as_ptr()),
                 windows::core::PCWSTR(window_text.as_ptr()),
                 WINDOW_STYLE(ES_AUTOHSCROLL as u32 | ES_LEFT as u32 | WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | WS_BORDER.0),
-                0, 0, 200, 24,
+                0, 0, 200, 30,
                 super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
                 HINSTANCE::from(hinstance),
@@ -186,19 +191,96 @@ pub fn set_borderless(handle: i64, borderless: f64) {
     }
 }
 
-/// Set the background color of the text field (stub — not implemented on Windows).
+/// Set the background color of the text field.
 pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
-    let _ = (handle, r, g, b, a);
+    #[cfg(target_os = "windows")]
+    {
+        let _ = a;
+        let ri = (r * 255.0).round().min(255.0).max(0.0) as u32;
+        let gi = (g * 255.0).round().min(255.0).max(0.0) as u32;
+        let bi = (b * 255.0).round().min(255.0).max(0.0) as u32;
+        let colorref = ri | (gi << 8) | (bi << 16);
+        let brush = unsafe { CreateSolidBrush(COLORREF(colorref)) };
+        TEXTFIELD_BG.with(|bg| {
+            bg.borrow_mut().insert(handle, (colorref, brush));
+        });
+        if let Some(hwnd) = super::get_hwnd(handle) {
+            unsafe {
+                let _ = InvalidateRect(hwnd, None, true);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (handle, r, g, b, a);
+    }
 }
 
-/// Set the font size of the text field (stub — not implemented on Windows).
+/// Handle WM_CTLCOLOREDIT — set background color for textfield EDIT controls.
+/// Returns Some(brush_isize) if the child HWND belongs to a textfield with a custom bg color.
+#[cfg(target_os = "windows")]
+pub fn handle_ctlcoloredit(hdc: HDC, child_hwnd: HWND) -> Option<isize> {
+    // Find the widget handle for this HWND
+    let handle = super::find_handle_by_hwnd(child_hwnd);
+    if handle <= 0 {
+        return None;
+    }
+    TEXTFIELD_BG.with(|bg| {
+        let bg = bg.borrow();
+        if let Some(&(colorref, brush)) = bg.get(&handle) {
+            unsafe {
+                SetBkColor(hdc, COLORREF(colorref));
+            }
+            Some(brush.0 as isize)
+        } else {
+            None
+        }
+    })
+}
+
+/// Set the font size of the text field.
 pub fn set_font_size(handle: i64, size: f64) {
-    let _ = (handle, size);
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(hwnd) = super::get_hwnd(handle) {
+            let font = super::text::create_font_with_family_pub(size as i32, 400, "Segoe UI");
+            unsafe {
+                SendMessageW(hwnd, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (handle, size);
+    }
 }
 
 /// Set the text color of the text field (stub — not implemented on Windows).
 pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     let _ = (handle, r, g, b, a);
+}
+
+/// Get the current text from a TextField. Returns a perry string pointer (i64).
+pub fn get_string(handle: i64) -> i64 {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(hwnd) = super::get_hwnd(handle) {
+            let text = unsafe {
+                let len = GetWindowTextLengthW(hwnd);
+                if len == 0 {
+                    return perry_runtime::string::js_string_from_bytes(b"".as_ptr(), 0) as i64;
+                }
+                let mut buf = vec![0u16; (len + 1) as usize];
+                GetWindowTextW(hwnd, &mut buf);
+                String::from_utf16_lossy(&buf[..len as usize])
+            };
+            let bytes = text.as_bytes();
+            return perry_runtime::string::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32) as i64;
+        }
+    }
+    0
 }
 
 /// Set the text value of a TextField programmatically.

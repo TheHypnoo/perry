@@ -4418,6 +4418,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         // Windows system libraries
         cmd.arg("user32.lib")
            .arg("gdi32.lib")
+           .arg("gdiplus.lib")
+           .arg("msimg32.lib")
            .arg("kernel32.lib")
            .arg("shell32.lib")
            .arg("ole32.lib")

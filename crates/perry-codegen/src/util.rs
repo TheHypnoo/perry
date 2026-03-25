@@ -203,15 +203,20 @@ pub(crate) fn ensure_i64(builder: &mut FunctionBuilder, val: Value) -> Value {
         let masked = builder.ins().band(val_i64, mask);
         // Guard: small values (< 0x1000) are TAG_NULL, TAG_UNDEFINED, booleans.
         // Return 0 (null) for these — callers must null-check before dereferencing.
+        // BUT: NaN-boxed pointers (POINTER_TAG 0x7FFD, STRING_TAG 0x7FFF,
+        // JS_HANDLE_TAG 0x7FFB, BIGINT_TAG 0x7FFE) with small payloads must
+        // NOT be zeroed — extract their lower 48 bits.
+        let top16 = builder.ins().ushr_imm(val_i64, 48);
+        // Check if top16 is in the NaN-box tag range (0x7FF0..0xFFFF)
+        let nan_threshold = builder.ins().iconst(types::I64, 0x7FF0i64);
+        let is_nanboxed = builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, top16, nan_threshold);
+        // For NaN-boxed values: return lower 48 bits (the payload/pointer)
+        // For non-NaN-boxed values: return the masked value with small-value guard
         let threshold = builder.ins().iconst(types::I64, 0x1000i64);
         let zero = builder.ins().iconst(types::I64, 0i64);
         let is_small = builder.ins().icmp(IntCC::UnsignedLessThan, masked, threshold);
         let safe_masked = builder.ins().select(is_small, zero, masked);
-        // Check for JS_HANDLE_TAG: top16 == 0x7FFB → preserve full bits
-        let top16 = builder.ins().ushr_imm(val_i64, 48);
-        let js_handle_tag = builder.ins().iconst(types::I64, 0x7FFBi64);
-        let is_js_handle = builder.ins().icmp(IntCC::Equal, top16, js_handle_tag);
-        builder.ins().select(is_js_handle, val_i64, safe_masked)
+        builder.ins().select(is_nanboxed, masked, safe_masked)
     }
 }
 

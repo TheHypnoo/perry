@@ -206,7 +206,6 @@ pub unsafe extern "C" fn js_sqlite_stmt_run(
 
                 if let Ok(changes) = conn.execute(&stmt.sql, param_refs.as_slice()) {
                     let last_id = conn.last_insert_rowid();
-
                     let result = js_object_alloc(0, 2);
                     js_object_set_field(result, 0, JSValue::number(changes as f64));
                     js_object_set_field(result, 1, JSValue::number(last_id as f64));

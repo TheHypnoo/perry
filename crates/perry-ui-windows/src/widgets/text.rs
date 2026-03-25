@@ -172,8 +172,13 @@ pub fn set_font_size(handle: i64, size: f64) {
 pub fn set_font_weight(handle: i64, size: f64, weight: f64) {
     #[cfg(target_os = "windows")]
     {
-        // Perry weight: 1.0 = bold. Map to Win32 weight (400=normal, 700=bold).
-        let win32_weight = if weight >= 1.0 { 700 } else { 400 };
+        // Perry weight: 0.0=ultralight, 0.25=light, 0.4=regular, 0.5=medium,
+        // 0.6=semibold, 0.7=bold, 1.0=heavy. Map to Win32 FW_ values.
+        let win32_weight = if weight >= 0.9 { 800 }      // heavy/black
+            else if weight >= 0.65 { 700 }                 // bold
+            else if weight >= 0.55 { 600 }                 // semi-bold
+            else if weight >= 0.45 { 500 }                 // medium
+            else { 400 };                                   // regular
         let font = create_font(size as i32, win32_weight);
         apply_font(handle, font);
     }

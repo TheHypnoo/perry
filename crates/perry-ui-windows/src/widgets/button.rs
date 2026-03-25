@@ -8,7 +8,7 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::{InvalidateRect, SetTextColor, SetBkMode, TRANSPARENT, DrawTextW, DT_LEFT, DT_VCENTER, DT_SINGLELINE, FillRect, SelectObject, HGDIOBJ};
+use windows::Win32::Graphics::Gdi::{InvalidateRect, SetTextColor, SetBkMode, TRANSPARENT, DrawTextW, DT_CENTER, DT_VCENTER, DT_SINGLELINE, FillRect, SelectObject, HGDIOBJ};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -58,12 +58,13 @@ pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
         let class_name = to_wide("BUTTON");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
+            // Use owner-draw for all buttons so we control rendering (no 3D borders)
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 windows::core::PCWSTR(class_name.as_ptr()),
                 windows::core::PCWSTR(wide.as_ptr()),
-                WINDOW_STYLE(BS_PUSHBUTTON as u32 | WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0),
-                0, 0, 80, 30,
+                WINDOW_STYLE(BS_OWNERDRAW as u32 | WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0),
+                0, 0, 100, 34,
                 super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
                 HINSTANCE::from(hinstance),
@@ -71,6 +72,7 @@ pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
             ).unwrap();
 
             let handle = register_widget(hwnd, WidgetKind::Button, control_id);
+            BTN_HWND_TO_HANDLE.with(|m| m.borrow_mut().insert(hwnd.0 as isize, handle));
             BUTTON_CALLBACKS.with(|cb| {
                 cb.borrow_mut().insert(handle, callback_ptr);
             });
@@ -269,34 +271,37 @@ pub fn handle_draw_item(lparam: LPARAM) -> bool {
     };
 
     let text_color = BUTTON_TEXT_COLORS.with(|c| c.borrow().get(&handle).copied());
-    // Default to white text if no explicit color set (dark theme default)
-    let text_color = text_color.unwrap_or(0x00FFFFFF);
+    // Default: dark charcoal text for buttons without explicit color
+    let text_color = text_color.unwrap_or(0x00333333);
 
     unsafe {
         let hdc = dis.hDC;
-        let mut rect = dis.rcItem;
+        let rect = dis.rcItem;
 
-        // Fill background: check own HWND, then walk parent chain via HWND props
-        // (bypasses find_handle_by_hwnd which fails under RefCell reentrancy)
+        // Fill background with own color or transparent parent color
         let bg_color = super::get_hwnd_bg_color(dis.hwndItem)
             .or_else(|| super::find_ancestor_hwnd_bg_color(dis.hwndItem));
-        let mut bg_filled = false;
+        let has_own_bg = super::get_hwnd_bg_color(dis.hwndItem).is_some();
+
         if let Some(color) = bg_color {
             let brush = windows::Win32::Graphics::Gdi::CreateSolidBrush(COLORREF(color));
-            FillRect(hdc, &rect, brush);
+            if has_own_bg {
+                // Button has its own bg color — draw rounded rect
+                let rgn = windows::Win32::Graphics::Gdi::CreateRoundRectRgn(
+                    rect.left, rect.top, rect.right + 1, rect.bottom + 1, 8, 8
+                );
+                windows::Win32::Graphics::Gdi::FillRgn(hdc, rgn, brush);
+                let _ = windows::Win32::Graphics::Gdi::DeleteObject(rgn);
+            } else {
+                FillRect(hdc, &rect, brush);
+            }
             let _ = windows::Win32::Graphics::Gdi::DeleteObject(brush);
-            bg_filled = true;
-        }
-        if !bg_filled {
-            let bg_brush = windows::Win32::Graphics::Gdi::GetSysColorBrush(windows::Win32::Graphics::Gdi::COLOR_BTNFACE);
-            FillRect(hdc, &rect, bg_brush);
         }
 
-        // Draw text
+        // Draw centered text
         SetTextColor(hdc, COLORREF(text_color));
         SetBkMode(hdc, TRANSPARENT);
 
-        // Use the button's font
         let hfont = windows::Win32::Graphics::Gdi::HFONT(
             SendMessageW(dis.hwndItem, WM_GETFONT, WPARAM(0), LPARAM(0)).0 as *mut _
         );
@@ -310,9 +315,9 @@ pub fn handle_draw_item(lparam: LPARAM) -> bool {
         if text_len > 0 {
             let mut buf = vec![0u16; (text_len + 1) as usize];
             GetWindowTextW(dis.hwndItem, &mut buf);
-            // Small left padding so text doesn't touch the edge
-            rect.left += 2;
-            DrawTextW(hdc, &mut buf[..text_len as usize], &mut rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            let mut text_rect = rect;
+            DrawTextW(hdc, &mut buf[..text_len as usize], &mut text_rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
 
         if !old_font.is_invalid() {

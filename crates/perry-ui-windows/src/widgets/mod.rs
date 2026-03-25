@@ -29,7 +29,7 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::{CreateFontW, CreateRoundRectRgn, SetWindowRgn, InvalidateRect, HBRUSH, CreateSolidBrush, FillRect};
+use windows::Win32::Graphics::Gdi::{CreateFontW, CreateRoundRectRgn, SetWindowRgn, InvalidateRect, HBRUSH, CreateSolidBrush, FillRect, HDC, GradientFill, TRIVERTEX, GRADIENT_RECT, GRADIENT_FILL_RECT_H, GRADIENT_FILL_RECT_V};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 
@@ -81,6 +81,10 @@ pub struct WidgetEntry {
     pub match_parent_width: bool,
     /// Whether this stack should exclude hidden children from layout
     pub detaches_hidden: bool,
+    /// Distribution mode: 0=Fill, 1=FillEqually, -1=GravityAreas (default: -1)
+    pub distribution: i64,
+    /// Alignment mode for cross axis
+    pub alignment: i64,
 }
 
 /// Info returned by get_widget_info (clone-safe subset)
@@ -96,6 +100,8 @@ pub struct WidgetInfo {
     pub match_parent_height: bool,
     pub match_parent_width: bool,
     pub detaches_hidden: bool,
+    pub distribution: i64,
+    pub alignment: i64,
 }
 
 thread_local! {
@@ -117,6 +123,19 @@ thread_local! {
 /// even when WIDGETS is borrowed for layout.
 #[cfg(target_os = "windows")]
 static HWND_MAP: std::sync::Mutex<Vec<(i64, usize)>> = std::sync::Mutex::new(Vec::new());
+
+/// Gradient info for a widget: two COLORREF values and direction.
+#[cfg(target_os = "windows")]
+pub struct GradientInfo {
+    pub c1: u32,
+    pub c2: u32,
+    pub vertical: bool,
+}
+
+/// Mutex-based HWND→GradientInfo map (keyed by HWND as isize for Send safety).
+/// Using Mutex (not RefCell) so it can be accessed during WM_PAINT without reentrancy issues.
+#[cfg(target_os = "windows")]
+pub static GRADIENT_MAP: std::sync::Mutex<Vec<(isize, GradientInfo)>> = std::sync::Mutex::new(Vec::new());
 
 /// Store handle→HWND mapping in the Mutex-based map (called during widget registration).
 #[cfg(target_os = "windows")]
@@ -219,6 +238,8 @@ pub fn register_widget(hwnd: HWND, kind: WidgetKind, control_id: u16) -> i64 {
             match_parent_height: false,
             match_parent_width: false,
             detaches_hidden: false,
+            distribution: 0,
+            alignment: 0,
         });
         widgets.len() as i64
     });
@@ -244,6 +265,8 @@ pub fn register_widget(hwnd: isize, kind: WidgetKind, control_id: u16) -> i64 {
             match_parent_height: false,
             match_parent_width: false,
             detaches_hidden: false,
+            distribution: 0,
+            alignment: 0,
         });
         widgets.len() as i64
     })
@@ -269,6 +292,8 @@ pub fn register_widget_with_layout(hwnd: HWND, kind: WidgetKind, spacing: f64, i
             match_parent_height: false,
             match_parent_width: false,
             detaches_hidden: false,
+            distribution: 0,
+            alignment: 0,
         });
         widgets.len() as i64
     });
@@ -295,6 +320,8 @@ pub fn register_widget_with_layout(hwnd: isize, kind: WidgetKind, spacing: f64, 
             match_parent_height: false,
             match_parent_width: false,
             detaches_hidden: false,
+            distribution: 0,
+            alignment: 0,
         });
         widgets.len() as i64
     })
@@ -354,6 +381,8 @@ pub fn get_widget_info(handle: i64) -> Option<WidgetInfo> {
                 match_parent_height: widgets[idx].match_parent_height,
                 match_parent_width: widgets[idx].match_parent_width,
                 detaches_hidden: widgets[idx].detaches_hidden,
+                distribution: widgets[idx].distribution,
+                alignment: widgets[idx].alignment,
             })
         } else {
             None
@@ -522,6 +551,40 @@ pub fn set_fills_remaining(handle: i64, fills: bool) {
         let idx = (handle - 1) as usize;
         if idx < widgets.len() {
             widgets[idx].fills_remaining = fills;
+        }
+    });
+}
+
+/// Set the distribution mode on a stack widget.
+/// 0 = Fill, 1 = FillEqually, -1 = GravityAreas (default).
+pub fn set_distribution(handle: i64, distribution: i64) {
+    WIDGETS.with(|w| {
+        let mut widgets = w.borrow_mut();
+        let idx = (handle - 1) as usize;
+        if idx < widgets.len() {
+            widgets[idx].distribution = distribution;
+        }
+    });
+}
+
+/// Set the edge insets (padding) on a widget.
+pub fn set_insets(handle: i64, top: f64, left: f64, bottom: f64, right: f64) {
+    WIDGETS.with(|w| {
+        let mut widgets = w.borrow_mut();
+        let idx = (handle - 1) as usize;
+        if idx < widgets.len() {
+            widgets[idx].insets = (top, left, bottom, right);
+        }
+    });
+}
+
+/// Set the alignment mode on a stack widget.
+pub fn set_alignment(handle: i64, alignment: i64) {
+    WIDGETS.with(|w| {
+        let mut widgets = w.borrow_mut();
+        let idx = (handle - 1) as usize;
+        if idx < widgets.len() {
+            widgets[idx].alignment = alignment;
         }
     });
 }
@@ -712,27 +775,48 @@ pub fn set_control_size(handle: i64, size: i64) {
     }
 }
 
+/// Corner radius values keyed by widget handle — applied during layout when
+/// the widget has its final size (not at set time, when the HWND is still tiny).
+static CORNER_RADII: std::sync::Mutex<Vec<(i64, f64)>> = std::sync::Mutex::new(Vec::new());
+
 /// Set the corner radius of a widget.
+/// The radius is stored and applied during layout via `apply_corner_radius`.
 pub fn set_corner_radius(handle: i64, radius: f64) {
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(hwnd) = get_hwnd(handle) {
+    if let Ok(mut radii) = CORNER_RADII.lock() {
+        // Update existing or insert new
+        if let Some(entry) = radii.iter_mut().find(|e| e.0 == handle) {
+            entry.1 = radius;
+        } else {
+            radii.push((handle, radius));
+        }
+    }
+}
+
+/// Apply the stored corner radius to a widget after it has been laid out
+/// and has its final size. Called from the layout engine.
+#[cfg(target_os = "windows")]
+pub fn apply_corner_radius(handle: i64) {
+    let radius = if let Ok(radii) = CORNER_RADII.lock() {
+        radii.iter().find(|e| e.0 == handle).map(|e| e.1)
+    } else {
+        None
+    };
+    if let Some(radius) = radius {
+        if let Some(hwnd) = get_hwnd_safe(handle) {
             unsafe {
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
-                let rgn = CreateRoundRectRgn(
-                    0, 0,
-                    rect.right + 1, rect.bottom + 1,
-                    radius as i32, radius as i32,
-                );
-                SetWindowRgn(hwnd, rgn, true);
+                // Corner radius applied at layout time
+                if rect.right > 0 && rect.bottom > 0 {
+                    let rgn = CreateRoundRectRgn(
+                        0, 0,
+                        rect.right + 1, rect.bottom + 1,
+                        radius as i32, radius as i32,
+                    );
+                    SetWindowRgn(hwnd, rgn, true);
+                }
             }
         }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (handle, radius);
     }
 }
 
@@ -799,25 +883,33 @@ pub fn set_hugging_priority(handle: i64, priority: f64) {
 }
 
 /// Set the background color of a widget.
-pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, _a: f64) {
+pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     #[cfg(target_os = "windows")]
     {
-        let color = rgb_to_colorref(r, g, b);
+        // Alpha-blend semi-transparent colors against ancestor bg (or white)
+        let (fr, fg, fb) = if a < 0.999 {
+            let ancestor = get_hwnd_safe(handle).and_then(|h| find_ancestor_hwnd_bg_color(h));
+            let (ar, ag, ab) = match ancestor {
+                Some(c) => ((c & 0xFF) as f64 / 255.0, ((c >> 8) & 0xFF) as f64 / 255.0, ((c >> 16) & 0xFF) as f64 / 255.0),
+                None => (1.0, 1.0, 1.0),
+            };
+            (r * a + ar * (1.0 - a), g * a + ag * (1.0 - a), b * a + ab * (1.0 - a))
+        } else {
+            (r, g, b)
+        };
+        let color = rgb_to_colorref(fr, fg, fb);
         let brush = unsafe { CreateSolidBrush(COLORREF(color)) };
         BG_COLORS.with(|c| c.borrow_mut().insert(handle, color));
         BG_BRUSHES.with(|b| b.borrow_mut().insert(handle, brush));
-        // Use get_hwnd_safe (Mutex-based, reentrancy-safe) to always find the HWND
         let hwnd_opt = get_hwnd_safe(handle);
         if let Some(hwnd) = hwnd_opt {
-            // Store color directly on the HWND via SetPropW so WM_PAINT can
-            // retrieve it without any RefCell borrow
             set_hwnd_bg_color(hwnd, color);
             unsafe { let _ = InvalidateRect(hwnd, None, true); }
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (handle, r, g, b, _a);
+        let _ = (handle, r, g, b, a);
     }
 }
 
@@ -863,11 +955,106 @@ pub fn find_ancestor_hwnd_bg_color(mut hwnd: HWND) -> Option<u32> {
     None
 }
 
+/// Paint a gradient background for `hwnd` if one has been registered.
+/// Returns `true` if a gradient was painted, `false` otherwise (caller should fall through to solid color).
+#[cfg(target_os = "windows")]
+pub fn paint_gradient(hwnd: HWND, hdc: HDC, rect: &RECT) -> bool {
+    let key = hwnd.0 as isize;
+    let (c1, c2, vertical) = match GRADIENT_MAP.lock() {
+        Ok(map) => {
+            // Search from the end (most recent entry wins if duplicates)
+            match map.iter().rev().find(|(k, _)| *k == key) {
+                Some((_, info)) => (info.c1, info.c2, info.vertical),
+                None => return false,
+            }
+        }
+        Err(_) => return false,
+    };
+
+    // Extract RGB byte components from COLORREF (0x00BBGGRR)
+    let r1 = (c1 & 0xFF) as u16;
+    let g1 = ((c1 >> 8) & 0xFF) as u16;
+    let b1 = ((c1 >> 16) & 0xFF) as u16;
+    let r2 = (c2 & 0xFF) as u16;
+    let g2 = ((c2 >> 8) & 0xFF) as u16;
+    let b2 = ((c2 >> 16) & 0xFF) as u16;
+
+    // TRIVERTEX color components are u16 in 0-65535 range; multiply byte value by 257
+    let vertices = [
+        TRIVERTEX {
+            x: rect.left,
+            y: rect.top,
+            Red: r1 * 257,
+            Green: g1 * 257,
+            Blue: b1 * 257,
+            Alpha: 0,
+        },
+        TRIVERTEX {
+            x: rect.right,
+            y: rect.bottom,
+            Red: r2 * 257,
+            Green: g2 * 257,
+            Blue: b2 * 257,
+            Alpha: 0,
+        },
+    ];
+
+    let grad_rect = GRADIENT_RECT {
+        UpperLeft: 0,
+        LowerRight: 1,
+    };
+
+    let mode = if vertical { GRADIENT_FILL_RECT_V } else { GRADIENT_FILL_RECT_H };
+
+    unsafe {
+        let _ = GradientFill(
+            hdc,
+            &vertices,
+            &grad_rect as *const GRADIENT_RECT as *const core::ffi::c_void,
+            1,
+            mode,
+        );
+    }
+    true
+}
+
 /// Set the background gradient of a widget.
-pub fn set_background_gradient(handle: i64, _r1: f64, _g1: f64, _b1: f64, _a1: f64, _r2: f64, _g2: f64, _b2: f64, _a2: f64, _direction: f64) {
-    // Win32 gradient would require GradientFill() in WM_ERASEBKGND.
-    // Best-effort no-op.
-    let _ = handle;
+/// Stores gradient info in GRADIENT_MAP for WM_ERASEBKGND painting via GradientFill.
+/// Also stores c1 as a solid fallback for ancestor color inheritance.
+pub fn set_background_gradient(handle: i64, r1: f64, g1: f64, b1: f64, a1: f64, r2: f64, g2: f64, b2: f64, _a2: f64, _direction: f64) {
+    #[cfg(target_os = "windows")]
+    {
+        let c1 = rgb_to_colorref(r1, g1, b1);
+        let c2 = rgb_to_colorref(r2, g2, b2);
+        // direction: 0 = horizontal (left to right), 1 = vertical (top to bottom)
+        let vertical = _direction != 0.0;
+
+        // Store gradient info in GRADIENT_MAP keyed by HWND
+        if let Some(hwnd) = get_hwnd_safe(handle) {
+            let key = hwnd.0 as isize;
+            if let Ok(mut map) = GRADIENT_MAP.lock() {
+                // Remove any existing entry for this hwnd
+                map.retain(|(k, _)| *k != key);
+                map.push((key, GradientInfo { c1, c2, vertical }));
+            }
+
+            // Also store gradient colors as HWND properties so paint handlers can
+            // detect gradient presence without the Mutex if needed
+            unsafe {
+                let prop_c1: Vec<u16> = "PerryGradC1".encode_utf16().chain(std::iter::once(0)).collect();
+                let prop_c2: Vec<u16> = "PerryGradC2".encode_utf16().chain(std::iter::once(0)).collect();
+                SetPropW(hwnd, windows::core::PCWSTR(prop_c1.as_ptr()), HANDLE((c1 as usize + 1) as *mut _));
+                SetPropW(hwnd, windows::core::PCWSTR(prop_c2.as_ptr()), HANDLE((c2 as usize + 1) as *mut _));
+            }
+        }
+
+        // Set c1 as fallback solid color for ancestor color inheritance
+        set_background_color(handle, r1, g1, b1, a1);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (handle, r1, g1, b1, a1, r2, g2, b2, _a2, _direction);
+    }
 }
 
 /// Set an on-hover callback for a widget.

@@ -48,6 +48,122 @@ struct ImageTint {
 
 thread_local! {
     static IMAGE_TINTS: RefCell<HashMap<i64, ImageTint>> = RefCell::new(HashMap::new());
+    /// Store file paths so we can reload at different sizes
+    static IMAGE_PATHS: RefCell<HashMap<i64, String>> = RefCell::new(HashMap::new());
+}
+
+/// Load an image file (PNG, JPEG, etc.) via GDI+ and return as HBITMAP.
+#[cfg(target_os = "windows")]
+fn load_image_gdiplus(wide_path: &[u16]) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::Graphics::GdiPlus::*;
+
+    unsafe {
+        // Initialize GDI+
+        let mut token: usize = 0;
+        let input = GdiplusStartupInput {
+            GdiplusVersion: 1,
+            ..Default::default()
+        };
+        let status = GdiplusStartup(&mut token, &input, std::ptr::null_mut());
+        if status.0 != 0 {
+            return None;
+        }
+
+        // Load image from file
+        let mut gp_image: *mut GpImage = std::ptr::null_mut();
+        let status = GdipLoadImageFromFile(windows::core::PCWSTR(wide_path.as_ptr()), &mut gp_image);
+        if status.0 != 0 || gp_image.is_null() {
+            GdiplusShutdown(token);
+            return None;
+        }
+
+        // Get dimensions
+        let mut width: u32 = 0;
+        let mut height: u32 = 0;
+        GdipGetImageWidth(gp_image, &mut width);
+        GdipGetImageHeight(gp_image, &mut height);
+        if width == 0 || height == 0 {
+            GdipDisposeImage(gp_image);
+            GdiplusShutdown(token);
+            return None;
+        }
+
+        // Create a GDI+ graphics context on a memory DC and draw the image.
+        // Pre-fill with white so PNG transparency composites correctly.
+        let screen_dc = GetDC(None);
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        let hbitmap = CreateCompatibleBitmap(screen_dc, width as i32, height as i32);
+        let old_bmp = SelectObject(mem_dc, hbitmap);
+
+        // Fill background with white (transparent areas will show as white)
+        let bg_rect = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+        let white_brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
+        FillRect(mem_dc, &bg_rect, white_brush);
+
+        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+        GdipCreateFromHDC(mem_dc, &mut graphics);
+        if !graphics.is_null() {
+            GdipDrawImageRectI(graphics, gp_image, 0, 0, width as i32, height as i32);
+            GdipDeleteGraphics(graphics);
+        }
+
+        SelectObject(mem_dc, old_bmp);
+        DeleteDC(mem_dc);
+        ReleaseDC(None, screen_dc);
+        GdipDisposeImage(gp_image);
+        GdiplusShutdown(token);
+
+        Some(hbitmap)
+    }
+}
+
+/// Load an image scaled to specific dimensions via GDI+.
+#[cfg(target_os = "windows")]
+fn load_image_gdiplus_scaled(wide_path: &[u16], target_w: i32, target_h: i32) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::Graphics::GdiPlus::*;
+
+    unsafe {
+        let mut token: usize = 0;
+        let input = GdiplusStartupInput { GdiplusVersion: 1, ..Default::default() };
+        let status = GdiplusStartup(&mut token, &input, std::ptr::null_mut());
+        if status.0 != 0 { return None; }
+
+        let mut gp_image: *mut GpImage = std::ptr::null_mut();
+        let status = GdipLoadImageFromFile(windows::core::PCWSTR(wide_path.as_ptr()), &mut gp_image);
+        if status.0 != 0 || gp_image.is_null() {
+            GdiplusShutdown(token);
+            return None;
+        }
+
+        let screen_dc = GetDC(None);
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        let hbitmap = CreateCompatibleBitmap(screen_dc, target_w, target_h);
+        let old_bmp = SelectObject(mem_dc, hbitmap);
+
+        // Fill with white for transparency compositing
+        let bg_rect = RECT { left: 0, top: 0, right: target_w, bottom: target_h };
+        let white_brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
+        FillRect(mem_dc, &bg_rect, white_brush);
+
+        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+        GdipCreateFromHDC(mem_dc, &mut graphics);
+        if !graphics.is_null() {
+            // Set high quality interpolation for scaling
+            GdipSetInterpolationMode(graphics, InterpolationMode(7)); // HighQualityBicubic
+            GdipDrawImageRectI(graphics, gp_image, 0, 0, target_w, target_h);
+            GdipDeleteGraphics(graphics);
+        }
+
+        SelectObject(mem_dc, old_bmp);
+        DeleteDC(mem_dc);
+        ReleaseDC(None, screen_dc);
+        GdipDisposeImage(gp_image);
+        GdiplusShutdown(token);
+
+        Some(hbitmap)
+    }
 }
 
 /// Create an Image from a file path. Returns widget handle.
@@ -74,26 +190,34 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
             )
             .unwrap();
 
-            // Load the image from file using LoadImageW
+            // Load the image from file — try GDI+ for PNG/JPEG support,
+            // fall back to LoadImageW for BMP/ICO
             let wide_path = to_wide(path);
-            let hbitmap = LoadImageW(
-                None,
-                windows::core::PCWSTR(wide_path.as_ptr()),
-                IMAGE_BITMAP,
-                0, 0, // use actual size
-                LR_LOADFROMFILE | LR_DEFAULTSIZE,
-            );
+            let hbitmap = load_image_gdiplus(&wide_path);
 
-            if let Ok(hbitmap) = hbitmap {
+            // Fall back to LoadImageW for BMP/ICO
+            let hbitmap_handle = hbitmap.map(|b| b.0 as isize).or_else(|| {
+                LoadImageW(
+                    None,
+                    windows::core::PCWSTR(wide_path.as_ptr()),
+                    IMAGE_BITMAP,
+                    0, 0,
+                    LR_LOADFROMFILE | LR_DEFAULTSIZE,
+                ).ok().map(|h| h.0 as isize)
+            });
+
+            if let Some(hbmp) = hbitmap_handle {
                 SendMessageW(
                     hwnd,
                     STM_SETIMAGE,
                     WPARAM(IMAGE_BITMAP.0 as usize),
-                    LPARAM(hbitmap.0 as isize),
+                    LPARAM(hbmp),
                 );
             }
 
-            register_widget(hwnd, WidgetKind::Image, control_id)
+            let handle = register_widget(hwnd, WidgetKind::Image, control_id);
+            IMAGE_PATHS.with(|p| p.borrow_mut().insert(handle, path.to_string()));
+            handle
         }
     }
 
@@ -160,19 +284,31 @@ pub fn create_symbol(name_ptr: *const u8) -> i64 {
     }
 }
 
-/// Set the size of an Image widget.
+/// Set the size of an Image widget. Reloads the bitmap scaled to the new size.
 pub fn set_size(handle: i64, width: f64, height: f64) {
+    // Also set fixed dimensions so the layout engine uses these
+    super::set_fixed_width(handle, width as i32);
+    super::set_fixed_height(handle, height as i32);
+
     #[cfg(target_os = "windows")]
     {
         if let Some(hwnd) = super::get_hwnd(handle) {
+            let w = width as i32;
+            let h = height as i32;
             unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    0, 0,
-                    width as i32, height as i32,
-                    SWP_NOMOVE | SWP_NOZORDER,
-                );
+                let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER);
+            }
+            // Reload the bitmap scaled to the new size
+            let path = IMAGE_PATHS.with(|p| p.borrow().get(&handle).cloned());
+            if let Some(path) = path {
+                let wide_path = to_wide(&path);
+                if let Some(hbitmap) = load_image_gdiplus_scaled(&wide_path, w, h) {
+                    unsafe {
+                        SendMessageW(hwnd, STM_SETIMAGE,
+                            WPARAM(IMAGE_BITMAP.0 as usize),
+                            LPARAM(hbitmap.0 as isize));
+                    }
+                }
             }
         }
     }

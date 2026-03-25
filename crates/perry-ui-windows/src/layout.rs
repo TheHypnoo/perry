@@ -65,21 +65,43 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
 
     let detaches_hidden = info.detaches_hidden;
 
-    // Count visible children and spacers
+    let distribution = info.distribution;
+
+    // Count visible children and spacers; move hidden children off-screen
     let mut visible_children: Vec<i64> = Vec::new();
     let mut spacer_count = 0i32;
 
     for &child in &children {
         if let Some(ci) = widgets::get_widget_info(child) {
             if ci.hidden {
-                if detaches_hidden {
-                    continue; // fully excluded from layout
+                // Move hidden children off-screen to prevent overlap artifacts
+                #[cfg(target_os = "windows")]
+                {
+                    if let Some(child_hwnd) = widgets::get_hwnd_safe(child) {
+                        unsafe { let _ = MoveWindow(child_hwnd, -10000, -10000, 0, 0, false); }
+                    }
                 }
                 continue;
             }
             visible_children.push(child);
             if matches!(ci.kind, WidgetKind::Spacer) || ci.fills_remaining {
                 spacer_count += 1;
+            }
+        }
+    }
+
+    // Distribution=0 (Fill): if no child is a spacer/fills_remaining, make the
+    // last visible non-Spacer child fill remaining space (matches macOS behavior
+    // where the lowest-hugging-priority view stretches).
+    if distribution == 0 && spacer_count == 0 && !visible_children.is_empty() {
+        // Find last non-Spacer child
+        for i in (0..visible_children.len()).rev() {
+            if let Some(ci) = widgets::get_widget_info(visible_children[i]) {
+                if !matches!(ci.kind, WidgetKind::Spacer) {
+                    widgets::set_fills_remaining(visible_children[i], true);
+                    spacer_count = 1;
+                    break;
+                }
             }
         }
     }
@@ -154,9 +176,12 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
                 } else {
                     (pos, inset_top, size, available_cross)
                 };
+                // position child
                 unsafe {
                     let _ = MoveWindow(child_hwnd, x, y, w, h, true);
                 }
+                // Apply deferred corner radius now that widget has its final size
+                widgets::apply_corner_radius(child);
                 // Recursively layout container children
                 layout_widget(child, w, h);
             }
@@ -187,6 +212,7 @@ fn layout_scrollview(handle: i64, width: i32, height: i32) {
                 unsafe {
                     let _ = MoveWindow(child_hwnd, 0, 0, width, content_height, true);
                 }
+                widgets::apply_corner_radius(child);
                 layout_widget(child, width, content_height);
 
                 // Update scroll info
@@ -219,6 +245,7 @@ fn layout_zstack(handle: i64, width: i32, height: i32) {
                     unsafe {
                         let _ = MoveWindow(child_hwnd, 0, 0, width, height, true);
                     }
+                    widgets::apply_corner_radius(child);
                     layout_widget(child, width, height);
                 }
             }
@@ -244,6 +271,7 @@ fn layout_navstack(handle: i64, width: i32, height: i32) {
                     unsafe {
                         let _ = MoveWindow(child_hwnd, 0, 0, width, height, true);
                     }
+                    widgets::apply_corner_radius(child);
                     layout_widget(child, width, height);
                 }
             }
@@ -276,10 +304,18 @@ fn measure_intrinsic(handle: i64, kind: &WidgetKind, vertical: bool, cross_size:
             if vertical { 20 } else { 100 }
         }
         WidgetKind::Button => {
-            if vertical { 30 } else { 80 }
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(hwnd) = widgets::get_hwnd_safe(handle) {
+                    let size = measure_text_height(hwnd, cross_size, vertical);
+                    // Add padding: 8px vertical, 16px horizontal
+                    return if vertical { size + 16 } else { size + 32 };
+                }
+            }
+            if vertical { 34 } else { 100 }
         }
         WidgetKind::TextField => {
-            if vertical { 24 } else { 200 }
+            if vertical { 30 } else { 200 }
         }
         WidgetKind::Toggle => {
             if vertical { 24 } else { 100 }

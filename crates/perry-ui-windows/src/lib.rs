@@ -578,10 +578,11 @@ pub extern "C" fn perry_ui_widget_set_tooltip(handle: i64, text_ptr: i64) {
     widgets::set_tooltip(handle, text_ptr as *const u8);
 }
 
-/// Set hidden state.
+/// Set hidden state. Triggers a layout pass so newly visible widgets get sized.
 #[no_mangle]
 pub extern "C" fn perry_ui_set_widget_hidden(handle: i64, hidden: i64) {
     widgets::set_hidden(handle, hidden != 0);
+    app::request_layout();
 }
 
 // =============================================================================
@@ -1118,7 +1119,9 @@ pub extern "C" fn perry_ui_scrollview_end_refreshing(_handle: i64) {}
 pub extern "C" fn perry_ui_scrollview_set_refresh_control(_handle: i64, _callback: f64) {}
 
 #[no_mangle]
-pub extern "C" fn perry_ui_stack_set_distribution(_handle: i64, _distribution: i64) {}
+pub extern "C" fn perry_ui_stack_set_distribution(handle: i64, distribution: i64) {
+    widgets::set_distribution(handle, distribution);
+}
 
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_reorder_child(_parent: i64, _child: i64, _index: i64) {}
@@ -1183,7 +1186,9 @@ pub extern "C" fn js_get_export(_module: i64, _name: i64) -> f64 {
 pub extern "C" fn perry_ui_text_set_wraps(_handle: i64, _wraps: i64) {}
 
 #[no_mangle]
-pub extern "C" fn perry_ui_textfield_get_string(_handle: i64) -> i64 { 0 }
+pub extern "C" fn perry_ui_textfield_get_string(handle: i64) -> i64 {
+    widgets::textfield::get_string(handle)
+}
 
 #[no_mangle]
 pub extern "C" fn perry_ui_textfield_set_on_submit(_handle: i64, _callback: f64) {
@@ -1335,7 +1340,9 @@ pub extern "C" fn perry_ui_textfield_blur_all() {}
 // =============================================================================
 
 #[no_mangle]
-pub extern "C" fn perry_ui_stack_set_alignment(_handle: i64, _alignment: f64) {}
+pub extern "C" fn perry_ui_stack_set_alignment(handle: i64, alignment: f64) {
+    widgets::set_alignment(handle, alignment as i64);
+}
 
 // =============================================================================
 // Widget overlay & edge insets stubs
@@ -1352,7 +1359,9 @@ pub extern "C" fn perry_ui_widget_add_overlay(_parent: i64, _child: i64) {
 pub extern "C" fn perry_ui_widget_set_overlay_frame(_handle: i64, _x: f64, _y: f64, _w: f64, _h: f64) {}
 
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_set_edge_insets(_handle: i64, _top: f64, _left: f64, _bottom: f64, _right: f64) {}
+pub extern "C" fn perry_ui_widget_set_edge_insets(handle: i64, top: f64, left: f64, bottom: f64, right: f64) {
+    widgets::set_insets(handle, top, left, bottom, right);
+}
 
 // =============================================================================
 // LSP bridge stubs (not yet implemented on Windows)

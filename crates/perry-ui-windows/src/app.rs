@@ -929,6 +929,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        x if x == 0x0133 /* WM_CTLCOLOREDIT */ => {
+            let hdc = HDC(wparam.0 as *mut _);
+            let child_hwnd = HWND(lparam.0 as *mut _);
+            if let Some(brush) = crate::widgets::textfield::handle_ctlcoloredit(hdc, child_hwnd) {
+                return LRESULT(brush);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_CTLCOLORBTN => {
             // Make buttons use the nearest ancestor's background color
             let hdc = HDC(wparam.0 as *mut _);

@@ -48,8 +48,37 @@ unsafe extern "system" fn container_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        x if x == 0x0133 /* WM_CTLCOLOREDIT */ => {
+            if let Ok(parent) = GetParent(hwnd) {
+                return SendMessageW(parent, msg, wparam, lparam);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_ERASEBKGND | WM_PAINT => {
-            // Get bg color directly from HWND property (survives RefCell reentrancy)
+            // Try gradient fill first (real GDI GradientFill)
+            if msg == WM_ERASEBKGND {
+                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                if crate::widgets::paint_gradient(hwnd, hdc, &rect) {
+                    return LRESULT(1);
+                }
+            } else {
+                // WM_PAINT — check if gradient exists before BeginPaint
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                let has_gradient = crate::widgets::GRADIENT_MAP.lock()
+                    .map(|map| map.iter().any(|(k, _)| *k == hwnd.0 as isize))
+                    .unwrap_or(false);
+                if has_gradient {
+                    let mut ps = windows::Win32::Graphics::Gdi::PAINTSTRUCT::default();
+                    let hdc = windows::Win32::Graphics::Gdi::BeginPaint(hwnd, &mut ps);
+                    crate::widgets::paint_gradient(hwnd, hdc, &rect);
+                    windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);
+                    return LRESULT(0);
+                }
+            }
+            // Fall through to solid color fill
             let color = super::get_hwnd_bg_color(hwnd)
                 .or_else(|| super::find_ancestor_hwnd_bg_color(hwnd));
             if let Some(color) = color {
