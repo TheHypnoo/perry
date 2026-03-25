@@ -92,6 +92,9 @@ enum Commands {
 
     /// Internationalization tools (extract strings, manage locales)
     I18n(commands::i18n::I18nArgs),
+
+    /// Log in to your Perry account (GitHub OAuth)
+    Login(commands::login::LoginArgs),
 }
 
 /// Check if the first non-flag argument looks like a TypeScript file
@@ -236,6 +239,9 @@ fn main_inner() -> Result<()> {
         }
         Commands::I18n(args) => {
             commands::i18n::run(args, cli.format)
+        }
+        Commands::Login(args) => {
+            commands::login::run(args, cli.format, use_color)
         }
     };
 

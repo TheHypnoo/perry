@@ -821,30 +821,37 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let android_permissions = config.android.as_ref().and_then(|a| a.permissions.clone());
     let android_distribute = config.android.as_ref().and_then(|a| a.distribute.clone());
 
-    // --- Resolve license key ---
+    // --- Resolve authentication ---
+    // Priority: --license-key flag -> PERRY_LICENSE_KEY env -> api_token -> saved license_key -> auto-register
+    let api_token = saved.api_token.clone();
     let license_key = args
         .license_key
         .clone()
         .or_else(|| std::env::var("PERRY_LICENSE_KEY").ok())
         .or_else(|| saved.license_key.clone());
 
-    let license_key = match license_key {
-        Some(k) => k,
-        None => {
-            // Auto-register a free license
-            if let OutputFormat::Text = format {
-                print!("  No license key found. Registering free license...");
-                std::io::stdout().flush().ok();
+    let (license_key, use_bearer_auth) = if let Some(ref token) = api_token {
+        // Prefer API token if available (user ran 'perry login')
+        (token.clone(), true)
+    } else {
+        match license_key {
+            Some(k) => (k, false),
+            None => {
+                // Auto-register a free device-bound license
+                if let OutputFormat::Text = format {
+                    print!("  No license key found. Registering free license...");
+                    std::io::stdout().flush().ok();
+                }
+                let key = auto_register_license(&server_url).await?;
+                if let OutputFormat::Text = format {
+                    println!(" {}", style("done").green());
+                    println!("  {} License: {}", style("✓").green().bold(), style(&key).bold());
+                }
+                // Save immediately
+                saved.license_key = Some(key.clone());
+                save_config(&saved).ok();
+                (key, false)
             }
-            let key = auto_register_license(&server_url).await?;
-            if let OutputFormat::Text = format {
-                println!(" {}", style("done").green());
-                println!("  {} License: {}", style("✓").green().bold(), style(&key).bold());
-            }
-            // Save immediately
-            saved.license_key = Some(key.clone());
-            save_config(&saved).ok();
-            key
         }
     };
 
@@ -1786,15 +1793,26 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let tarball_b64 = base64::engine::general_purpose::STANDARD.encode(&tarball);
 
     let client = reqwest::Client::new();
-    let form = multipart::Form::new()
-        .text("license_key", license_key)
+    let mut form = multipart::Form::new()
         .text("manifest", serde_json::to_string(&manifest)?)
         .text("credentials", serde_json::to_string(&credentials)?)
         .text("tarball_b64", tarball_b64);
 
-    let resp = client
+    // Add license_key to form for legacy auth (non-Bearer)
+    if !use_bearer_auth {
+        form = form.text("license_key", license_key.clone());
+    }
+
+    let mut req = client
         .post(format!("{server_url}/api/v1/build"))
-        .multipart(form)
+        .multipart(form);
+
+    // Add Bearer token for API-token auth
+    if use_bearer_auth {
+        req = req.header("Authorization", format!("Bearer {}", license_key));
+    }
+
+    let resp = req
         .send()
         .await
         .context("Failed to connect to build server")?;
@@ -1802,6 +1820,30 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
+
+        // Handle specific error codes with helpful messages
+        if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(code) = err_json.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_str()) {
+                match code {
+                    "PUBLISH_LIMIT_REACHED" => {
+                        let msg = err_json.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()).unwrap_or("Monthly publish limit reached");
+                        eprintln!();
+                        eprintln!("  {} {}", style("!").yellow().bold(), msg);
+                        eprintln!();
+                        bail!("Publish limit reached");
+                    }
+                    "ACCOUNT_REQUIRED" => {
+                        let msg = err_json.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()).unwrap_or("Account required for multiple projects");
+                        eprintln!();
+                        eprintln!("  {} {}", style("!").yellow().bold(), msg);
+                        eprintln!();
+                        bail!("Account required");
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         bail!("Build server returned {status}: {body}");
     }
 
@@ -2299,6 +2341,10 @@ pub(crate) struct PerryConfig {
     pub(crate) server: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) default_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) api_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) github_username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) apple: Option<AppleSavedConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]

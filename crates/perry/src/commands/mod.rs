@@ -10,6 +10,7 @@ pub mod fix_applier;
 pub mod fixer;
 pub mod i18n;
 pub mod init;
+pub mod login;
 pub mod publish;
 pub mod run;
 pub mod setup;
