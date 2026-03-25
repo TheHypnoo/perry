@@ -11,12 +11,10 @@ use crate::{OutputFormat, Platform};
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
-    /// Target platform (macos, ios, android, web). Defaults to host platform.
-    #[arg(value_enum)]
-    pub platform: Option<Platform>,
-
-    /// Input TypeScript file
-    pub input: Option<PathBuf>,
+    /// Positional args: [platform] [input]. Platform is one of: macos, ios,
+    /// watchos, tvos, android, linux, windows, web. If the first arg is not a
+    /// known platform it is treated as the input file/directory.
+    pub positional: Vec<String>,
 
     /// Specific iOS simulator UDID to target
     #[arg(long)]
@@ -56,6 +54,42 @@ pub struct RunArgs {
     pub program_args: Vec<String>,
 }
 
+impl RunArgs {
+    /// Parse the positional arguments into an optional platform and optional input path.
+    /// If the first positional arg is a known platform name, it's used as the platform;
+    /// otherwise it's treated as the input file/directory.
+    pub fn parse_positional(&self) -> (Option<Platform>, Option<PathBuf>) {
+        let mut iter = self.positional.iter();
+        let first = match iter.next() {
+            Some(v) => v,
+            None => return (None, None),
+        };
+
+        // Try to parse as a platform
+        if let Some(platform) = parse_platform(first) {
+            let input = iter.next().map(PathBuf::from);
+            (Some(platform), input)
+        } else {
+            // Not a platform — treat as input path
+            (None, Some(PathBuf::from(first)))
+        }
+    }
+}
+
+fn parse_platform(s: &str) -> Option<Platform> {
+    match s.to_lowercase().as_str() {
+        "macos" => Some(Platform::Macos),
+        "ios" => Some(Platform::Ios),
+        "watchos" => Some(Platform::Watchos),
+        "tvos" => Some(Platform::Tvos),
+        "android" => Some(Platform::Android),
+        "linux" => Some(Platform::Linux),
+        "windows" => Some(Platform::Windows),
+        "web" => Some(Platform::Web),
+        _ => None,
+    }
+}
+
 /// A detected simulator or device
 struct DeviceInfo {
     udid: String,
@@ -63,11 +97,14 @@ struct DeviceInfo {
 }
 
 pub fn run(args: RunArgs, format: OutputFormat, use_color: bool, verbose: u8) -> Result<()> {
+    // 0. Parse positional args into platform + input
+    let (platform, input_path) = args.parse_positional();
+
     // 1. Resolve entry file
-    let input = resolve_entry_file(args.input.as_deref())?;
+    let input = resolve_entry_file(input_path.as_deref())?;
 
     // 2. Resolve target and device
-    let (target, device_udid) = resolve_target(&args)?;
+    let (target, device_udid) = resolve_target(platform, &args)?;
 
     // 3. Decide local vs remote compilation
     let needs_cross = matches!(target.as_deref(), Some("ios-simulator") | Some("ios") | Some("android") | Some("watchos-simulator") | Some("watchos") | Some("tvos-simulator") | Some("tvos"));
@@ -1611,8 +1648,8 @@ fn read_perry_toml_entry() -> Option<PathBuf> {
 }
 
 /// Resolve the compilation target and optional device UDID
-fn resolve_target(args: &RunArgs) -> Result<(Option<String>, Option<String>)> {
-    match args.platform {
+fn resolve_target(platform: Option<Platform>, args: &RunArgs) -> Result<(Option<String>, Option<String>)> {
+    match platform {
         Some(Platform::Web) => Ok((Some("web".to_string()), None)),
         Some(Platform::Android) => {
             let devices = detect_android_devices()?;

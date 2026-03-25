@@ -4402,9 +4402,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         cmd.arg("-Wl,--allow-multiple-definition")
            .arg("-lm")
            .arg("-lpthread")
-           .arg("-ldl")
-           .arg("-lpulse-simple") // PulseAudio simple API for audio capture
-           .arg("-lpulse");
+           .arg("-ldl");
 
         if ctx.needs_stdlib || jsruntime_lib.is_some() {
             cmd.arg("-lssl")
@@ -4518,6 +4516,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                        .arg("-lglib-2.0")
                        .arg("-lgio-2.0");
                 }
+                // PulseAudio for audio capture (only needed with UI)
+                cmd.arg("-lpulse-simple")
+                   .arg("-lpulse");
             } else if is_windows {
                 // Win32 system libs already linked above
             } else {
