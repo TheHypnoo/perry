@@ -4280,6 +4280,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
          // per module). Large codebases (100+ modules) can overflow the
          // default 1MB stack. Reserve 8MB.
          .arg("/STACK:67108864");
+        // perry_ui and native libs are staticlibs that bundle perry_runtime.
+        // strip_duplicate_objects_from_lib removes most duplicates, but
+        // monomorphized/inlined perry_runtime symbols in the UI crate's own
+        // CGUs can't be stripped without breaking the UI code. These are
+        // identical definitions (same source), so /FORCE:MULTIPLE is safe.
+        // MSVC link.exe handles this silently; lld-link requires the flag.
+        c.arg("/FORCE:MULTIPLE");
         // Set up MSVC library search paths if LIB env isn't already configured
         if std::env::var("LIB").is_err() {
             if let Some(lib_paths) = find_msvc_lib_paths() {
