@@ -1914,16 +1914,45 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let mut download_path: Option<String> = None;
     let mut artifact_name: Option<String> = None;
     let mut build_success = false;
+    let mut ws_retries = 0u32;
+    let max_ws_retries = 10u32;
 
     use futures_util::StreamExt;
+    'ws_loop: loop {
     while let Some(msg) = read.next().await {
         let msg = match msg {
             Ok(m) => m,
             Err(e) => {
-                if let Some(ref pb) = pb {
-                    pb.abandon_with_message(format!("WebSocket error: {e}"));
+                // WebSocket dropped — try to reconnect and re-subscribe
+                ws_retries += 1;
+                if ws_retries > max_ws_retries {
+                    if let Some(ref pb) = pb {
+                        pb.abandon_with_message(format!("WebSocket error after {max_ws_retries} retries: {e}"));
+                    }
+                    bail!("WebSocket error after {max_ws_retries} retries: {e}");
                 }
-                bail!("WebSocket error: {e}");
+                if let OutputFormat::Text = format {
+                    if let Some(ref pb) = pb {
+                        pb.println(format!("    {} Connection lost, reconnecting ({ws_retries}/{max_ws_retries})...", style("!").yellow()));
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                match tokio_tungstenite::connect_async(&ws_url).await {
+                    Ok((new_ws, _)) => {
+                        let (mut new_write, new_read) = new_ws.split();
+                        let _ = new_write.send(Message::Text(
+                            format!(r#"{{"type":"subscribe","job_id":"{}"}}"#, build_resp.job_id).into(),
+                        )).await;
+                        read = new_read;
+                        continue 'ws_loop;
+                    }
+                    Err(re) => {
+                        if let Some(ref pb) = pb {
+                            pb.abandon_with_message(format!("Reconnect failed: {re}"));
+                        }
+                        bail!("WebSocket reconnect failed: {re}");
+                    }
+                }
             }
         };
 
@@ -2129,6 +2158,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             }
         }
     }
+    break; // Normal exit from while loop means stream ended
+    } // end 'ws_loop
 
     if !build_success {
         bail!("Build failed");
