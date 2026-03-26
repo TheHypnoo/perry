@@ -360,8 +360,11 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
     eprintln!("[strip-dedup] {lib_name}: keeping {} of {} members (excluded: {} by .lib set, {} by name pattern)",
         ui_only_deps.len(), staticlib_members.len(), excluded_by_set, excluded_by_pattern);
 
-    let trimmed_lib = abs_staticlib.with_file_name(format!("_{lib_name}_trimmed.lib"));
-    let extract_dir = abs_staticlib.with_file_name(format!("_{lib_name}_extract"));
+    // Write trimmed lib to a temp directory — the source lib may be on a read-only mount (e.g. Docker)
+    let tmp_base = std::env::temp_dir().join(format!("perry_strip_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_base).ok();
+    let trimmed_lib = tmp_base.join(format!("_{lib_name}_trimmed.lib"));
+    let extract_dir = tmp_base.join(format!("_{lib_name}_extract"));
     let _ = std::fs::remove_dir_all(&extract_dir);
     std::fs::create_dir_all(&extract_dir)?;
 
