@@ -60,11 +60,24 @@ pub extern "C" fn perry_i18n_init(
     // Detect system locale
     let system_locale = detect_system_locale();
 
+    let mut log = format!("[i18n] configured locales: {:?}\n", locales);
+    log += &format!("[i18n] detected system locale: {:?}\n", system_locale);
+
     if let Some(locale_str) = system_locale {
         if let Some(idx) = match_locale(&locale_str, &locales) {
+            log += &format!("[i18n] matched locale index: {} ({})\n", idx, locales[idx]);
             LOCALE_INDEX.store(idx as i32, Ordering::Relaxed);
+        } else {
+            log += &format!("[i18n] no match found, using default (index 0)\n");
         }
-        // If no match, LOCALE_INDEX stays at 0 (default locale)
+    } else {
+        log += "[i18n] no system locale detected, using default (index 0)\n";
+    }
+    log += &format!("[i18n] final LOCALE_INDEX: {}\n", LOCALE_INDEX.load(Ordering::Relaxed));
+
+    // Write to Documents for retrieval via devicectl
+    if let Ok(home) = std::env::var("HOME") {
+        let _ = std::fs::write(format!("{}/Documents/i18n-debug.log", home), log.as_bytes());
     }
 }
 

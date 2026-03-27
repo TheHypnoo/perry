@@ -138,4 +138,30 @@ mod init_guard {
 #[no_mangle]
 pub extern "C" fn perry_runtime_widget_init() {
     gc::js_gc_init();
+
+    // Install early panic hook so we capture panics that happen before App()
+    std::panic::set_hook(Box::new(|info| {
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+        let location = if let Some(loc) = info.location() {
+            format!(" at {}:{}", loc.file(), loc.line())
+        } else {
+            String::new()
+        };
+        let full = format!("PERRY PANIC: {}{}\n", msg, location);
+        // Write to stderr (may not be visible on iOS)
+        eprintln!("{}", full);
+        // Write to a file in the app's Documents directory
+        if let Ok(home) = std::env::var("HOME") {
+            let path = format!("{}/Documents/perry-crash.log", home);
+            let _ = std::fs::write(&path, full.as_bytes());
+        }
+        // Also try the tmp directory (always writable on iOS)
+        let _ = std::fs::write("/tmp/perry-crash.log", full.as_bytes());
+    }));
 }

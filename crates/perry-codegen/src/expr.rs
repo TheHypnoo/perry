@@ -271,7 +271,7 @@ pub(crate) fn compile_expr(
                 // Single locale, no params — emit the translated string directly
                 let s = if key_count > 0 {
                     let flat_idx = *string_idx as usize;
-                    translations.get(flat_idx).cloned().unwrap_or_else(|| key.clone())
+                    translations.get(flat_idx).filter(|t| !t.is_empty()).cloned().unwrap_or_else(|| key.clone())
                 } else {
                     key.clone()
                 };
@@ -367,7 +367,7 @@ pub(crate) fn compile_expr(
                 // Single locale (with params, since no-params was handled above)
                 let s = if key_count > 0 {
                     let flat_idx = *string_idx as usize;
-                    translations.get(flat_idx).cloned().unwrap_or_else(|| key.clone())
+                    translations.get(flat_idx).filter(|t| !t.is_empty()).cloned().unwrap_or_else(|| key.clone())
                 } else {
                     key.clone()
                 };
@@ -411,7 +411,10 @@ pub(crate) fn compile_expr(
                     builder.seal_block(locale_blocks[i]);
 
                     let flat_idx = i * key_count + *string_idx as usize;
-                    let s = translations.get(flat_idx).cloned().unwrap_or_else(|| key.clone());
+                    let s = translations.get(flat_idx)
+                        .filter(|t| !t.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| key.clone());
                     let str_f64 = compile_expr(builder, module, func_ids, closure_func_ids,
                         func_wrapper_ids, extern_funcs, async_func_ids, classes, enums,
                         func_param_types, func_union_params, func_return_types,
