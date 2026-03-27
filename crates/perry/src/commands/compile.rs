@@ -4248,7 +4248,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
         let mut c = Command::new(&ld64);
         c.arg("-arch").arg("arm64")
-         .arg("-platform_version").arg("ios").arg("17.0.0").arg("17.0.0")
+         .arg("-platform_version").arg("ios").arg("17.0.0").arg("26.0.0")
          .arg("-syslibroot").arg(&sysroot)
          .arg("-L").arg(format!("{}/usr/lib", sysroot))
          .arg("-L").arg(format!("{}/usr/lib/swift", sysroot))
@@ -4397,7 +4397,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
         let mut c = Command::new(&ld64);
         c.arg("-arch").arg("arm64")
-         .arg("-platform_version").arg("macos").arg("13.0.0").arg("13.0.0")
+         .arg("-platform_version").arg("macos").arg("13.0.0").arg("26.0.0")
          .arg("-syslibroot").arg(&sysroot)
          .arg("-L").arg(format!("{}/usr/lib", sysroot))
          .arg("-L").arg(format!("{}/usr/lib/swift", sysroot))
