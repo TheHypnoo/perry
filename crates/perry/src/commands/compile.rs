@@ -218,6 +218,7 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
         Some("android") => Some("aarch64-linux-android"),
         Some("linux") => Some("x86_64-unknown-linux-gnu"),
         Some("windows") => Some("x86_64-pc-windows-msvc"),
+        Some("macos") => Some("aarch64-apple-darwin"),
         _ => None,
     }
 }
@@ -4369,6 +4370,33 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
         }
         c
+    } else if is_cross_macos {
+        // Cross-compile macOS from Linux using ld64.lld + Apple SDK sysroot
+        let ld64 = find_llvm_tool("ld64.lld")
+            .or_else(|| {
+                for p in &["/usr/local/bin/ld64.lld", "/usr/bin/ld64.lld-18", "/usr/bin/ld64.lld"] {
+                    if std::path::Path::new(p).exists() { return Some(PathBuf::from(p)); }
+                }
+                None
+            })
+            .unwrap_or_else(|| {
+                eprintln!("Warning: ld64.lld not found for macOS cross-compilation. Install lld.");
+                PathBuf::from("ld64.lld")
+            });
+        let sysroot = std::env::var("PERRY_MACOS_SYSROOT")
+            .unwrap_or_else(|_| "/opt/apple-sysroot/macos".to_string());
+        eprintln!("[cross-macos] Using ld64.lld: {}", ld64.display());
+        eprintln!("[cross-macos] Sysroot: {sysroot}");
+
+        let mut c = Command::new(&ld64);
+        c.arg("-arch").arg("arm64")
+         .arg("-platform_version").arg("macos").arg("13.0.0").arg("13.0.0")
+         .arg("-syslibroot").arg(&sysroot)
+         .arg("-L").arg(format!("{}/usr/lib", sysroot))
+         .arg("-L").arg(format!("{}/usr/lib/swift", sysroot))
+         .arg("-lSystem")
+         .arg("-dead_strip");
+        c
     } else {
         Command::new("cc")
     };
@@ -4383,7 +4411,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     if !is_windows {
         if is_android || is_linux {
             cmd.arg("-Wl,--gc-sections");
-        } else if is_cross_ios {
+        } else if is_cross_ios || is_cross_macos {
             // ld64.lld called directly — no -Wl, prefix needed
             cmd.arg("-dead_strip");
         } else if is_watchos {
@@ -4591,9 +4619,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("runtimeobject.lib")
            .arg("iphlpapi.lib");
     } else {
-        // On macOS, we need additional frameworks for the runtime (sysinfo, etc.) and V8
-        #[cfg(target_os = "macos")]
-        {
+        // macOS frameworks for runtime (sysinfo, etc.) and V8
+        if cfg!(target_os = "macos") || is_cross_macos {
             cmd.arg("-framework").arg("Security")
                .arg("-framework").arg("CoreFoundation")
                .arg("-framework").arg("SystemConfiguration")
@@ -4605,9 +4632,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
         }
 
-        // On Linux, link against system libraries
-        #[cfg(target_os = "linux")]
-        {
+        // On Linux (native, not cross-compiling to macOS), link against system libraries
+        if (cfg!(target_os = "linux") && !is_cross_macos) {
             cmd.arg("-lm")
                .arg("-lpthread")
                .arg("-ldl");
@@ -4681,8 +4707,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             } else if is_windows {
                 // Win32 system libs already linked above
             } else {
-                #[cfg(target_os = "macos")]
-                {
+                if cfg!(target_os = "macos") || is_cross_macos {
                     cmd.arg("-framework").arg("AppKit");
                     cmd.arg("-framework").arg("QuartzCore"); // CAGradientLayer, CALayer
                     cmd.arg("-framework").arg("AVFoundation"); // AVAudioEngine for audio capture
