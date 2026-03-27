@@ -1730,8 +1730,8 @@ impl Compiler {
         // For non-entry modules, always generate the init function even if empty,
         // because the entry module will call it.
         // For entry module, generate main if there are init statements or other module inits to call.
-        let should_compile_init = !hir.init.is_empty()
-            || !self.is_entry_module
+        let should_compile_init = self.is_entry_module  // Always generate main for entry module
+            || !hir.init.is_empty()
             || !self.native_module_inits.is_empty()
             || self.needs_js_runtime
             || self.needs_dotenv_init
