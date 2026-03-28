@@ -1312,8 +1312,10 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                     is_async: fn_decl.function.is_async,
                 };
 
-                // Define local variable and assign closure via Stmt::Let
-                let local_id = ctx.define_local(func_name.clone(), Type::Any);
+                // Define local variable and assign closure via Stmt::Let.
+                // Use existing local if already pre-registered (function hoisting).
+                let local_id = ctx.lookup_local(&func_name)
+                    .unwrap_or_else(|| ctx.define_local(func_name.clone(), Type::Any));
                 result.push(Stmt::Let {
                     id: local_id,
                     name: func_name,

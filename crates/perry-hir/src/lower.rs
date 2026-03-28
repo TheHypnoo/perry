@@ -5713,9 +5713,38 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 destructuring_stmts.extend(stmts);
             }
 
-            // Lower body
+            // Hoist function declarations in block body (JS hoisting semantics)
+            if let ast::BlockStmtOrExpr::BlockStmt(block) = &*arrow.body {
+                for stmt in &block.stmts {
+                    if let ast::Stmt::Decl(ast::Decl::Fn(fn_decl)) = stmt {
+                        if fn_decl.function.body.is_some() {
+                            let name = fn_decl.ident.sym.to_string();
+                            if ctx.lookup_local(&name).is_none() {
+                                ctx.define_local(name, Type::Any);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Lower body with JS function hoisting
             let mut body = match &*arrow.body {
-                ast::BlockStmtOrExpr::BlockStmt(block) => lower_block_stmt(ctx, block)?,
+                ast::BlockStmtOrExpr::BlockStmt(block) => {
+                    let mut var_decls = Vec::new();
+                    let mut func_decls = Vec::new();
+                    let mut exec_stmts = Vec::new();
+                    for stmt in &block.stmts {
+                        let lowered = crate::lower_decl::lower_body_stmt(ctx, stmt)?;
+                        match stmt {
+                            ast::Stmt::Decl(ast::Decl::Fn(_)) => func_decls.extend(lowered),
+                            ast::Stmt::Decl(ast::Decl::Var(_)) => var_decls.extend(lowered),
+                            _ => exec_stmts.extend(lowered),
+                        }
+                    }
+                    var_decls.extend(func_decls);
+                    var_decls.extend(exec_stmts);
+                    var_decls
+                }
                 ast::BlockStmtOrExpr::Expr(expr) => {
                     let return_expr = lower_expr(ctx, expr)?;
                     vec![Stmt::Return(Some(return_expr))]
@@ -5824,9 +5853,39 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 destructuring_stmts.extend(stmts);
             }
 
-            // Lower body
+            // Hoist function declarations: pre-register all function declarations in the body
+            // so they can be referenced before their lexical position (JS hoisting semantics).
+            if let Some(ref block) = fn_expr.function.body {
+                for stmt in &block.stmts {
+                    if let ast::Stmt::Decl(ast::Decl::Fn(fn_decl)) = stmt {
+                        if fn_decl.function.body.is_some() {
+                            let name = fn_decl.ident.sym.to_string();
+                            if ctx.lookup_local(&name).is_none() {
+                                ctx.define_local(name, Type::Any);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Lower body with JS function hoisting: variable declarations first,
+            // then function declarations, then executable statements.
+            // This ensures captured variables are initialized before closures reference them.
             let mut body = if let Some(ref block) = fn_expr.function.body {
-                lower_block_stmt(ctx, block)?
+                let mut var_decls = Vec::new();
+                let mut func_decls = Vec::new();
+                let mut exec_stmts = Vec::new();
+                for stmt in &block.stmts {
+                    let lowered = crate::lower_decl::lower_body_stmt(ctx, stmt)?;
+                    match stmt {
+                        ast::Stmt::Decl(ast::Decl::Fn(_)) => func_decls.extend(lowered),
+                        ast::Stmt::Decl(ast::Decl::Var(_)) => var_decls.extend(lowered),
+                        _ => exec_stmts.extend(lowered),
+                    }
+                }
+                var_decls.extend(func_decls);
+                var_decls.extend(exec_stmts);
+                var_decls
             } else {
                 Vec::new()
             };

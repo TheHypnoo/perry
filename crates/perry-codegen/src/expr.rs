@@ -13560,7 +13560,9 @@ pub(crate) fn compile_expr(
                     let ptr = builder.ins().global_value(types::I64, global_val);
                     let ctor_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr, 0);
 
-                    // Compile args and call via js_closure_call
+                    // Compile args and call via js_closure_call.
+                    // NaN-box I64 pointer args (arrays, objects) so the closure can
+                    // extract them via js_nanbox_get_pointer.
                     if args.is_empty() {
                         let call_func = extern_funcs.get("js_closure_call0")
                             .ok_or_else(|| anyhow!("js_closure_call0 not declared"))?;
@@ -13569,7 +13571,15 @@ pub(crate) fn compile_expr(
                         return Ok(builder.inst_results(call)[0]);
                     } else if args.len() == 1 {
                         let arg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
-                        let arg_f64 = ensure_f64(builder, arg_val);
+                        // NaN-box I64 values with POINTER_TAG so the closure can unbox them
+                        let arg_f64 = {
+                            let vt = builder.func.dfg.value_type(arg_val);
+                            if vt == types::I64 {
+                                inline_nanbox_pointer(builder, arg_val)
+                            } else {
+                                arg_val
+                            }
+                        };
                         let call_func = extern_funcs.get("js_closure_call1")
                             .ok_or_else(|| anyhow!("js_closure_call1 not declared"))?;
                         let call_ref = module.declare_func_in_func(*call_func, builder.func);
@@ -13578,8 +13588,8 @@ pub(crate) fn compile_expr(
                     } else if args.len() == 2 {
                         let arg0 = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
                         let arg1 = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[1], this_ctx)?;
-                        let arg0_f64 = ensure_f64(builder, arg0);
-                        let arg1_f64 = ensure_f64(builder, arg1);
+                        let arg0_f64 = { let vt = builder.func.dfg.value_type(arg0); if vt == types::I64 { inline_nanbox_pointer(builder, arg0) } else { arg0 } };
+                        let arg1_f64 = { let vt = builder.func.dfg.value_type(arg1); if vt == types::I64 { inline_nanbox_pointer(builder, arg1) } else { arg1 } };
                         let call_func = extern_funcs.get("js_closure_call2")
                             .ok_or_else(|| anyhow!("js_closure_call2 not declared"))?;
                         let call_ref = module.declare_func_in_func(*call_func, builder.func);
@@ -16044,10 +16054,11 @@ pub(crate) fn compile_expr(
                         true
                     }
                     Expr::IndexGet { object, .. } => {
-                        // Array element access like names[i] — if the array is a known string
-                        // array, the element is a string key. Only activate for string arrays.
+                        // Array element access like parts[0], names[i] — elements from arrays
+                        // used as object property keys are strings. Includes string arrays,
+                        // mixed arrays, and results from .split()/.map() etc.
                         if let Expr::LocalGet(id) = object.as_ref() {
-                            locals.get(id).map(|i| i.is_string).unwrap_or(false)
+                            locals.get(id).map(|i| i.is_string || i.is_array || i.is_mixed_array).unwrap_or(false)
                         } else {
                             false
                         }
