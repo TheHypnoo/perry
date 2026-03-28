@@ -368,7 +368,11 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
     let ui_only_deps: Vec<&String> = staticlib_members.iter().filter(|m| {
         if m.ends_with(".dll") { return false; }
         if m.contains("compiler_builtins") { excluded_by_pattern += 1; return false; }
-        if exclude_members.contains(m.as_str()) { excluded_by_set += 1; return false; }
+        // Don't exclude by name-match against runtime/stdlib member lists —
+        // same-named objects (alloc, core, std, windows crate) can contain
+        // different monomorphizations needed by the UI code. /FORCE:MULTIPLE
+        // handles the actual duplicate symbols at link time.
+        if exclude_members.contains(m.as_str()) { excluded_by_set += 1; }
         if has_rlib {
             if let Some(prefix) = rlib_objects.first()
                 .and_then(|o| o.split('.').next())
