@@ -76,7 +76,15 @@ Plugins must export these symbols:
 
 Perry generates these automatically from your `activate`/`deactivate` exports.
 
+## Native Extensions
+
+Perry also supports **native extensions** — packages that bundle platform-specific Rust/Swift/JNI code and compile directly into your binary. These are used for accessing platform APIs like the App Store review prompt or StoreKit in-app purchases.
+
+See [Native Extensions](native-extensions.md) for details.
+
 ## Next Steps
 
 - [Creating Plugins](creating-plugins.md) — Build a plugin step by step
 - [Hooks & Events](hooks-and-events.md) — Hook modes, event bus, tools
+- [Native Extensions](native-extensions.md) — Extensions with platform-native code
+- [App Store Review](appstore-review.md) — Native review prompt (iOS/Android)

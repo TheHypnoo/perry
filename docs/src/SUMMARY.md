@@ -96,6 +96,8 @@
 - [Overview](plugins/overview.md)
 - [Creating Plugins](plugins/creating-plugins.md)
 - [Hooks & Events](plugins/hooks-and-events.md)
+- [Native Extensions](plugins/native-extensions.md)
+- [App Store Review](plugins/appstore-review.md)
 
 # Testing
 
