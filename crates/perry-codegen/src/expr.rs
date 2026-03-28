@@ -5676,22 +5676,51 @@ pub(crate) fn compile_expr(
             let left_may_be_bool = may_produce_boolean(left, locals);
             let right_may_be_bool = may_produce_boolean(right, locals);
 
+            // Check if operands may be null/undefined (needs js_number_coerce for null→0)
+            fn may_be_nullable(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                match expr {
+                    Expr::Number(_) | Expr::Integer(_) | Expr::Bool(_) | Expr::BigInt(_) => false,
+                    Expr::Binary { .. } | Expr::Unary { op: UnaryOp::Neg, .. } => false,
+                    Expr::LocalGet(id) => {
+                        locals.get(id).map(|i| i.is_union || i.is_pointer).unwrap_or(true)
+                    }
+                    Expr::Null | Expr::Undefined => true,
+                    _ => true, // Conservative: assume nullable for property access, function calls, etc.
+                }
+            }
+            let left_may_be_null = may_be_nullable(left, locals);
+            let right_may_be_null = may_be_nullable(right, locals);
+
             let (lhs, rhs) = if exprs_equal(left, right) {
-                // Same expression - compile once and reuse
                 let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
-                // Ensure f64 for arithmetic operations (values may be i64 for Any-typed parameters)
                 let val = ensure_f64(builder, val);
-                let val = if left_may_be_bool { unbox_bool_to_number(builder, val) } else { val };
+                let val = if left_may_be_bool { unbox_bool_to_number(builder, val) }
+                    else if left_may_be_null {
+                        let coerce_func = extern_funcs.get("js_number_coerce").ok_or_else(|| anyhow!("js_number_coerce not declared"))?;
+                        let coerce_ref = module.declare_func_in_func(*coerce_func, builder.func);
+                        let call = builder.ins().call(coerce_ref, &[val]);
+                        builder.inst_results(call)[0]
+                    } else { val };
                 (val, val)
             } else {
                 let l = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
                 let r = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
-                // Ensure f64 for arithmetic operations (values may be i64 for Any-typed parameters)
                 let l_f64 = ensure_f64(builder, l);
                 let r_f64 = ensure_f64(builder, r);
-                // Convert NaN-boxed booleans to numeric 1.0/0.0 for arithmetic
-                let l_f64 = if left_may_be_bool { unbox_bool_to_number(builder, l_f64) } else { l_f64 };
-                let r_f64 = if right_may_be_bool { unbox_bool_to_number(builder, r_f64) } else { r_f64 };
+                let l_f64 = if left_may_be_bool { unbox_bool_to_number(builder, l_f64) }
+                    else if left_may_be_null {
+                        let coerce_func = extern_funcs.get("js_number_coerce").ok_or_else(|| anyhow!("js_number_coerce not declared"))?;
+                        let coerce_ref = module.declare_func_in_func(*coerce_func, builder.func);
+                        let call = builder.ins().call(coerce_ref, &[l_f64]);
+                        builder.inst_results(call)[0]
+                    } else { l_f64 };
+                let r_f64 = if right_may_be_bool { unbox_bool_to_number(builder, r_f64) }
+                    else if right_may_be_null {
+                        let coerce_func = extern_funcs.get("js_number_coerce").ok_or_else(|| anyhow!("js_number_coerce not declared"))?;
+                        let coerce_ref = module.declare_func_in_func(*coerce_func, builder.func);
+                        let call = builder.ins().call(coerce_ref, &[r_f64]);
+                        builder.inst_results(call)[0]
+                    } else { r_f64 };
                 (l_f64, r_f64)
             };
             let result = match op {
