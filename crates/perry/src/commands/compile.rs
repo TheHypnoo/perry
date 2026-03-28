@@ -5096,8 +5096,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         <dict>
             <key>CFBundleIconFiles</key>
             <array>
-                <string>Icon-120</string>
-                <string>Icon-180</string>
+                <string>AppIcon60x60</string>
             </array>
         </dict>
     </dict>
@@ -5107,8 +5106,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         <dict>
             <key>CFBundleIconFiles</key>
             <array>
-                <string>Icon-76</string>
-                <string>Icon-152</string>
+                <string>AppIcon76x76</string>
             </array>
         </dict>
     </dict>
