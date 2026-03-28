@@ -5090,6 +5090,28 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     <string>com.apple.compilers.llvm.clang.1_0</string>
     <key>UIRequiredDeviceCapabilities</key>
     <array><string>arm64</string></array>
+    <key>CFBundleIcons</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconFiles</key>
+            <array>
+                <string>Icon-120</string>
+                <string>Icon-180</string>
+            </array>
+        </dict>
+    </dict>
+    <key>CFBundleIcons~ipad</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconFiles</key>
+            <array>
+                <string>Icon-76</string>
+                <string>Icon-152</string>
+            </array>
+        </dict>
+    </dict>
     <key>UIDeviceFamily</key>
     <array>
         <integer>1</integer>
