@@ -13477,16 +13477,16 @@ pub(crate) fn compile_expr(
             // Last resort: try to call as cross-module imported constructor function.
             // For patterns like: export const Interface = function(abi) { return {...} }
             // called as: new Interface(abi)
-            // Try to find __wrapper_<class_name> and call it directly.
+
+            // Strategy 1: Try __wrapper_<class_name> (exported function wrapper)
             {
                 let wrapper_name = format!("__wrapper_{}", class_name);
                 let scoped_key = format!("__scoped_wrapper__{}", class_name);
                 let wrapper_func_id = if let Some(&scoped_func_id) = extern_funcs.get(scoped_key.as_str()) {
                     Some(scoped_func_id)
                 } else {
-                    // Try declaring the wrapper
                     let mut sig = module.make_signature();
-                    sig.params.push(AbiParam::new(types::I64)); // closure_ptr (pass 0)
+                    sig.params.push(AbiParam::new(types::I64));
                     for _ in 0..args.len() {
                         sig.params.push(AbiParam::new(types::F64));
                     }
@@ -13496,13 +13496,68 @@ pub(crate) fn compile_expr(
 
                 if let Some(func_id) = wrapper_func_id {
                     let func_ref = module.declare_func_in_func(func_id, builder.func);
-                    let mut call_args: Vec<Value> = vec![builder.ins().iconst(types::I64, 0)]; // null closure_ptr
+                    let mut call_args: Vec<Value> = vec![builder.ins().iconst(types::I64, 0)];
                     for arg in args {
                         let arg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arg, this_ctx)?;
                         call_args.push(ensure_f64(builder, arg_val));
                     }
                     let call = builder.ins().call(func_ref, &call_args);
                     return Ok(builder.inst_results(call)[0]);
+                }
+            }
+
+            // Strategy 2: Try __export_*__<class_name> data slot (exported const holding a closure).
+            // This handles `export const Interface = function() { return {...} }` patterns where
+            // the export is a data slot, not a function. Load the closure pointer and call it.
+            {
+                let suffix = format!("__{}", class_name);
+                // Search all data declarations (including imports from other modules)
+                let found_data_id = module.declarations().get_data_objects()
+                    .find(|(_, decl)| {
+                        decl.name.as_deref()
+                            .map(|name| name.starts_with("__export_") && name.ends_with(&suffix))
+                            .unwrap_or(false)
+                    })
+                    .map(|(id, _)| id)
+                    .or_else(|| {
+                        // Also try declaring it as an import with common module prefixes
+                        // The export name follows: __export_<module_path>__<name>
+                        // We don't know the module path, so try to find any matching declaration
+                        None
+                    });
+                if let Some(data_id) = found_data_id {
+                    // Load the closure pointer from the export data slot
+                    let global_val = module.declare_data_in_func(data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    let ctor_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr, 0);
+
+                    // Compile args and call via js_closure_call
+                    if args.is_empty() {
+                        let call_func = extern_funcs.get("js_closure_call0")
+                            .ok_or_else(|| anyhow!("js_closure_call0 not declared"))?;
+                        let call_ref = module.declare_func_in_func(*call_func, builder.func);
+                        let call = builder.ins().call(call_ref, &[ctor_ptr]);
+                        return Ok(builder.inst_results(call)[0]);
+                    } else if args.len() == 1 {
+                        let arg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+                        let arg_f64 = ensure_f64(builder, arg_val);
+                        let call_func = extern_funcs.get("js_closure_call1")
+                            .ok_or_else(|| anyhow!("js_closure_call1 not declared"))?;
+                        let call_ref = module.declare_func_in_func(*call_func, builder.func);
+                        let call = builder.ins().call(call_ref, &[ctor_ptr, arg_f64]);
+                        return Ok(builder.inst_results(call)[0]);
+                    } else if args.len() == 2 {
+                        let arg0 = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+                        let arg1 = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[1], this_ctx)?;
+                        let arg0_f64 = ensure_f64(builder, arg0);
+                        let arg1_f64 = ensure_f64(builder, arg1);
+                        let call_func = extern_funcs.get("js_closure_call2")
+                            .ok_or_else(|| anyhow!("js_closure_call2 not declared"))?;
+                        let call_ref = module.declare_func_in_func(*call_func, builder.func);
+                        let call = builder.ins().call(call_ref, &[ctor_ptr, arg0_f64, arg1_f64]);
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    // >2 args: fallthrough to Unknown class warning
                 }
             }
 
