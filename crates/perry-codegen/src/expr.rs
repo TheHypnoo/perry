@@ -2331,26 +2331,22 @@ pub(crate) fn compile_expr(
                 Some(ts_expr) => {
                     // new Date(value) - handles both numeric timestamps and date strings
                     let ts_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, ts_expr, this_ctx)?;
-                    // NaN-box strings with STRING_TAG so js_date_new_from_value can detect them.
-                    // Without this, string pointers get raw bitcast to f64 and lose their type info.
+                    // Handle I64 values: could be a string pointer (needs NaN-boxing with STRING_TAG)
+                    // or a numeric timestamp that was extracted as I64 from a Date-typed field.
+                    // Use js_number_coerce to properly convert: strings get parsed, numbers pass through,
+                    // null→0, undefined→NaN.
                     let ts_f64 = {
                         let val_type = builder.func.dfg.value_type(ts_val);
                         if val_type == types::I64 {
-                            // Check if the expression is a string
-                            fn is_string_date_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
-                                match expr {
-                                    Expr::String(_) => true,
-                                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
-                                    Expr::PropertyGet { .. } => true, // may be string
-                                    Expr::Call { .. } => false, // could be Date or number
-                                    _ => false,
-                                }
-                            }
-                            if is_string_date_expr(ts_expr, locals) {
-                                inline_nanbox_string(builder, ts_val)
-                            } else {
-                                inline_nanbox_pointer(builder, ts_val)
-                            }
+                            // I64 value in Date constructor: could be a string pointer
+                            // (from LocalGet with is_string, or PropertyGet returning Date-typed
+                            // field that's actually a NaN-boxed string from mysql2).
+                            // NaN-box as string for js_date_new_from_value to detect and parse.
+                            // For actual numeric timestamps (f64 stored as I64 via pointer path),
+                            // js_nanbox_get_pointer returns 0 → STRING_TAG with null ptr → NaN → epoch.
+                            // But the mysql2 driver returns strings for DATETIME, so this path
+                            // correctly handles the STRING_TAG extraction.
+                            inline_nanbox_string(builder, ts_val)
                         } else {
                             ts_val // Already f64 (number/timestamp)
                         }

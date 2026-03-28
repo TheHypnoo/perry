@@ -26,6 +26,8 @@ pub enum RawValue {
     Int64(i64),
     Float64(f64),
     String(String),
+    /// DATETIME/TIMESTAMP stored as milliseconds since epoch (for JS Date compatibility)
+    DateTimestamp(f64),
 }
 
 /// Raw column info for thread-safe data transfer
@@ -225,6 +227,11 @@ fn raw_value_to_jsvalue(value: &RawValue) -> JSValue {
         RawValue::String(s) => {
             let str_ptr = js_string_from_bytes(s.as_ptr(), s.len() as u32);
             JSValue::string_ptr(str_ptr)
+        }
+        RawValue::DateTimestamp(millis) => {
+            // Store as f64 timestamp — matches JS Date behavior.
+            // new Date(row.datetime) will receive the timestamp directly.
+            JSValue::number(*millis)
         }
     }
 }
