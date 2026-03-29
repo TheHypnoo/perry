@@ -182,6 +182,12 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
                 }
                 // Apply deferred corner radius now that widget has its final size
                 widgets::apply_corner_radius(child);
+                // Reload bitmap for Image widgets so it matches the layout size
+                if let Some(ci) = widgets::get_widget_info(child) {
+                    if matches!(ci.kind, WidgetKind::Image) {
+                        widgets::image::reload_bitmap_scaled(child, w, h);
+                    }
+                }
                 // Recursively layout container children
                 layout_widget(child, w, h);
             }

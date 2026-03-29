@@ -284,6 +284,26 @@ pub fn create_symbol(name_ptr: *const u8) -> i64 {
     }
 }
 
+/// Reload the bitmap scaled to the given pixel dimensions.
+/// Called by `set_size` and by the layout engine after `MoveWindow`.
+#[cfg(target_os = "windows")]
+pub fn reload_bitmap_scaled(handle: i64, w: i32, h: i32) {
+    if w <= 0 || h <= 0 { return; }
+    let path = IMAGE_PATHS.with(|p| p.borrow().get(&handle).cloned());
+    if let Some(path) = path {
+        if let Some(hwnd) = super::get_hwnd(handle) {
+            let wide_path = to_wide(&path);
+            if let Some(hbitmap) = load_image_gdiplus_scaled(&wide_path, w, h) {
+                unsafe {
+                    SendMessageW(hwnd, STM_SETIMAGE,
+                        WPARAM(IMAGE_BITMAP.0 as usize),
+                        LPARAM(hbitmap.0 as isize));
+                }
+            }
+        }
+    }
+}
+
 /// Set the size of an Image widget. Reloads the bitmap scaled to the new size.
 pub fn set_size(handle: i64, width: f64, height: f64) {
     // Also set fixed dimensions so the layout engine uses these
@@ -298,18 +318,7 @@ pub fn set_size(handle: i64, width: f64, height: f64) {
             unsafe {
                 let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER);
             }
-            // Reload the bitmap scaled to the new size
-            let path = IMAGE_PATHS.with(|p| p.borrow().get(&handle).cloned());
-            if let Some(path) = path {
-                let wide_path = to_wide(&path);
-                if let Some(hbitmap) = load_image_gdiplus_scaled(&wide_path, w, h) {
-                    unsafe {
-                        SendMessageW(hwnd, STM_SETIMAGE,
-                            WPARAM(IMAGE_BITMAP.0 as usize),
-                            LPARAM(hbitmap.0 as isize));
-                    }
-                }
-            }
+            reload_bitmap_scaled(handle, w, h);
         }
     }
 
