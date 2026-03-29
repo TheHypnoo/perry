@@ -4909,16 +4909,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                         if force_load {
                             cmd.arg(format!("-Wl,-force_load,{}", lib.display()));
                         } else if is_windows && lib.extension().map_or(false, |e| e == "lib") {
-                            // On Windows, native libs may be staticlibs that bundle
-                            // std/alloc/core. Strip duplicates using rlib + set exclusion.
-                            let deduped = match strip_duplicate_objects_from_lib(&lib) {
-                                Ok(trimmed) => trimmed,
-                                Err(e) => {
-                                    eprintln!("[strip-dedup] FAILED for native lib {}, using original: {e}", lib.display());
-                                    lib.clone()
-                                }
-                            };
-                            cmd.arg(&deduped);
+                            // On Windows, link native staticlibs directly —
+                            // /FORCE:MULTIPLE handles duplicate symbols.
+                            cmd.arg(&lib);
                         } else {
                             cmd.arg(&lib);
                         }
