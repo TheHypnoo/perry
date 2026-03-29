@@ -4696,19 +4696,21 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             find_ui_library(target.as_deref())
         };
         if let Some(ui_lib) = ui_lib_option {
-            // On Windows, the UI staticlib bundles its own copies of perry-runtime and
-            // Rust std. When perry-stdlib is also linked (which bundles the same), the
-            // duplicate Rust std CRT init causes a pre-main crash. Fix: extract only the
-            // UI-specific objects from the .lib and link them individually.
             // The UI staticlib bundles perry_runtime + Rust std. When perry-stdlib
             // is also linked (which bundles the same), duplicate symbols cause
             // crashes (conflicting static state initialization). Strip duplicates
-            // on all platforms, not just Windows.
-            let ui_lib = match strip_duplicate_objects_from_lib(&ui_lib) {
-                Ok(trimmed) => trimmed,
-                Err(e) => {
-                    eprintln!("[strip-dedup] FAILED for UI lib, using original: {e}");
-                    ui_lib
+            // on Apple platforms. On Windows, skip strip-dedup because perry_runtime
+            // objects contain monomorphizations needed by UI code, and /FORCE:MULTIPLE
+            // handles the duplicate symbols safely.
+            let ui_lib = if is_windows {
+                ui_lib
+            } else {
+                match strip_duplicate_objects_from_lib(&ui_lib) {
+                    Ok(trimmed) => trimmed,
+                    Err(e) => {
+                        eprintln!("[strip-dedup] FAILED for UI lib, using original: {e}");
+                        ui_lib
+                    }
                 }
             };
             cmd.arg(&ui_lib);
