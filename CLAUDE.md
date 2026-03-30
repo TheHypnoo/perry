@@ -142,7 +142,7 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 ### v0.4.32
 - fix: macOS `ImageFile` `setSize` now resizes the underlying NSImage to match — previously only the view frame changed, leaving the intrinsic content size mismatched; also sets `NSImageScaleProportionallyUpOrDown`
-- fix: macOS `ImageFile` resolves relative paths against the executable's directory — fixes images not loading inside `.app` bundles
+- fix: macOS `ImageFile` resolves relative paths via NSBundle.mainBundle.resourcePath first, then executable dir — fixes images in `.app` bundles
 - fix: Android APK now bundles `assets/`, `logo/`, `resources/`, `images/` directories — `ImageFile('assets/foo.png')` works at runtime
 
 ### v0.4.31
