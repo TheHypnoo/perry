@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.29
+**Current Version:** 0.4.30
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.30
+- fix: `arr[i]` in for-loop inside function returned `arr[0]` for every `i` — LICM incorrectly hoisted loop-counter-indexed array reads as invariant when BCE didn't fire (module-level `const` limits like `MAX_COINS` had `is_integer=false` despite having `const_value`); also `collect_assigned_ids` only scanned loop body, missing the `update` expression where the counter is assigned
 
 ### v0.4.29
 - fix: Android crash in UI pump ticks — perry-native thread exited after `main()` returned, dropping the thread-local arena and freeing all module-level arrays/objects; UI thread's pump tick then called `getLevelInfo()` on dangling pointers → segfault. Fixed by parking the perry-native thread after init instead of letting it exit.

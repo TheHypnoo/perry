@@ -2450,7 +2450,7 @@ pub(crate) fn compile_stmt(
                                 bce_constant_limit = Some(*f as i64);
                                 Some(builder.ins().iconst(types::I32, *f as i64))
                             }
-                            // Pattern 4: i < other_local (if it's an integer variable)
+                            // Pattern 4: i < other_local (if it's an integer variable or compile-time constant)
                             Expr::LocalGet(limit_id) => {
                                 if let Some(limit_info) = locals.get(limit_id) {
                                     if limit_info.is_i32 {
@@ -2461,6 +2461,13 @@ pub(crate) fn compile_stmt(
                                         let limit_f64 = ensure_f64(builder, limit_val);
                                         let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, limit_f64);
                                         Some(builder.ins().ireduce(types::I32, i64_val))
+                                    } else if let Some(cv) = limit_info.const_value {
+                                        // Module-level constants (e.g., `const MAX = 100`) have
+                                        // const_value set but is_integer=false. Use the known value.
+                                        if cv >= 0.0 && cv <= i32::MAX as f64 && cv.fract() == 0.0 {
+                                            bce_constant_limit = Some(cv as i64);
+                                            Some(builder.ins().iconst(types::I32, cv as i64))
+                                        } else { None }
                                     } else { None }
                                 } else { None }
                             }
@@ -3631,9 +3638,15 @@ pub(crate) fn compile_stmt(
 
                 let counter_id = bce_index_var.unwrap_or(u32::MAX);
 
-                // Collect all assigned variables in loop body
+                // Collect all assigned variables in loop body AND update expression.
+                // The update expression (e.g., `i = i + 1`) is NOT part of body,
+                // so we must scan it separately to ensure the loop counter is included.
+                // Without this, LICM incorrectly hoists arr[i] when bce_index_var is None.
                 let mut assigned_in_loop: HashSet<LocalId> = HashSet::new();
                 collect_assigned_ids_stmts(body, &mut assigned_in_loop);
+                if let Some(upd) = update {
+                    collect_assigned_ids_expr(upd, &mut assigned_in_loop);
+                }
                 // The counter itself is always assigned in the loop
                 assigned_in_loop.insert(counter_id);
 
