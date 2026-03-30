@@ -171,10 +171,22 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
         {
             // Use Mutex-based HWND lookup (reentrancy-safe)
             if let Some(child_hwnd) = widgets::get_hwnd_safe(child) {
-                let (x, y, w, h) = if vertical {
-                    (inset_left, pos, available_cross, size)
+                let ci_info = widgets::get_widget_info(child);
+                // For the cross-axis, respect fixed dimensions when set
+                // (e.g., Image with setSize(56,56) shouldn't stretch to parent height)
+                let cross = if let Some(ref ci) = ci_info {
+                    if vertical {
+                        ci.fixed_width.unwrap_or(available_cross)
+                    } else {
+                        ci.fixed_height.unwrap_or(available_cross)
+                    }
                 } else {
-                    (pos, inset_top, size, available_cross)
+                    available_cross
+                };
+                let (x, y, w, h) = if vertical {
+                    (inset_left, pos, cross, size)
+                } else {
+                    (pos, inset_top, size, cross)
                 };
                 // position child
                 unsafe {
@@ -183,7 +195,7 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
                 // Apply deferred corner radius now that widget has its final size
                 widgets::apply_corner_radius(child);
                 // Reload bitmap for Image widgets so it matches the layout size
-                if let Some(ci) = widgets::get_widget_info(child) {
+                if let Some(ci) = ci_info {
                     if matches!(ci.kind, WidgetKind::Image) {
                         widgets::image::reload_bitmap_scaled(child, w, h);
                     }
