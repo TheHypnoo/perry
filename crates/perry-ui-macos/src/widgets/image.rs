@@ -88,10 +88,36 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
     };
 
     unsafe {
-        let ns_path = NSString::from_str(&resolved);
-        let image: Option<Retained<NSImage>> = msg_send![
-            NSImage::alloc(), initWithContentsOfFile: &*ns_path
-        ];
+        // Read file bytes with Rust, then create NSImage from NSData
+        let image_obj: *mut objc2::runtime::AnyObject = match std::fs::read(&resolved) {
+            Ok(bytes) => {
+                let len = bytes.len();
+                eprintln!("[perry-ui-macos] ImageFile: read {} bytes from '{}'", len, resolved);
+                if len == 0 {
+                    eprintln!("[perry-ui-macos] ImageFile: FILE IS EMPTY!");
+                    std::ptr::null_mut()
+                } else {
+                    let ns_data_cls = objc2::runtime::AnyClass::get(c"NSData").unwrap();
+                    let ns_data: *mut objc2::runtime::AnyObject = msg_send![
+                        ns_data_cls, dataWithBytes: bytes.as_ptr() as *const std::ffi::c_void, length: len
+                    ];
+                    eprintln!("[perry-ui-macos] ImageFile: NSData created, null={}", ns_data.is_null());
+                    if ns_data.is_null() {
+                        std::ptr::null_mut()
+                    } else {
+                        let image_cls = objc2::runtime::AnyClass::get(c"NSImage").unwrap();
+                        let img: *mut objc2::runtime::AnyObject = msg_send![image_cls, alloc];
+                        let img: *mut objc2::runtime::AnyObject = msg_send![img, initWithData: ns_data];
+                        eprintln!("[perry-ui-macos] ImageFile: NSImage from data, null={}", img.is_null());
+                        img
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[perry-ui-macos] ImageFile: FAILED to read file '{}': {}", resolved, e);
+                std::ptr::null_mut()
+            }
+        };
 
         let image_view: Retained<NSImageView> = msg_send![
             NSImageView::alloc(mtm), initWithFrame: objc2_core_foundation::CGRect::new(
@@ -100,11 +126,8 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
             )
         ];
 
-        // Scale image to fit the view frame (prevents intrinsic size from overriding)
-        let _: () = msg_send![&*image_view, setImageScaling: 2_isize]; // NSImageScaleProportionallyUpOrDown
-
-        if let Some(img) = image {
-            let _: () = msg_send![&*image_view, setImage: &*img];
+        if !image_obj.is_null() {
+            let _: () = msg_send![&*image_view, setImage: image_obj];
         }
 
         let view: Retained<NSView> = Retained::cast_unchecked(image_view);
@@ -116,7 +139,7 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
 pub fn set_size(handle: i64, width: f64, height: f64) {
     if let Some(view) = super::get_widget(handle) {
         unsafe {
-            // Resize the NSImage itself so intrinsic content size matches
+            // Resize the NSImage itself so intrinsic content size matches the desired display size
             let image: *mut objc2::runtime::AnyObject = msg_send![&*view, image];
             if !image.is_null() {
                 let img_size = objc2_core_foundation::CGSize::new(width, height);
@@ -124,14 +147,6 @@ pub fn set_size(handle: i64, width: f64, height: f64) {
             }
             let size = objc2_core_foundation::CGSize::new(width, height);
             let _: () = msg_send![&*view, setFrameSize: size];
-            // Add constraints so stack views respect the size
-            let _: () = msg_send![&*view, setTranslatesAutoresizingMaskIntoConstraints: false];
-            let w_anchor: *mut objc2::runtime::AnyObject = msg_send![&*view, widthAnchor];
-            let w_constraint: *mut objc2::runtime::AnyObject = msg_send![w_anchor, constraintEqualToConstant: width];
-            let _: () = msg_send![w_constraint, setActive: true];
-            let h_anchor: *mut objc2::runtime::AnyObject = msg_send![&*view, heightAnchor];
-            let h_constraint: *mut objc2::runtime::AnyObject = msg_send![h_anchor, constraintEqualToConstant: height];
-            let _: () = msg_send![h_constraint, setActive: true];
         }
     }
 }

@@ -5490,6 +5490,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 let resource_dir = project_root.join(dir_name);
                 if resource_dir.is_dir() {
                     let dest = app_dir.join(dir_name);
+                    eprintln!("[perry] iOS asset copy: src={} -> dst={}", resource_dir.display(), dest.display());
                     fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
                         fs::create_dir_all(dst)?;
                         for entry in fs::read_dir(src)? {
@@ -5659,23 +5660,6 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     <true/>
     <key>NSPrincipalClass</key>
     <string>BloomApplication</string>
-    <key>UIApplicationSceneManifest</key>
-    <dict>
-        <key>UIApplicationSupportsMultipleScenes</key>
-        <false/>
-        <key>UISceneConfigurations</key>
-        <dict>
-            <key>UIWindowSceneSessionRoleApplication</key>
-            <array>
-                <dict>
-                    <key>UISceneConfigurationName</key>
-                    <string>Default Configuration</string>
-                    <key>UISceneDelegateClassName</key>
-                    <string>PerrySceneDelegate</string>
-                </dict>
-            </array>
-        </dict>
-    </dict>
 </dict>
 </plist>"#
         );
@@ -5728,11 +5712,23 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     }
                     Ok(())
                 }
-                for dir_name in &["logo", "assets", "resources", "images"] {
-                    let resource_dir = project_root.join(dir_name);
-                    if resource_dir.is_dir() {
-                        let dest = output_dir.join(dir_name);
-                        let _ = copy_dir_recursive_standalone(&resource_dir, &dest);
+                // Resolve output_dir: exe_path.parent() returns "" for bare filenames like "Mango"
+                let output_resolved = if output_dir.as_os_str().is_empty() {
+                    std::path::PathBuf::from(".")
+                } else {
+                    output_dir.to_path_buf()
+                };
+                let output_canon = output_resolved.canonicalize().unwrap_or_else(|_| output_resolved.clone());
+                let project_canon = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
+                // Skip asset copying if output dir IS the project root
+                // (fs::copy to self truncates files to 0 bytes)
+                if output_canon != project_canon {
+                    for dir_name in &["logo", "assets", "resources", "images"] {
+                        let resource_dir = project_root.join(dir_name);
+                        if resource_dir.is_dir() {
+                            let dest = output_dir.join(dir_name);
+                            let _ = copy_dir_recursive_standalone(&resource_dir, &dest);
+                        }
                     }
                 }
             }
