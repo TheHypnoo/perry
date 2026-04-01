@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.37
+**Current Version:** 0.4.38
 
 ## Workflow Requirements
 
@@ -139,6 +139,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.38
+- feat: `perry setup tvos` — guided wizard for tvOS App Store Connect credentials and bundle ID (reuses shared Apple credentials from iOS/macOS)
+- feat: `perry publish tvos` — full tvOS publishing support with bundle ID, entry point, deployment target, encryption exempt, and Info.plist config via `[tvos]` section in perry.toml
+- perf: direct object field get/set via compile-time known field indices — skips runtime hash lookup for object literals
 
 ### v0.4.37
 - fix: `is_string` locals (i64 pointers) passed to functions expecting f64 now NaN-box with STRING_TAG instead of POINTER_TAG — fixes `textfieldGetString` return values becoming `undefined` when used in `encodeURIComponent`, `||`, or cross-module calls (GH-10, GH-12)

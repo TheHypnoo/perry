@@ -125,6 +125,7 @@ struct PerryToml {
     macos: Option<MacosConfig>,
     ios: Option<IosConfig>,
     watchos: Option<WatchosConfig>,
+    tvos: Option<TvosConfig>,
     android: Option<AndroidConfig>,
     linux: Option<LinuxConfig>,
     windows: Option<WindowsConfig>,
@@ -231,6 +232,17 @@ struct AndroidConfig {
 #[derive(Debug, Deserialize)]
 struct WatchosConfig {
     bundle_id: Option<String>,
+    deployment_target: Option<String>,
+    encryption_exempt: Option<bool>,
+    info_plist: Option<std::collections::HashMap<String, String>>,
+    team_id: Option<String>,
+    signing_identity: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TvosConfig {
+    bundle_id: Option<String>,
+    entry: Option<String>,
     deployment_target: Option<String>,
     encryption_exempt: Option<bool>,
     info_plist: Option<std::collections::HashMap<String, String>>,
@@ -382,6 +394,12 @@ struct BuildManifest {
     macos_distribute: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     macos_encryption_exempt: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tvos_deployment_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tvos_encryption_exempt: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tvos_info_plist: Option<std::collections::HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     android_min_sdk: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -615,11 +633,12 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     } else if interactive {
         prompt_target(saved.default_target.as_deref())
     } else {
-        bail!("No target specified. Use: perry publish <macos|ios|android|linux|windows|web>");
+        bail!("No target specified. Use: perry publish <macos|ios|tvos|android|linux|windows|web>");
     };
 
     let target_display = match target_name.as_str() {
         "ios" => "iOS",
+        "tvos" => "tvOS",
         "android" => "Android",
         "linux" => "Linux",
         "windows" => "Windows",
@@ -627,6 +646,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         _ => "macOS",
     };
     let is_ios = target_name == "ios";
+    let is_tvos = target_name == "tvos";
     let is_android = target_name == "android";
     let is_linux = target_name == "linux";
 
@@ -649,6 +669,11 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             .or_else(|| config.app.as_ref().and_then(|a| a.entry.clone()))
             .or_else(|| config.project.as_ref().and_then(|p| p.entry.clone()))
             .unwrap_or_else(|| "src/main_ios.ts".into())
+    } else if is_tvos {
+        config.tvos.as_ref().and_then(|t| t.entry.clone())
+            .or_else(|| config.app.as_ref().and_then(|a| a.entry.clone()))
+            .or_else(|| config.project.as_ref().and_then(|p| p.entry.clone()))
+            .unwrap_or_else(|| "src/main_tvos.ts".into())
     } else {
         config.app.as_ref().and_then(|a| a.entry.clone())
             .or_else(|| config.project.as_ref().and_then(|p| p.entry.clone()))
@@ -690,12 +715,12 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     // Auto-increment build_number for targets that need monotonic build numbers
     let is_windows = target_name == "windows";
     let is_web = target_name == "web";
-    let is_macos = !is_ios && !is_android && !is_linux && !is_windows && !is_web;
+    let is_macos = !is_ios && !is_tvos && !is_android && !is_linux && !is_windows && !is_web;
     let macos_needs_upload = is_macos && matches!(
         macos_distribute.as_deref(),
         Some("appstore") | Some("both")
     );
-    let build_number = if is_ios || is_android || macos_needs_upload {
+    let build_number = if is_ios || is_tvos || is_android || macos_needs_upload {
         let n = toml_build_number + 1;
         if let Ok(content) = fs::read_to_string(&perry_toml_path) {
             let updated = if content.contains("build_number =") {
@@ -731,6 +756,12 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             .or_else(|| app_bundle_id.clone())
             .or_else(|| project_bundle_id.clone())
             .or_else(|| config.macos.as_ref().and_then(|m| m.bundle_id.clone()))
+            .unwrap_or_else(|| format!("com.perry.{}", app_name.to_lowercase().replace(' ', "-")))
+    } else if is_tvos {
+        config.tvos.as_ref().and_then(|t| t.bundle_id.clone())
+            .or_else(|| app_bundle_id.clone())
+            .or_else(|| project_bundle_id.clone())
+            .or_else(|| config.ios.as_ref().and_then(|i| i.bundle_id.clone()))
             .unwrap_or_else(|| format!("com.perry.{}", app_name.to_lowercase().replace(' ', "-")))
     } else {
         config.macos.as_ref().and_then(|m| m.bundle_id.clone())
@@ -1700,6 +1731,9 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         ios_info_plist: if is_ios { ios_info_plist } else { None },
         macos_distribute: if is_macos { macos_distribute } else { None },
         macos_encryption_exempt: if is_macos { macos_encryption_exempt } else { None },
+        tvos_deployment_target: if is_tvos { config.tvos.as_ref().and_then(|t| t.deployment_target.clone()) } else { None },
+        tvos_encryption_exempt: if is_tvos { config.tvos.as_ref().and_then(|t| t.encryption_exempt) } else { None },
+        tvos_info_plist: if is_tvos { config.tvos.as_ref().and_then(|t| t.info_plist.clone()) } else { None },
         android_min_sdk: if is_android { android_min_sdk } else { None },
         android_target_sdk: if is_android { android_target_sdk } else { None },
         android_permissions: if is_android { android_permissions } else { None },
@@ -2597,11 +2631,12 @@ pub(crate) fn prompt_input(prompt: &str, default: Option<&str>) -> Option<String
 
 /// Prompt for target platform selection. Returns "macos", "ios", "android", or "linux".
 fn prompt_target(default: Option<&str>) -> String {
-    let options = &["macOS", "iOS", "Android", "Linux"];
+    let options = &["macOS", "iOS", "tvOS", "Android", "Linux"];
     let default_idx = match default {
         Some("ios") => 1,
-        Some("android") => 2,
-        Some("linux") => 3,
+        Some("tvos") => 2,
+        Some("android") => 3,
+        Some("linux") => 4,
         _ => 0,
     };
     let selection = Select::new()
@@ -2612,8 +2647,9 @@ fn prompt_target(default: Option<&str>) -> String {
         .unwrap_or(0);
     match selection {
         1 => "ios".into(),
-        2 => "android".into(),
-        3 => "linux".into(),
+        2 => "tvos".into(),
+        3 => "android".into(),
+        4 => "linux".into(),
         _ => "macos".into(),
     }
 }
