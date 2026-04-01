@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.39
+**Current Version:** 0.4.40
 
 ## Workflow Requirements
 
@@ -139,6 +139,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.40
+- fix: Windows VStack/HStack `WS_CLIPCHILDREN` with local `WM_CTLCOLORSTATIC` handling — Text controls now fill their own background with ancestor color instead of relying on parent paint-through, fixing blank text over gradient backgrounds
+- fix: Windows `WM_MOUSEWHEEL` forwarded to window under cursor — scroll events now reach embedded views and ScrollViews instead of only the focused window
+- fix: Windows layout Fill distribution uses local tracking instead of permanently mutating widget flags — repeated layout passes with changing visibility no longer accumulate stale `fills_remaining`
+- fix: Windows Image `setSize` DPI-scales to match layout coordinates — images no longer appear at wrong size on high-DPI displays
 
 ### v0.4.39
 - fix: Android VStack default height changed from MATCH_PARENT to WRAP_CONTENT — prevents VStacks from expanding to fill parent, matching iOS UIStackView behavior; use `widgetMatchParentHeight()` to opt-in
