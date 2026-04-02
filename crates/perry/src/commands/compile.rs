@@ -733,6 +733,10 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
                 }
             }
         }
+        // When cargo install'd, check the original source tree's target dir
+        let source_target = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/release").join(name);
+        candidates.push(source_target);
         candidates.push(PathBuf::from(format!("/usr/local/lib/{}", name)));
         // Debian/Ubuntu: libs installed in /usr/lib/perry
         candidates.push(PathBuf::from(format!("/usr/lib/perry/{}", name)));
@@ -4487,6 +4491,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             // won't dead-strip. On macOS/Linux, the linker ignores unreferenced archives.
             if let Some(ref stdlib) = stdlib_lib {
                 cmd.arg(stdlib);
+                // Also link runtime to supply symbols that may be DCE'd from stdlib's
+                // bundled perry-runtime (e.g. js_closure_unbind_this, js_string_addref)
+                if !is_android && !is_windows {
+                    cmd.arg(&runtime_lib);
+                }
             } else {
                 if ctx.needs_stdlib {
                     eprintln!("Warning: stdlib required but {} not found, using runtime-only",
