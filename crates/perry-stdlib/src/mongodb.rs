@@ -172,7 +172,7 @@ pub unsafe extern "C" fn js_mongodb_collection_find_one(
                 let filter: Document = serde_json::from_str(&filter_json)
                     .unwrap_or_else(|_| doc! {});
 
-                match coll_wrapper.collection.find_one(filter, None).await {
+                match coll_wrapper.collection.find_one(filter).await {
                     Ok(Some(doc)) => {
                         let json = serde_json::to_string(&doc)
                             .unwrap_or_else(|_| "{}".to_string());
@@ -221,7 +221,7 @@ pub unsafe extern "C" fn js_mongodb_collection_find(
                 let filter: Document = serde_json::from_str(&filter_json)
                     .unwrap_or_else(|_| doc! {});
 
-                match coll_wrapper.collection.find(filter, None).await {
+                match coll_wrapper.collection.find(filter).await {
                     Ok(cursor) => {
                         let docs: Vec<Document> = cursor.try_collect().await
                             .map_err(|e| format!("Cursor error: {}", e))?;
@@ -270,7 +270,7 @@ pub unsafe extern "C" fn js_mongodb_collection_insert_one(
                 let doc: Document = serde_json::from_str(&doc_json)
                     .map_err(|e| format!("Invalid JSON: {}", e))?;
 
-                match coll_wrapper.collection.insert_one(doc, None).await {
+                match coll_wrapper.collection.insert_one(doc).await {
                     Ok(result) => {
                         Ok(result.inserted_id.to_string())
                     }
@@ -312,7 +312,7 @@ pub unsafe extern "C" fn js_mongodb_collection_insert_many(
             let docs: Vec<Document> = serde_json::from_str(&docs_json)
                 .map_err(|e| format!("Invalid JSON: {}", e))?;
 
-            match coll_wrapper.collection.insert_many(docs, None).await {
+            match coll_wrapper.collection.insert_many(docs).await {
                 Ok(result) => {
                     let count = result.inserted_ids.len();
                     Ok(count as u64)
@@ -354,7 +354,7 @@ pub unsafe extern "C" fn js_mongodb_collection_update_one(
             let update: Document = serde_json::from_str(&update_json)
                 .map_err(|e| format!("Invalid update JSON: {}", e))?;
 
-            match coll_wrapper.collection.update_one(filter, update, None).await {
+            match coll_wrapper.collection.update_one(filter, update).await {
                 Ok(result) => {
                     Ok(result.modified_count as u64)
                 }
@@ -395,7 +395,7 @@ pub unsafe extern "C" fn js_mongodb_collection_update_many(
             let update: Document = serde_json::from_str(&update_json)
                 .map_err(|e| format!("Invalid update JSON: {}", e))?;
 
-            match coll_wrapper.collection.update_many(filter, update, None).await {
+            match coll_wrapper.collection.update_many(filter, update).await {
                 Ok(result) => {
                     Ok(result.modified_count as u64)
                 }
@@ -424,7 +424,7 @@ pub unsafe extern "C" fn js_mongodb_collection_delete_one(
             let filter: Document = serde_json::from_str(&filter_json)
                 .unwrap_or_else(|_| doc! {});
 
-            match coll_wrapper.collection.delete_one(filter, None).await {
+            match coll_wrapper.collection.delete_one(filter).await {
                 Ok(result) => {
                     Ok(result.deleted_count as u64)
                 }
@@ -453,7 +453,7 @@ pub unsafe extern "C" fn js_mongodb_collection_delete_many(
             let filter: Document = serde_json::from_str(&filter_json)
                 .unwrap_or_else(|_| doc! {});
 
-            match coll_wrapper.collection.delete_many(filter, None).await {
+            match coll_wrapper.collection.delete_many(filter).await {
                 Ok(result) => {
                     Ok(result.deleted_count as u64)
                 }
@@ -482,7 +482,7 @@ pub unsafe extern "C" fn js_mongodb_collection_count(
             let filter: Document = serde_json::from_str(&filter_json)
                 .unwrap_or_else(|_| doc! {});
 
-            match coll_wrapper.collection.count_documents(filter, None).await {
+            match coll_wrapper.collection.count_documents(filter).await {
                 Ok(count) => {
                     Ok(count as u64)
                 }
@@ -519,7 +519,7 @@ pub unsafe extern "C" fn js_mongodb_client_list_databases(client_handle: Handle)
         promise as *mut u8,
         async move {
             if let Some(client_wrapper) = get_handle::<MongoClientHandle>(client_handle) {
-                match client_wrapper.client.list_database_names(None, None).await {
+                match client_wrapper.client.list_database_names().await {
                     Ok(names) => {
                         let json = serde_json::to_string(&names)
                             .unwrap_or_else(|_| "[]".to_string());
@@ -549,7 +549,7 @@ pub unsafe extern "C" fn js_mongodb_db_list_collections(db_handle: Handle) -> *m
         promise as *mut u8,
         async move {
             if let Some(db_wrapper) = get_handle::<MongoDatabaseHandle>(db_handle) {
-                match db_wrapper.db.list_collection_names(None).await {
+                match db_wrapper.db.list_collection_names().await {
                     Ok(names) => {
                         let json = serde_json::to_string(&names)
                             .unwrap_or_else(|_| "[]".to_string());

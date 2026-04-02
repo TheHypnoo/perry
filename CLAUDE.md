@@ -142,6 +142,7 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 ### v0.4.41
 - feat: `perry publish` passes `features` from perry.toml project config to build manifest — enables feature-gated builds on the server side
+- fix: tvOS stdlib builds — upgrade mongodb 2.8→3.5 to eliminate socket2 0.4.x (no tvOS support); all socket2 deps now ≥0.5 which includes tvOS
 - test: add module-level array loop read tests, cross-module exported function array lookup tests, and Android label/i18n resource tests
 
 ### v0.4.40
