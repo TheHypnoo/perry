@@ -313,6 +313,39 @@ fn setup_menu_bar(app: &NSApplication, mtm: MainThreadMarker) {
             menu_bar.addItem(&edit_menu_item);
         }
 
+        // Always add a Window menu with a "Show Main Window" item so users can
+        // re-open the main window after closing it (required by App Store guidelines).
+        {
+            let window_menu_item = NSMenuItem::new(mtm);
+            let window_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Window"));
+
+            let minimize_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm), &NSString::from_str("Minimize"),
+                Some(Sel::register(c"performMiniaturize:")), &NSString::from_str("m"));
+            minimize_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+            window_menu.addItem(&minimize_item);
+
+            let zoom_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm), &NSString::from_str("Zoom"),
+                Some(Sel::register(c"performZoom:")), &NSString::from_str(""));
+            window_menu.addItem(&zoom_item);
+
+            window_menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+            let show_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm), &NSString::from_str("Show Main Window"),
+                Some(Sel::register(c"perryShowMainWindow:")), &NSString::from_str(""));
+            // Target is the delegate so our custom action fires
+            show_item.setTarget(None);
+            window_menu.addItem(&show_item);
+
+            window_menu_item.setSubmenu(Some(&window_menu));
+            menu_bar.addItem(&window_menu_item);
+
+            // Tell NSApplication about the Window menu so macOS manages it
+            app.setWindowsMenu(Some(&window_menu));
+        }
+
         app.setMainMenu(Some(&menu_bar));
     }
 }
@@ -1061,6 +1094,32 @@ define_class!(
                 files.borrow_mut().push(path);
             });
             true
+        }
+
+        /// Called when the user clicks the dock icon. Re-show the main window
+        /// if no windows are visible (required by macOS App Store guidelines).
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn application_should_handle_reopen(&self, _app: &AnyObject, has_visible_windows: bool) -> bool {
+            if !has_visible_windows {
+                APPS.with(|a| {
+                    let apps = a.borrow();
+                    if let Some(entry) = apps.first() {
+                        entry.window.makeKeyAndOrderFront(None);
+                    }
+                });
+            }
+            true
+        }
+
+        /// Action handler for the "Show Main Window" menu item.
+        #[unsafe(method(perryShowMainWindow:))]
+        fn perry_show_main_window(&self, _sender: &AnyObject) {
+            APPS.with(|a| {
+                let apps = a.borrow();
+                if let Some(entry) = apps.first() {
+                    entry.window.makeKeyAndOrderFront(None);
+                }
+            });
         }
     }
 );
