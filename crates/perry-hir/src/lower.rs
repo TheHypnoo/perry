@@ -212,6 +212,44 @@ impl LoweringContext {
         id
     }
 
+    /// If `ast_arg` is a bare `Boolean`, `Number`, or `String` identifier, wrap the
+    /// already-lowered callback `cb` in a synthetic closure that calls the corresponding
+    /// coerce expression.  Otherwise return `cb` unchanged.  This is needed because
+    /// built-in constructors aren't first-class closure objects in Perry's runtime.
+    pub(crate) fn maybe_wrap_builtin_callback(&mut self, cb: Expr, ast_arg: &swc_ecma_ast::ExprOrSpread) -> Expr {
+        if let swc_ecma_ast::Expr::Ident(ident) = ast_arg.expr.as_ref() {
+            let builtin = ident.sym.as_ref();
+            if matches!(builtin, "Boolean" | "Number" | "String") {
+                let func_id = self.fresh_func();
+                let param_id = self.fresh_local();
+                let coerce_body = match builtin {
+                    "Boolean" => Expr::BooleanCoerce(Box::new(Expr::LocalGet(param_id))),
+                    "Number" => Expr::NumberCoerce(Box::new(Expr::LocalGet(param_id))),
+                    "String" => Expr::StringCoerce(Box::new(Expr::LocalGet(param_id))),
+                    _ => unreachable!(),
+                };
+                return Expr::Closure {
+                    func_id,
+                    params: vec![Param {
+                        id: param_id,
+                        name: "__x".to_string(),
+                        ty: Type::Any,
+                        default: None,
+                        is_rest: false,
+                    }],
+                    return_type: Type::Any,
+                    body: vec![Stmt::Return(Some(coerce_body))],
+                    captures: vec![],
+                    mutable_captures: vec![],
+                    captures_this: false,
+                    enclosing_class: None,
+                    is_async: false,
+                };
+            }
+        }
+        cb
+    }
+
     pub(crate) fn fresh_class(&mut self) -> ClassId {
         let id = self.next_class_id;
         self.next_class_id += 1;
@@ -3434,40 +3472,6 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 // desugar to a synthetic closure: x => Boolean(x) / Number(x) / String(x).
                                 // This is needed because .filter(Boolean) etc. expect a closure pointer at
                                 // runtime but built-in constructors aren't first-class closure objects.
-                                let maybe_wrap_builtin_callback = |ctx: &mut LoweringContext, cb: Expr, ast_arg: &ast::ExprOrSpread| -> Expr {
-                                    if let ast::Expr::Ident(ident) = ast_arg.expr.as_ref() {
-                                        let builtin = ident.sym.as_ref();
-                                        if matches!(builtin, "Boolean" | "Number" | "String") {
-                                            let func_id = ctx.fresh_func();
-                                            let param_id = ctx.fresh_local();
-                                            let coerce_body = match builtin {
-                                                "Boolean" => Expr::BooleanCoerce(Box::new(Expr::LocalGet(param_id))),
-                                                "Number" => Expr::NumberCoerce(Box::new(Expr::LocalGet(param_id))),
-                                                "String" => Expr::StringCoerce(Box::new(Expr::LocalGet(param_id))),
-                                                _ => unreachable!(),
-                                            };
-                                            return Expr::Closure {
-                                                func_id,
-                                                params: vec![Param {
-                                                    id: param_id,
-                                                    name: "__x".to_string(),
-                                                    ty: Type::Any,
-                                                    default: None,
-                                                    is_rest: false,
-                                                }],
-                                                return_type: Type::Any,
-                                                body: vec![Stmt::Return(Some(coerce_body))],
-                                                captures: vec![],
-                                                mutable_captures: vec![],
-                                                captures_this: false,
-                                                enclosing_class: None,
-                                                is_async: false,
-                                            };
-                                        }
-                                    }
-                                    cb
-                                };
-
                                 if is_not_string {
                                 if let Some(array_id) = ctx.lookup_local(&arr_name) {
                                     match method_name {
@@ -3557,7 +3561,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 .unwrap_or(false);
                                             if !is_map_or_set && args.len() >= 1 {
                                                 let cb = args.into_iter().next().unwrap();
-                                                let cb = maybe_wrap_builtin_callback(ctx, cb, &call.args[0]);
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                 return Ok(Expr::ArrayForEach {
                                                     array: Box::new(Expr::LocalGet(array_id)),
                                                     callback: Box::new(cb),
@@ -3571,7 +3575,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 .unwrap_or(false);
                                             if !is_class_instance && args.len() >= 1 {
                                                 let cb = args.into_iter().next().unwrap();
-                                                let cb = maybe_wrap_builtin_callback(ctx, cb, &call.args[0]);
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                 return Ok(Expr::ArrayMap {
                                                     array: Box::new(Expr::LocalGet(array_id)),
                                                     callback: Box::new(cb),
@@ -3581,7 +3585,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "filter" => {
                                             if args.len() >= 1 {
                                                 let cb = args.into_iter().next().unwrap();
-                                                let cb = maybe_wrap_builtin_callback(ctx, cb, &call.args[0]);
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                 return Ok(Expr::ArrayFilter {
                                                     array: Box::new(Expr::LocalGet(array_id)),
                                                     callback: Box::new(cb),
@@ -3591,7 +3595,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "find" => {
                                             if args.len() >= 1 {
                                                 let cb = args.into_iter().next().unwrap();
-                                                let cb = maybe_wrap_builtin_callback(ctx, cb, &call.args[0]);
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                 return Ok(Expr::ArrayFind {
                                                     array: Box::new(Expr::LocalGet(array_id)),
                                                     callback: Box::new(cb),
@@ -3601,7 +3605,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "findIndex" => {
                                             if args.len() >= 1 {
                                                 let cb = args.into_iter().next().unwrap();
-                                                let cb = maybe_wrap_builtin_callback(ctx, cb, &call.args[0]);
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                 return Ok(Expr::ArrayFindIndex {
                                                     array: Box::new(Expr::LocalGet(array_id)),
                                                     callback: Box::new(cb),
@@ -3611,7 +3615,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "some" => {
                                             if args.len() >= 1 {
                                                 let cb = args.into_iter().next().unwrap();
-                                                let cb = maybe_wrap_builtin_callback(ctx, cb, &call.args[0]);
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                 return Ok(Expr::ArraySome {
                                                     array: Box::new(Expr::LocalGet(array_id)),
                                                     callback: Box::new(cb),
@@ -3621,7 +3625,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "every" => {
                                             if args.len() >= 1 {
                                                 let cb = args.into_iter().next().unwrap();
-                                                let cb = maybe_wrap_builtin_callback(ctx, cb, &call.args[0]);
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                 return Ok(Expr::ArrayEvery {
                                                     array: Box::new(Expr::LocalGet(array_id)),
                                                     callback: Box::new(cb),
@@ -3631,7 +3635,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "flatMap" => {
                                             if args.len() >= 1 {
                                                 let cb = args.into_iter().next().unwrap();
-                                                let cb = maybe_wrap_builtin_callback(ctx, cb, &call.args[0]);
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                 return Ok(Expr::ArrayFlatMap {
                                                     array: Box::new(Expr::LocalGet(array_id)),
                                                     callback: Box::new(cb),
@@ -3941,33 +3945,41 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 }
                                                 "map" => {
                                                     if args.len() >= 1 {
+                                                        let cb = args.into_iter().next().unwrap();
+                                                        let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                         return Ok(Expr::ArrayMap {
                                                             array: Box::new(extern_ref),
-                                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                                            callback: Box::new(cb),
                                                         });
                                                     }
                                                 }
                                                 "filter" => {
                                                     if args.len() >= 1 {
+                                                        let cb = args.into_iter().next().unwrap();
+                                                        let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                         return Ok(Expr::ArrayFilter {
                                                             array: Box::new(extern_ref),
-                                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                                            callback: Box::new(cb),
                                                         });
                                                     }
                                                 }
                                                 "forEach" => {
                                                     if args.len() >= 1 {
+                                                        let cb = args.into_iter().next().unwrap();
+                                                        let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                         return Ok(Expr::ArrayForEach {
                                                             array: Box::new(extern_ref),
-                                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                                            callback: Box::new(cb),
                                                         });
                                                     }
                                                 }
                                                 "find" => {
                                                     if args.len() >= 1 {
+                                                        let cb = args.into_iter().next().unwrap();
+                                                        let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                         return Ok(Expr::ArrayFind {
                                                             array: Box::new(extern_ref),
-                                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                                            callback: Box::new(cb),
                                                         });
                                                     }
                                                 }
@@ -4052,33 +4064,41 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         }
                                         "map" => {
                                             if args.len() >= 1 {
+                                                let cb = args.into_iter().next().unwrap();
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                 return Ok(Expr::ArrayMap {
                                                     array: Box::new(array_expr),
-                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                    callback: Box::new(cb),
                                                 });
                                             }
                                         }
                                         "filter" => {
                                             if args.len() >= 1 {
+                                                let cb = args.into_iter().next().unwrap();
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                 return Ok(Expr::ArrayFilter {
                                                     array: Box::new(array_expr),
-                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                    callback: Box::new(cb),
                                                 });
                                             }
                                         }
                                         "forEach" => {
                                             if args.len() >= 1 {
+                                                let cb = args.into_iter().next().unwrap();
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                 return Ok(Expr::ArrayForEach {
                                                     array: Box::new(array_expr),
-                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                    callback: Box::new(cb),
                                                 });
                                             }
                                         }
                                         "find" => {
                                             if args.len() >= 1 {
+                                                let cb = args.into_iter().next().unwrap();
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                                 return Ok(Expr::ArrayFind {
                                                     array: Box::new(array_expr),
-                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                    callback: Box::new(cb),
                                                 });
                                             }
                                         }
@@ -4177,18 +4197,22 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             _ => false,
                                         };
                                         if !is_class_instance {
+                                            let cb = args.into_iter().next().unwrap();
+                                            let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                             let array_expr = lower_expr(ctx, &member.obj)?;
                                             return Ok(Expr::ArrayMap {
                                                 array: Box::new(array_expr),
-                                                callback: Box::new(args.into_iter().next().unwrap()),
+                                                callback: Box::new(cb),
                                             });
                                         }
                                     }
                                     "filter" if args.len() >= 1 => {
+                                        let cb = args.into_iter().next().unwrap();
+                                        let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                         let array_expr = lower_expr(ctx, &member.obj)?;
                                         return Ok(Expr::ArrayFilter {
                                             array: Box::new(array_expr),
-                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                            callback: Box::new(cb),
                                         });
                                     }
                                     "forEach" if args.len() >= 1 => {
@@ -4201,25 +4225,31 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             false
                                         };
                                         if !is_map_or_set {
+                                            let cb = args.into_iter().next().unwrap();
+                                            let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                             let array_expr = lower_expr(ctx, &member.obj)?;
                                             return Ok(Expr::ArrayForEach {
                                                 array: Box::new(array_expr),
-                                                callback: Box::new(args.into_iter().next().unwrap()),
+                                                callback: Box::new(cb),
                                             });
                                         }
                                     }
                                     "find" if args.len() >= 1 => {
+                                        let cb = args.into_iter().next().unwrap();
+                                        let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                         let array_expr = lower_expr(ctx, &member.obj)?;
                                         return Ok(Expr::ArrayFind {
                                             array: Box::new(array_expr),
-                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                            callback: Box::new(cb),
                                         });
                                     }
                                     "findIndex" if args.len() >= 1 => {
+                                        let cb = args.into_iter().next().unwrap();
+                                        let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                         let array_expr = lower_expr(ctx, &member.obj)?;
                                         return Ok(Expr::ArrayFindIndex {
                                             array: Box::new(array_expr),
-                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                            callback: Box::new(cb),
                                         });
                                     }
                                     "sort" if args.len() >= 1 => {
