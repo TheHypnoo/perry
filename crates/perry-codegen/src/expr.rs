@@ -5929,8 +5929,10 @@ pub(crate) fn compile_expr(
                         Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
                         // String literals are NaN-boxed — must use js_is_truthy (empty string is falsy)
                         Expr::String(_) | Expr::StringCoerce(_) => true,
-                        // Comparisons now return NaN-boxed booleans
+                        // Comparisons and boolean expressions return NaN-boxed booleans
                         Expr::Compare { .. } | Expr::Bool(_) => true,
+                        // 'in' operator returns NaN-boxed TAG_TRUE/TAG_FALSE
+                        Expr::In { .. } => true,
                         // Unary not on another not (double negation) needs truthy check
                         Expr::Unary { op: UnaryOp::Not, .. } => true,
                         _ => false,
