@@ -15713,9 +15713,17 @@ pub(crate) fn compile_expr(
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
                         is_string_index_expr_get(left, locals) || is_string_index_expr_get(right, locals)
                     }
-                    Expr::PropertyGet { .. } => {
-                        // Property access might return a string - treat as dynamic
-                        true
+                    Expr::PropertyGet { object, .. } => {
+                        // Only treat as string if the object itself is known to be a string.
+                        // PropertyGet on objects/classes may return numbers (e.g., obj.x where x is number).
+                        // Returning true here caused numeric class fields used as Record keys to go
+                        // through js_get_string_pointer_unified on a number → garbage.
+                        // The fallback path now handles numeric keys on objects correctly.
+                        if let Expr::LocalGet(id) = object.as_ref() {
+                            locals.get(id).map(|i| i.is_string).unwrap_or(false)
+                        } else {
+                            false
+                        }
                     }
                     // Array element access: keys[0], cols[i], log.topics[0] — string arrays return strings
                     Expr::IndexGet { object, .. } => {
@@ -15865,15 +15873,39 @@ pub(crate) fn compile_expr(
                     };
                     builder.ins().jump(merge_block, &[str_result.into()]);
 
-                    // Integer key path: convert to i32, do array/dynamic access
+                    // Integer key path: check if object is an array or a Record/object
                     builder.switch_to_block(integer_key_block);
                     builder.seal_block(integer_key_block);
-                    let int_result = {
+                    let obj_is_known_array = if let Expr::LocalGet(id) = object.as_ref() {
+                        locals.get(id).map(|i| i.is_array || i.is_buffer || i.is_mixed_array).unwrap_or(false)
+                    } else {
+                        !matches!(object.as_ref(), Expr::Object(_) | Expr::ObjectSpread { .. })
+                    };
+                    let int_result = if obj_is_known_array {
                         let idx_i32 = builder.ins().fcvt_to_sint_sat(types::I32, idx_f64);
                         let get_func = extern_funcs.get("js_dynamic_array_get")
                             .ok_or_else(|| anyhow!("js_dynamic_array_get not declared"))?;
                         let func_ref = module.declare_func_in_func(*get_func, builder.func);
                         let call = builder.ins().call(func_ref, &[obj_f64, idx_i32]);
+                        builder.inst_results(call)[0]
+                    } else {
+                        // Object with numeric key — convert to string for property lookup
+                        let to_str_func = extern_funcs.get("js_jsvalue_to_string")
+                            .ok_or_else(|| anyhow!("js_jsvalue_to_string not declared"))?;
+                        let to_str_ref = module.declare_func_in_func(*to_str_func, builder.func);
+                        let str_call = builder.ins().call(to_str_ref, &[idx_f64]);
+                        let key_ptr = builder.inst_results(str_call)[0];
+
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[obj_f64]);
+                        let obj_ptr = builder.inst_results(ptr_call)[0];
+
+                        let get_func = extern_funcs.get("js_object_get_field_by_name_f64")
+                            .ok_or_else(|| anyhow!("js_object_get_field_by_name_f64 not declared"))?;
+                        let func_ref = module.declare_func_in_func(*get_func, builder.func);
+                        let call = builder.ins().call(func_ref, &[obj_ptr, key_ptr]);
                         builder.inst_results(call)[0]
                     };
                     builder.ins().jump(merge_block, &[int_result.into()]);
