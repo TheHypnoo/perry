@@ -1983,7 +1983,12 @@ impl crate::codegen::Compiler {
         } else {
             format!("__wrapper_{}__{}", self.module_symbol_prefix, func.name)
         };
-        let wrapper_id = self.module.declare_function(&wrapper_name, Linkage::Export, &sig)?;
+        // Only exported functions need Export linkage for their wrappers (cross-module calls).
+        // Module-local function wrappers use Local linkage to prevent symbol collisions when
+        // two modules have the same filename and function names (e.g., two contract.ts files
+        // each with resolveType). With Export linkage the linker could resolve the wrong one.
+        let linkage = if func.is_exported { Linkage::Export } else { Linkage::Local };
+        let wrapper_id = self.module.declare_function(&wrapper_name, linkage, &sig)?;
         // Track whether we need to NaN-box the return value (always needed since we return f64)
         let needs_return_boxing = original_return_abi == types::I64;
         let is_string_return = matches!(func.return_type, perry_types::Type::String);
