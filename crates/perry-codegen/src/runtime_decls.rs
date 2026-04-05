@@ -393,13 +393,15 @@ impl Compiler {
         }
 
         // Declare js_object_clone_with_extra(src_f64: F64, extra_count: I32, keys_ptr: I64, keys_len: I32) -> I64
-        // Clones a spread source object, allocating extra slots for static props.
+        // Clones a spread source object, reserving extra physical slot capacity for static props.
+        // Static keys are NOT added to keys_array — codegen calls js_object_set_field_by_name
+        // for each static prop, which correctly implements "last key wins" JS semantics.
         {
             let mut sig = self.module.make_signature();
             sig.params.push(AbiParam::new(types::F64)); // src_f64 (NaN-boxed spread source)
-            sig.params.push(AbiParam::new(types::I32)); // extra_count
-            sig.params.push(AbiParam::new(types::I64)); // static_keys_ptr
-            sig.params.push(AbiParam::new(types::I32)); // static_keys_len
+            sig.params.push(AbiParam::new(types::I32)); // extra_count (scratch capacity)
+            sig.params.push(AbiParam::new(types::I64)); // static_keys_ptr (unused — ABI compat)
+            sig.params.push(AbiParam::new(types::I32)); // static_keys_len (unused — ABI compat)
             sig.returns.push(AbiParam::new(types::I64)); // new *mut ObjectHeader (raw pointer)
             let func_id = self.module.declare_function(
                 "js_object_clone_with_extra",
@@ -407,6 +409,21 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert(Cow::Borrowed("js_object_clone_with_extra"), func_id);
+        }
+
+        // Declare js_object_copy_own_fields(dst_i64: I64, src_f64: F64) -> void
+        // Copies all own enumerable fields from src into dst using js_object_set_field_by_name
+        // semantics (overwrite-existing, append-new). Used for multi-spread object literals.
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // dst raw pointer
+            sig.params.push(AbiParam::new(types::F64)); // src NaN-boxed
+            let func_id = self.module.declare_function(
+                "js_object_copy_own_fields",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_object_copy_own_fields"), func_id);
         }
 
         // Declare js_create_native_module_namespace(module_name_ptr: i64, module_name_len: i64) -> f64

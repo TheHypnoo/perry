@@ -586,22 +586,30 @@ pub extern "C" fn js_object_alloc_with_shape(
     obj_ptr
 }
 
-/// Clone a spread source object and allocate extra slots for additional static properties.
-/// Used to implement object spread: `{ ...src, key1: val1, key2: val2 }`.
+/// Clone a spread source object and reserve extra physical slot capacity for additional
+/// static properties. Used to implement object spread: `{ ...src, key1: val1, key2: val2 }`.
 ///
 /// - `src_f64`: the spread source object as a NaN-boxed f64 (POINTER_TAG or raw pointer)
-/// - `extra_count`: number of additional static properties to allocate slots for
-/// - `static_keys_ptr`/`static_keys_len`: null-separated packed byte string of static key names
+/// - `extra_count`: number of additional static properties — reserves physical slot capacity
+///   for them, but does NOT add their keys to the keys_array upfront. Codegen is expected to
+///   call `js_object_set_field_by_name` for each static prop, which correctly overwrites keys
+///   that already exist in the spread source (preserving JS "last key wins" semantics) and
+///   appends new keys (using the reserved capacity).
+/// - `_static_keys_ptr`/`_static_keys_len`: unused (kept for ABI compat). Previously these
+///   were used to pre-populate static keys in keys_array, but that created duplicate entries
+///   when a static key matched an existing spread key, and the linear-scan lookup returned
+///   the first (stale) match instead of the intended last-key value.
 ///
 /// Returns the new *mut ObjectHeader as an i64 raw pointer (NOT NaN-boxed).
-/// Codegen is responsible for storing the static prop values at runtime-computed offsets
-/// and then NaN-boxing the result with POINTER_TAG.
+/// The returned object's `field_count` equals the source's field_count (NOT src + extra),
+/// but the physical allocation reserves enough slots so subsequent
+/// `js_object_set_field_by_name` calls have somewhere to append.
 #[no_mangle]
 pub unsafe extern "C" fn js_object_clone_with_extra(
     src_f64: f64,
     extra_count: u32,
-    static_keys_ptr: *const u8,
-    static_keys_len: u32,
+    _static_keys_ptr: *const u8,
+    _static_keys_len: u32,
 ) -> *mut ObjectHeader {
     // Extract raw pointer from NaN-boxed f64
     let src_bits = src_f64.to_bits();
@@ -614,37 +622,42 @@ pub unsafe extern "C" fn js_object_clone_with_extra(
 
     let header_size = std::mem::size_of::<ObjectHeader>();
 
-    // If source is invalid, create object with only the static props
+    // If source is invalid, create an empty object with enough capacity for the static props.
+    // Physical slot count = max(extra_count, 8) to match js_object_set_field_by_name's
+    // alloc_limit = max(field_count, 8) expectation.
     if src_raw < 0x10000 {
-        let total = extra_count;
-        let total_size = header_size + total as usize * 8;
+        let phys_slots = std::cmp::max(extra_count, 8);
+        let total_size = header_size + phys_slots as usize * 8;
         let new_ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;
         (*new_ptr).object_type = crate::error::OBJECT_TYPE_REGULAR;
         (*new_ptr).class_id = 0;
         (*new_ptr).parent_class_id = 0;
-        (*new_ptr).field_count = total;
-        // Initialize all fields to undefined
+        (*new_ptr).field_count = 0;
         let fields_ptr = (new_ptr as *mut u8).add(header_size) as *mut u64;
-        for i in 0..total as usize {
+        for i in 0..phys_slots as usize {
             ptr::write(fields_ptr.add(i), crate::value::TAG_UNDEFINED);
         }
-        // Build keys array for static props only
-        let new_keys_arr = build_keys_array_from_packed(static_keys_ptr, static_keys_len, extra_count);
+        // Empty keys array with capacity reserved for the static props to come.
+        let new_keys_arr = crate::array::js_array_alloc(extra_count);
         (*new_ptr).keys_array = new_keys_arr;
         return new_ptr;
     }
 
     let src_ptr = src_raw as *const ObjectHeader;
     let src_field_count = (*src_ptr).field_count;
-    let total_field_count = src_field_count + extra_count;
 
-    // Allocate new object with space for spread fields + extra static fields
-    let total_size = header_size + total_field_count as usize * 8;
+    // Physical slot capacity: src_field_count + extra_count, but at least max(fc, 8) to match
+    // js_object_set_field's alloc_limit check. Extra slots are scratch space for subsequent
+    // js_object_set_field_by_name calls.
+    let phys_slots = std::cmp::max(src_field_count + extra_count, 8);
+    let total_size = header_size + phys_slots as usize * 8;
     let new_ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;
     (*new_ptr).object_type = crate::error::OBJECT_TYPE_REGULAR;
     (*new_ptr).class_id = 0;
     (*new_ptr).parent_class_id = 0;
-    (*new_ptr).field_count = total_field_count;
+    // Logical field count starts at src's count. js_object_set_field_by_name bumps it when
+    // appending new keys.
+    (*new_ptr).field_count = src_field_count;
 
     // Copy source fields (as raw f64/u64 words — preserves NaN-boxing)
     let src_fields = (src_ptr as *const u8).add(header_size) as *const u64;
@@ -660,17 +673,18 @@ pub unsafe extern "C" fn js_object_clone_with_extra(
         };
         ptr::write(dst_fields.add(i), cleaned);
     }
-    // Initialize static slots to undefined
-    for i in src_field_count as usize..total_field_count as usize {
+    // Initialize scratch slots to undefined
+    for i in src_field_count as usize..phys_slots as usize {
         ptr::write(dst_fields.add(i), crate::value::TAG_UNDEFINED);
     }
 
-    // Build keys array: copy src keys + append static key names
+    // Build keys array: copy ONLY src keys. Static keys are NOT added here — codegen uses
+    // js_object_set_field_by_name for each static prop, which appends new keys via
+    // js_array_push. Pre-size the keys capacity to avoid immediate reallocation on append.
     let src_keys_arr = (*src_ptr).keys_array;
-    let new_keys_arr = crate::array::js_array_alloc_with_length(total_field_count);
+    let new_keys_arr = crate::array::js_array_alloc(src_field_count + extra_count);
     let new_keys_elements = (new_keys_arr as *mut u8).add(8) as *mut f64;
 
-    // Copy src key strings
     if !src_keys_arr.is_null() && (src_keys_arr as usize) >= 0x10000 {
         let src_key_len = (*src_keys_arr).length as usize;
         let src_key_elements = (src_keys_arr as *const u8).add(8) as *const f64;
@@ -678,57 +692,68 @@ pub unsafe extern "C" fn js_object_clone_with_extra(
         for i in 0..copy_count {
             *new_keys_elements.add(i) = *src_key_elements.add(i);
         }
-    }
-
-    // Append static key names
-    if static_keys_len > 0 && !static_keys_ptr.is_null() {
-        let static_keys_slice = static_keys_ptr;
-        let static_keys_static = build_keys_from_packed(static_keys_slice, static_keys_len, extra_count);
-        for (i, key_val) in static_keys_static.iter().enumerate() {
-            *new_keys_elements.add(src_field_count as usize + i) = *key_val;
-        }
+        (*new_keys_arr).length = copy_count as u32;
+    } else {
+        (*new_keys_arr).length = 0;
     }
 
     (*new_ptr).keys_array = new_keys_arr;
 
-    // Debug: log all spread clones
-    {
-        let static_keys_slice = if static_keys_len > 0 && !static_keys_ptr.is_null() {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(static_keys_ptr, static_keys_len as usize))
-        } else { "" };
-        // Debug logging removed
-    }
-
     new_ptr
 }
 
-/// Helper: build a Vec<f64> of NaN-boxed string keys from packed null-separated bytes.
-unsafe fn build_keys_from_packed(packed: *const u8, packed_len: u32, count: u32) -> Vec<f64> {
-    let bytes = std::slice::from_raw_parts(packed, packed_len as usize);
-    let parts: Vec<&[u8]> = bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
-    let mut result = Vec::with_capacity(count as usize);
-    for key_bytes in parts.iter().take(count as usize) {
-        let str_ptr = crate::string::js_string_from_bytes(key_bytes.as_ptr(), key_bytes.len() as u32);
-        let nanboxed = f64::from_bits(crate::value::STRING_TAG | (str_ptr as u64 & crate::value::POINTER_MASK));
-        result.push(nanboxed);
+/// Copy all own enumerable fields from `src` into `dst`, using `js_object_set_field_by_name`
+/// semantics (overwrite existing, append new). Used for multi-spread object literals like
+/// `{...a, ...b}` to apply each additional spread after the first has been cloned via
+/// `js_object_clone_with_extra`.
+#[no_mangle]
+pub unsafe extern "C" fn js_object_copy_own_fields(dst_i64: i64, src_f64: f64) {
+    // Extract dst pointer (may be NaN-boxed or raw)
+    let dst_bits = dst_i64 as u64;
+    let dst_top16 = dst_bits >> 48;
+    let dst_raw = if dst_top16 >= 0x7FF8 {
+        (dst_bits & 0x0000_FFFF_FFFF_FFFF) as usize
+    } else {
+        dst_bits as usize
+    };
+    if dst_raw < 0x10000 {
+        return;
     }
-    result
-}
+    let dst = dst_raw as *mut ObjectHeader;
 
-/// Helper: build a keys ArrayHeader from packed null-separated bytes.
-unsafe fn build_keys_array_from_packed(packed: *const u8, packed_len: u32, count: u32) -> *mut ArrayHeader {
-    let arr = crate::array::js_array_alloc_with_length(count);
-    if packed_len > 0 && !packed.is_null() {
-        let elements_ptr = (arr as *mut u8).add(8) as *mut f64;
-        let bytes = std::slice::from_raw_parts(packed, packed_len as usize);
-        let parts: Vec<&[u8]> = bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
-        for (i, key_bytes) in parts.iter().take(count as usize).enumerate() {
-            let str_ptr = crate::string::js_string_from_bytes(key_bytes.as_ptr(), key_bytes.len() as u32);
-            let nanboxed = f64::from_bits(crate::value::STRING_TAG | (str_ptr as u64 & crate::value::POINTER_MASK));
-            *elements_ptr.add(i) = nanboxed;
-        }
+    // Extract src pointer (NaN-boxed f64)
+    let src_bits = src_f64.to_bits();
+    let src_top16 = src_bits >> 48;
+    let src_raw = if src_top16 >= 0x7FF8 {
+        (src_bits & 0x0000_FFFF_FFFF_FFFF) as usize
+    } else {
+        src_bits as usize
+    };
+    if src_raw < 0x10000 {
+        return;
     }
-    arr
+    let src = src_raw as *const ObjectHeader;
+
+    // Iterate src's keys and copy each value via set_field_by_name.
+    let src_keys = (*src).keys_array;
+    if src_keys.is_null() || (src_keys as usize) < 0x10000 {
+        return;
+    }
+    let key_count = crate::array::js_array_length(src_keys) as usize;
+    let src_field_count = (*src).field_count as usize;
+    let header_size = std::mem::size_of::<ObjectHeader>();
+    let src_fields = (src as *const u8).add(header_size) as *const u64;
+
+    for i in 0..key_count.min(src_field_count) {
+        let key_val = crate::array::js_array_get(src_keys, i as u32);
+        if !key_val.is_string() {
+            continue;
+        }
+        let key_ptr = key_val.as_string_ptr();
+        let field_bits = *src_fields.add(i);
+        let field_f64 = f64::from_bits(field_bits);
+        js_object_set_field_by_name(dst, key_ptr, field_f64);
+    }
 }
 
 /// Get a field from an object by index
@@ -1255,6 +1280,10 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             // Reallocate fields to hold at least one value
             // Note: We assume the object has enough field slots pre-allocated
             js_object_set_field(obj, 0, JSValue::from_bits(value.to_bits()));
+            // Bump field_count so Object.keys()/values()/entries() see the new property.
+            if (*obj).field_count == 0 {
+                (*obj).field_count = 1;
+            }
             return;
         }
 

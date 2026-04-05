@@ -15701,164 +15701,137 @@ pub(crate) fn compile_expr(
         Expr::ObjectSpread { parts } => {
             // Object spread: { ...src, key1: val1, key2: val2, ...src2, key3: val3, ... }
             //
-            // Strategy: process parts left-to-right, building up the result.
-            // - For spreads: call js_object_clone_with_extra to copy src fields + reserve slots
-            // - For static props: store values at runtime-computed offsets
+            // JS semantics: keys are inserted in source order; a later occurrence of a key
+            // (whether from a static prop or a later spread) overwrites the earlier value
+            // while keeping the original insertion position.
             //
-            // We collect all "segments": alternating runs of [spreads..., props...].
-            // The common case is one spread followed by some props.
-            //
-            // Implementation: iterate parts, accumulate static prop (key, expr) pairs.
-            // When we encounter a spread, we decide if this is the first spread or a subsequent one.
-            // For simplicity: collect all static props and determine the single spread source.
-            // If multiple spreads, chain js_object_clone_with_extra calls.
+            // Strategy:
+            // 1. Build a base object:
+            //    - If the FIRST part is a spread, call js_object_clone_with_extra on it
+            //      (fast path: shallow-copies fields and pre-sizes capacity for static props).
+            //    - Otherwise, call js_object_alloc(0, 0) to get an empty object.
+            // 2. Iterate the REMAINING parts in source order:
+            //    - For spread parts, call js_object_copy_own_fields to merge src's keys.
+            //    - For static props, call js_object_set_field_by_name.
+            //    Both runtime helpers correctly overwrite existing keys (preserving the
+            //    original insertion position) and append new ones.
 
-            // Separate into: the spread parts and the static prop parts
-            // We process the parts sequentially, but for the initial implementation
-            // we handle the common pattern: parts = [spread?, (prop | spread)*]
+            // Total number of static props — used as the scratch-slot budget when cloning.
+            let static_count: u32 = parts.iter().filter(|(k, _)| k.is_some()).count() as u32;
 
-            // Collect static props (key, expr) in ORDER; collect spread exprs in ORDER
-            let mut static_props: Vec<(&String, &Expr)> = Vec::new();
-            let mut spread_exprs: Vec<&Expr> = Vec::new();
-            for (key_opt, expr) in parts.iter() {
-                match key_opt {
-                    Some(key) => static_props.push((key, expr)),
-                    None => spread_exprs.push(expr),
-                }
-            }
-
-            let static_count = static_props.len();
-
-            // Pack static key names into a data section
-            let mut packed_keys: Vec<u8> = Vec::new();
-            for (key, _) in &static_props {
-                packed_keys.extend_from_slice(key.as_bytes());
-                packed_keys.push(0); // null separator
-            }
-            let packed_keys_len = packed_keys.len();
-
-            let (data_addr, packed_len_val) = if packed_keys_len > 0 {
-                let mut data_desc = DataDescription::new();
-                data_desc.define(packed_keys.into_boxed_slice());
-                let name = format!("__spread_keys_{}", next_temp_var_id());
-                let id = module.declare_data(&name, Linkage::Local, false, false)?;
-                module.define_data(id, &data_desc)?;
-                let data_ptr = module.declare_data_in_func(id, builder.func);
-                let addr = builder.ins().global_value(types::I64, data_ptr);
-                let len = builder.ins().iconst(types::I32, packed_keys_len as i64);
-                (addr, len)
-            } else {
-                let addr = builder.ins().iconst(types::I64, 0);
-                let len = builder.ins().iconst(types::I32, 0);
-                (addr, len)
-            };
-
-            let extra_count_val = builder.ins().iconst(types::I32, static_count as i64);
             let clone_func = extern_funcs.get("js_object_clone_with_extra")
                 .ok_or_else(|| anyhow!("js_object_clone_with_extra not declared"))?;
             let clone_ref = module.declare_func_in_func(*clone_func, builder.func);
+            let set_func = extern_funcs.get("js_object_set_field_by_name")
+                .ok_or_else(|| anyhow!("js_object_set_field_by_name not declared"))?;
+            let set_ref = module.declare_func_in_func(*set_func, builder.func);
+            let copy_func = extern_funcs.get("js_object_copy_own_fields")
+                .ok_or_else(|| anyhow!("js_object_copy_own_fields not declared"))?;
+            let copy_ref = module.declare_func_in_func(*copy_func, builder.func);
 
-            // Start with first spread (or an empty object if no spreads)
-            let mut obj_ptr = if let Some(first_spread) = spread_exprs.first() {
+            let first_is_spread = parts.first().map(|(k, _)| k.is_none()).unwrap_or(false);
+
+            let obj_ptr;
+            let start_idx;
+            if first_is_spread {
+                // Fast path: first part is a spread. Clone it with reserved scratch capacity.
+                let first_spread = &parts[0].1;
                 let src_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, first_spread, this_ctx)?;
                 let src_f64 = ensure_f64(builder, src_val);
-                let call = builder.ins().call(clone_ref, &[src_f64, extra_count_val, data_addr, packed_len_val]);
-                builder.inst_results(call)[0]
-            } else {
-                // No spread, just create a plain object with only static props
-                let alloc_func = extern_funcs.get("js_object_alloc_with_shape")
-                    .ok_or_else(|| anyhow!("js_object_alloc_with_shape not declared"))?;
-                let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
-                // Use packed_keys hash as shape_id
-                let mut shape_hash: u32 = 0x811c9dc5;
-                for (key, _) in &static_props {
-                    for b in key.as_bytes() {
-                        shape_hash ^= *b as u32;
-                        shape_hash = shape_hash.wrapping_mul(0x01000193);
-                    }
-                }
-                let shape_id_val = builder.ins().iconst(types::I32, shape_hash as i64);
-                let field_count_val = builder.ins().iconst(types::I32, static_count as i64);
-                let call = builder.ins().call(alloc_ref, &[shape_id_val, field_count_val, data_addr, packed_len_val]);
-                builder.inst_results(call)[0]
-            };
-
-            // For additional spreads (beyond the first), merge them in.
-            // In the common case there's only one spread so this loop doesn't run.
-            for additional_spread in spread_exprs.iter().skip(1) {
-                let src_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, additional_spread, this_ctx)?;
-                let src_f64 = ensure_f64(builder, src_val);
-                // Merge additional spread's fields into obj_ptr using js_object_set_field_by_name
-                // For simplicity: call js_object_clone_with_extra on current obj_ptr + additional spread
-                // This is not perfectly correct for complex multi-spread cases but works for common patterns
-                let obj_f64 = inline_nanbox_pointer(builder, obj_ptr);
-                let zero_extra = builder.ins().iconst(types::I32, 0);
+                let extra_count_val = builder.ins().iconst(types::I32, static_count as i64);
+                // static_keys_ptr/len are unused by the runtime — pass nulls.
                 let null_ptr = builder.ins().iconst(types::I64, 0);
                 let zero_len = builder.ins().iconst(types::I32, 0);
-                // First, clone the additional spread (extra_count=0, no static keys)
-                let call = builder.ins().call(clone_ref, &[src_f64, zero_extra, null_ptr, zero_len]);
-                let spread_obj_ptr = builder.inst_results(call)[0];
-                // TODO: merge spread_obj_ptr fields into obj_ptr
-                // For now, just ignore additional spreads beyond the first (TODO: implement merging)
-                let _ = spread_obj_ptr;
-                let _ = obj_f64;
+                let call = builder.ins().call(clone_ref, &[src_f64, extra_count_val, null_ptr, zero_len]);
+                obj_ptr = builder.inst_results(call)[0];
+                start_idx = 1;
+            } else {
+                // Slow path: no leading spread. Allocate a bare empty object;
+                // js_object_set_field_by_name / js_object_copy_own_fields will grow keys_array
+                // and bump field_count as parts are applied in source order.
+                let alloc_func = extern_funcs.get("js_object_alloc")
+                    .ok_or_else(|| anyhow!("js_object_alloc not declared"))?;
+                let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
+                let class_id_val = builder.ins().iconst(types::I32, 0);
+                let field_count_val = builder.ins().iconst(types::I32, 0);
+                let call = builder.ins().call(alloc_ref, &[class_id_val, field_count_val]);
+                obj_ptr = builder.inst_results(call)[0];
+                let _ = static_count;
+                start_idx = 0;
             }
 
-            // Now store static prop values at runtime-computed offsets.
-            // The new object's field_count = spread_field_count + static_count.
-            // Static props start at index: total_field_count - static_count = spread_field_count.
-            // Base byte address for static props: obj_ptr + 24 (header) + spread_field_count * 8.
+            // Process the remaining parts in source order.
+            for (key_opt, value_expr) in parts.iter().skip(start_idx) {
+                match key_opt {
+                    None => {
+                        // Spread part: merge src's own fields via copy_own_fields
+                        // (overwrite-existing, append-new).
+                        let src_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value_expr, this_ctx)?;
+                        let src_f64 = ensure_f64(builder, src_val);
+                        builder.ins().call(copy_ref, &[obj_ptr, src_f64]);
+                    }
+                    Some(key_name) => {
+                        // Static prop: js_object_set_field_by_name finds-or-appends. If this
+                        // key already exists (from an earlier spread or prior static prop),
+                        // its value is overwritten in place — which is what JS "last key wins"
+                        // semantics requires.
 
-            // Load total field_count from header (at byte offset 12 = ObjectHeader.field_count)
-            let total_fc_i32 = builder.ins().load(types::I32, MemFlags::new(), obj_ptr, 12);
-            let total_fc_i64 = builder.ins().sextend(types::I64, total_fc_i32);
-            let static_count_i64 = builder.ins().iconst(types::I64, static_count as i64);
-            let spread_count_i64 = builder.ins().isub(total_fc_i64, static_count_i64);
-            // byte offset of first static field from obj_ptr:
-            //   = sizeof(ObjectHeader) + spread_count * 8
-            //   = 24 + spread_count * 8
-            let spread_bytes = builder.ins().imul_imm(spread_count_i64, 8);
-            let header_size_val = builder.ins().iconst(types::I64, 24);
-            let base_offset_i64 = builder.ins().iadd(header_size_val, spread_bytes);
-            // base_ptr = obj_ptr + base_offset
-            let base_ptr = builder.ins().iadd(obj_ptr, base_offset_i64);
+                        // Allocate a StringHeader for the key name via js_string_from_bytes.
+                        let key_bytes = key_name.as_bytes();
+                        let key_len = key_bytes.len();
+                        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            key_len as u32,
+                            1,
+                        ));
+                        for (i, &byte) in key_bytes.iter().enumerate() {
+                            let byte_val = builder.ins().iconst(types::I8, byte as i64);
+                            builder.ins().stack_store(byte_val, slot, i as i32);
+                        }
+                        let slot_addr = builder.ins().stack_addr(types::I64, slot, 0);
+                        let alloc_func = extern_funcs.get("js_string_from_bytes")
+                            .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
+                        let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
+                        let len_val = builder.ins().iconst(types::I32, key_len as i64);
+                        let str_call = builder.ins().call(alloc_ref, &[slot_addr, len_val]);
+                        let key_str_ptr_raw = builder.inst_results(str_call)[0];
+                        let key_str_ptr = ensure_i64(builder, key_str_ptr_raw);
 
-            // Compile and store each static prop value
-            for (i, (_key, value_expr)) in static_props.iter().enumerate() {
-                let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value_expr, this_ctx)?;
+                        // Compile the value and NaN-box it appropriately.
+                        let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value_expr, this_ctx)?;
 
-                let is_string = match value_expr {
-                    Expr::String(_) => true,
-                    Expr::LocalGet(id) => locals.get(id).map(|info| info.is_string).unwrap_or(false),
-                    _ => false,
-                };
+                        let is_string = match value_expr {
+                            Expr::String(_) => true,
+                            Expr::LocalGet(id) => locals.get(id).map(|info| info.is_string).unwrap_or(false),
+                            _ => false,
+                        };
 
-                let val_type = builder.func.dfg.value_type(val);
-                let final_val = if is_string {
-                    let str_ptr = ensure_i64(builder, val);
-                    inline_nanbox_string(builder, str_ptr)
-                } else if val_type == types::I64 {
-                    // Guard: I64=0 produces null POINTER_TAG (0x7FFD_0000_0000_0000) which crashes
-                    // method dispatch. Real pointers (closures, objects, arrays) are never 0.
-                    let zero_i64 = builder.ins().iconst(types::I64, 0);
-                    let is_zero = builder.ins().icmp(IntCC::Equal, val, zero_i64);
-                    let nanboxed = inline_nanbox_pointer(builder, val);
-                    let undef_bits = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
-                    let undef_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), undef_bits);
-                    builder.ins().select(is_zero, undef_f64, nanboxed)
-                } else {
-                    // Guard: F64 null POINTER_TAG (0x7FFD_0000_0000_0000) → undefined
-                    let f64_val = ensure_f64(builder, val);
-                    let bits_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), f64_val);
-                    let null_ptr_tag = builder.ins().iconst(types::I64, 0x7FFD_0000_0000_0000u64 as i64);
-                    let is_null_ptr = builder.ins().icmp(IntCC::Equal, bits_i64, null_ptr_tag);
-                    let undef_bits2 = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
-                    let undef_f64_2 = builder.ins().bitcast(types::F64, MemFlags::new(), undef_bits2);
-                    builder.ins().select(is_null_ptr, undef_f64_2, f64_val)
-                };
+                        let val_type = builder.func.dfg.value_type(val);
+                        let final_val = if is_string {
+                            let str_ptr = ensure_i64(builder, val);
+                            inline_nanbox_string(builder, str_ptr)
+                        } else if val_type == types::I64 {
+                            // Guard: I64=0 produces null POINTER_TAG — replace with undefined.
+                            let zero_i64 = builder.ins().iconst(types::I64, 0);
+                            let is_zero = builder.ins().icmp(IntCC::Equal, val, zero_i64);
+                            let nanboxed = inline_nanbox_pointer(builder, val);
+                            let undef_bits = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
+                            let undef_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), undef_bits);
+                            builder.ins().select(is_zero, undef_f64, nanboxed)
+                        } else {
+                            // Guard: F64 null POINTER_TAG → undefined.
+                            let f64_val = ensure_f64(builder, val);
+                            let bits_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), f64_val);
+                            let null_ptr_tag = builder.ins().iconst(types::I64, 0x7FFD_0000_0000_0000u64 as i64);
+                            let is_null_ptr = builder.ins().icmp(IntCC::Equal, bits_i64, null_ptr_tag);
+                            let undef_bits2 = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
+                            let undef_f64_2 = builder.ins().bitcast(types::F64, MemFlags::new(), undef_bits2);
+                            builder.ins().select(is_null_ptr, undef_f64_2, f64_val)
+                        };
 
-                let static_offset = (i * 8) as i32;
-                builder.ins().store(MemFlags::new(), final_val, base_ptr, static_offset);
+                        builder.ins().call(set_ref, &[obj_ptr, key_str_ptr, final_val]);
+                    }
+                }
             }
 
             Ok(inline_nanbox_pointer(builder, obj_ptr))
