@@ -37,6 +37,12 @@ pub struct LoweringContext {
     pub(crate) classes: Vec<(String, ClassId)>,
     /// Static members of classes: class_name -> (static_field_names, static_method_names)
     pub(crate) class_statics: Vec<(String, Vec<String>, Vec<String>)>,
+    /// Instance field names per class: class_name -> list of DECLARED field names (from
+    /// ClassProp and parameter properties, NOT inferred from constructor body `this.x = ...`).
+    /// Used by the "infer fields from ctor body" pass to skip fields inherited from parents,
+    /// avoiding the creation of shadow fields that cause later index shift bugs after
+    /// inheritance resolution in codegen.
+    pub(crate) class_field_names: Vec<(String, Vec<String>)>,
     /// Enums: name -> (id, members with values)
     pub(crate) enums: Vec<(String, EnumId, Vec<(String, EnumValue)>)>,
     /// Interfaces: name -> id
@@ -141,6 +147,7 @@ impl LoweringContext {
             func_defaults: Vec::new(),
             classes: Vec::new(),
             class_statics: Vec::new(),
+            class_field_names: Vec::new(),
             enums: Vec::new(),
             interfaces: Vec::new(),
             type_aliases: Vec::new(),
@@ -282,6 +289,22 @@ impl LoweringContext {
 
     pub(crate) fn lookup_class(&self, name: &str) -> Option<ClassId> {
         self.classes_index.get(name).map(|&idx| self.classes[idx].1)
+    }
+
+    /// Register declared instance field names for a class. Used by subclasses to skip
+    /// re-declaring inherited fields when inferring from ctor body `this.x = ...` assignments.
+    pub(crate) fn register_class_field_names(&mut self, class_name: String, field_names: Vec<String>) {
+        // Replace existing entry if present; otherwise append.
+        if let Some(entry) = self.class_field_names.iter_mut().find(|(n, _)| *n == class_name) {
+            entry.1 = field_names;
+        } else {
+            self.class_field_names.push((class_name, field_names));
+        }
+    }
+
+    /// Look up the list of instance field names declared on a class (NOT including inherited).
+    pub(crate) fn lookup_class_field_names(&self, class_name: &str) -> Option<&[String]> {
+        self.class_field_names.iter().find(|(n, _)| n == class_name).map(|(_, f)| f.as_slice())
     }
 
     pub(crate) fn register_class_statics(&mut self, class_name: String, static_fields: Vec<String>, static_methods: Vec<String>) {

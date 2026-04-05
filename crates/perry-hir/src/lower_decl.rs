@@ -360,7 +360,25 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
     // Detect fields from constructor body `this.xxx = ...` assignments.
     // JavaScript classes (e.g., transpiled from TypeScript) often don't have ClassProp
     // declarations; instead they assign to `this` in the constructor body.
+    //
+    // IMPORTANT: Also exclude fields inherited from parent classes. If the parent already
+    // declares `kind` and the subclass writes `this.kind = ...`, the subclass must NOT
+    // add `kind` as a new own field. Otherwise, codegen's resolve_class_fields later
+    // merges parent and own indices and the subclass's shadow `kind` gets a different
+    // offset from the parent's, leaving TWO `kind` slots that disagree at runtime.
     {
+        // Collect inherited field names by walking the parent chain via the extends_name.
+        // Previous lower_class_decl calls have registered each class's full (own+inherited)
+        // field set, so a single lookup on the direct parent yields the complete chain.
+        let mut inherited_field_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(ref parent_name) = extends_name {
+            if let Some(parent_fields) = ctx.lookup_class_field_names(parent_name) {
+                for f in parent_fields {
+                    inherited_field_names.insert(f.clone());
+                }
+            }
+        }
+
         let declared_field_names: std::collections::HashSet<String> = fields.iter().map(|f| f.name.clone()).collect();
         for member in &class_decl.class.body {
             if let ast::ClassMember::Constructor(ctor) = member {
@@ -372,7 +390,9 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                                     if let ast::Expr::This(_) = &*mem.obj {
                                         if let ast::MemberProp::Ident(prop_ident) = &mem.prop {
                                             let fname = prop_ident.sym.to_string();
-                                            if !declared_field_names.contains(&fname) {
+                                            if !declared_field_names.contains(&fname)
+                                                && !inherited_field_names.contains(&fname)
+                                            {
                                                 fields.push(ClassField {
                                                     name: fname,
                                                     ty: Type::Any,
@@ -393,6 +413,16 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
         // Dedup fields: keep first occurrence of each name
         let mut seen = std::collections::HashSet::new();
         fields.retain(|f| seen.insert(f.name.clone()));
+
+        // Register this class's complete field set (own + inherited) so subclasses that
+        // extend it can see the full inheritance chain during their own lowering.
+        let mut complete_field_names: Vec<String> = inherited_field_names.into_iter().collect();
+        for f in &fields {
+            if !complete_field_names.contains(&f.name) {
+                complete_field_names.push(f.name.clone());
+            }
+        }
+        ctx.register_class_field_names(name.clone(), complete_field_names);
     }
 
     // Exit type parameter scope

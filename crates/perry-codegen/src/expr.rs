@@ -10026,60 +10026,142 @@ pub(crate) fn compile_expr(
                         if let Some(ctx) = this_ctx {
                             let class_meta = &ctx.class_meta;
 
-                            // First check if it's our own method
-                            if let Some(&method_id) = class_meta.method_ids.get(property) {
-                                let this_ptr = builder.use_var(ctx.this_var);
-                                // Method expects this as i64, args as f64
-                                let mut call_args = vec![this_ptr];
-                                for arg in &arg_vals {
-                                    call_args.push(ensure_f64(builder, *arg));
+                            // First check if it's our own method.
+                            //
+                            // VIRTUAL DISPATCH: If any subclass in this module overrides this
+                            // method, we must NOT static-bind — the runtime type of `this` may
+                            // be a subclass whose override should win (JS semantics). Route
+                            // through js_native_call_method which looks up the method in the
+                            // CLASS_VTABLE_REGISTRY by the object's runtime class_id.
+                            let is_overridden_in_subclass = classes.iter().any(|(_, other_meta)| {
+                                // Walk parent chain; if we reach `class_meta.id` and this class
+                                // declares `property`, it's an override.
+                                if other_meta.id == class_meta.id {
+                                    return false;
                                 }
+                                let mut current = other_meta;
+                                loop {
+                                    let parent_name = match &current.parent_class {
+                                        Some(n) => n.clone(),
+                                        None => return false,
+                                    };
+                                    let parent = match classes.get(&parent_name) {
+                                        Some(p) => p,
+                                        None => return false,
+                                    };
+                                    if parent.id == class_meta.id {
+                                        // `other_meta` (or an intermediate ancestor we already
+                                        // walked) has parent == this class. Check if `other_meta`
+                                        // declares this property as an own method. We use
+                                        // method_ids for the lookup but must exclude inherited
+                                        // method_ids (which share the parent's FuncId after
+                                        // resolve_method_inheritance). A method is overridden
+                                        // iff other_meta.method_ids[property] != class_meta.method_ids[property].
+                                        if let (Some(&child_mid), Some(&own_mid)) = (
+                                            other_meta.method_ids.get(property),
+                                            class_meta.method_ids.get(property),
+                                        ) {
+                                            return child_mid != own_mid;
+                                        }
+                                        return false;
+                                    }
+                                    current = parent;
+                                }
+                            });
 
-                                let func_ref = module.declare_func_in_func(method_id, builder.func);
+                            if !is_overridden_in_subclass {
+                                if let Some(&method_id) = class_meta.method_ids.get(property) {
+                                    let this_ptr = builder.use_var(ctx.this_var);
+                                    // Method expects this as i64, args as f64
+                                    let mut call_args = vec![this_ptr];
+                                    for arg in &arg_vals {
+                                        call_args.push(ensure_f64(builder, *arg));
+                                    }
 
-                                // Get expected parameter count and types from the function signature
-                                let actual_sig = module.declarations().get_function_decl(method_id);
-                                let expected_param_count = actual_sig.signature.params.len();
+                                    let func_ref = module.declare_func_in_func(method_id, builder.func);
 
-                                // Convert arguments to match expected types
-                                let mut final_call_args: Vec<Value> = call_args.iter().enumerate()
-                                    .map(|(i, &val)| {
-                                        if i < actual_sig.signature.params.len() {
-                                            let expected_type = actual_sig.signature.params[i].value_type;
-                                            let actual_type = builder.func.dfg.value_type(val);
-                                            if expected_type == types::I64 && actual_type == types::F64 {
-                                                // Strip NaN-box tag bits to get raw pointer
-                                                ensure_i64(builder, val)
-                                            } else if expected_type == types::F64 && actual_type == types::I64 {
-                                                // i64 pointer -> f64: NaN-box with POINTER_TAG
-                                                inline_nanbox_pointer(builder, val)
-                                            } else if expected_type == types::F64 && actual_type == types::I32 {
-                                                // i32 (from loop counter optimization) -> f64
-                                                builder.ins().fcvt_from_sint(types::F64, val)
-                                            } else if expected_type == types::I64 && actual_type == types::I32 {
-                                                // i32 (from loop counter optimization) -> i64
-                                                builder.ins().sextend(types::I64, val)
+                                    // Get expected parameter count and types from the function signature
+                                    let actual_sig = module.declarations().get_function_decl(method_id);
+                                    let expected_param_count = actual_sig.signature.params.len();
+
+                                    // Convert arguments to match expected types
+                                    let mut final_call_args: Vec<Value> = call_args.iter().enumerate()
+                                        .map(|(i, &val)| {
+                                            if i < actual_sig.signature.params.len() {
+                                                let expected_type = actual_sig.signature.params[i].value_type;
+                                                let actual_type = builder.func.dfg.value_type(val);
+                                                if expected_type == types::I64 && actual_type == types::F64 {
+                                                    // Strip NaN-box tag bits to get raw pointer
+                                                    ensure_i64(builder, val)
+                                                } else if expected_type == types::F64 && actual_type == types::I64 {
+                                                    // i64 pointer -> f64: NaN-box with POINTER_TAG
+                                                    inline_nanbox_pointer(builder, val)
+                                                } else if expected_type == types::F64 && actual_type == types::I32 {
+                                                    // i32 (from loop counter optimization) -> f64
+                                                    builder.ins().fcvt_from_sint(types::F64, val)
+                                                } else if expected_type == types::I64 && actual_type == types::I32 {
+                                                    // i32 (from loop counter optimization) -> i64
+                                                    builder.ins().sextend(types::I64, val)
+                                                } else {
+                                                    val
+                                                }
                                             } else {
                                                 val
                                             }
+                                        })
+                                        .collect();
+
+                                    // Pad or truncate arguments to match expected count with correct types
+                                    while final_call_args.len() < expected_param_count {
+                                        let expected_type = actual_sig.signature.params[final_call_args.len()].value_type;
+                                        if expected_type == types::I64 {
+                                            final_call_args.push(builder.ins().iconst(types::I64, 0));
                                         } else {
-                                            val
+                                            final_call_args.push(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64)));
                                         }
-                                    })
-                                    .collect();
-
-                                // Pad or truncate arguments to match expected count with correct types
-                                while final_call_args.len() < expected_param_count {
-                                    let expected_type = actual_sig.signature.params[final_call_args.len()].value_type;
-                                    if expected_type == types::I64 {
-                                        final_call_args.push(builder.ins().iconst(types::I64, 0));
-                                    } else {
-                                        final_call_args.push(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64)));
                                     }
-                                }
-                                final_call_args.truncate(expected_param_count);
+                                    final_call_args.truncate(expected_param_count);
 
-                                let call = builder.ins().call(func_ref, &final_call_args);
+                                    let call = builder.ins().call(func_ref, &final_call_args);
+                                    return Ok(builder.inst_results(call)[0]);
+                                }
+                            } else if class_meta.method_ids.contains_key(property) {
+                                // Overridden in a subclass: use runtime vtable dispatch via
+                                // js_native_call_method(this_nanboxed, name, name_len, args, args_len).
+                                let this_ptr = builder.use_var(ctx.this_var);
+                                let this_nanboxed = inline_nanbox_pointer(builder, this_ptr);
+
+                                // Build method name as static data
+                                let name_bytes = property.as_bytes();
+                                let name_data_id = module.declare_anonymous_data(false, false)?;
+                                let mut name_desc = cranelift_module::DataDescription::new();
+                                name_desc.define(name_bytes.to_vec().into_boxed_slice());
+                                module.define_data(name_data_id, &name_desc)?;
+                                let name_gv = module.declare_data_in_func(name_data_id, builder.func);
+                                let name_ptr = builder.ins().global_value(types::I64, name_gv);
+                                let name_len = builder.ins().iconst(types::I64, name_bytes.len() as i64);
+
+                                // Stage args on a stack slot as contiguous f64 values.
+                                let args_len_val = builder.ins().iconst(types::I64, arg_vals.len() as i64);
+                                let args_ptr_val = if arg_vals.is_empty() {
+                                    builder.ins().iconst(types::I64, 0)
+                                } else {
+                                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                                        StackSlotKind::ExplicitSlot,
+                                        (arg_vals.len() * 8) as u32,
+                                        8,
+                                    ));
+                                    for (i, arg) in arg_vals.iter().enumerate() {
+                                        let val_f64 = ensure_f64(builder, *arg);
+                                        builder.ins().stack_store(val_f64, slot, (i * 8) as i32);
+                                    }
+                                    builder.ins().stack_addr(types::I64, slot, 0)
+                                };
+
+                                let call_func = extern_funcs.get("js_native_call_method")
+                                    .ok_or_else(|| anyhow!("js_native_call_method not declared"))?;
+                                let call_ref = module.declare_func_in_func(*call_func, builder.func);
+                                let call = builder.ins().call(call_ref, &[this_nanboxed, name_ptr, name_len, args_ptr_val, args_len_val]);
                                 return Ok(builder.inst_results(call)[0]);
                             }
 
@@ -16281,9 +16363,10 @@ pub(crate) fn compile_expr(
 
             // Handle property-based array indexing: this.items[0], obj.paths[1], etc.
             // This is for accessing array elements where the array is stored in an object property.
-            // IMPORTANT: Only applies when the field is known to be an Array type and the index is
-            // numeric. For Record<string, T> / object-typed fields with string keys, we must fall
-            // through to the general path which calls js_object_get_field_by_name_f64.
+            // IMPORTANT: Only take this fast path when the field is actually an Array/Tuple type
+            // AND the index is numeric. For Record<string, T> / object-typed fields accessed with
+            // a string key, we must fall through to the generic path which calls
+            // js_object_get_field_by_name_f64.
             if let Expr::PropertyGet { object: prop_obj, property: prop_name } = object.as_ref() {
                 // Check if this is accessing a property of a local variable with class metadata
                 if let Expr::LocalGet(obj_id) = prop_obj.as_ref() {
@@ -16291,60 +16374,61 @@ pub(crate) fn compile_expr(
                         if let Some(ref class_name) = obj_info.class_name {
                             if let Some(class_meta) = classes.get(class_name) {
                                 if let Some(&field_idx) = class_meta.field_indices.get(prop_name) {
-                                    // Only take the array fast path if:
-                                    // 1. The field's HIR type is an array (or Tuple/Buffer)
-                                    // 2. The index is NOT a string literal/string-typed expression
-                                    let field_is_array = class_meta.field_types.get(prop_name)
-                                        .map(|t| matches!(t,
-                                            perry_types::Type::Array(_) |
-                                            perry_types::Type::Tuple(_)))
-                                        .unwrap_or(false);
-                                    let index_is_string = matches!(index.as_ref(), Expr::String(_)) || {
-                                        if let Expr::LocalGet(idx_id) = index.as_ref() {
-                                            locals.get(idx_id).map(|i| i.is_string).unwrap_or(false)
+                                    // Gate on field type and index type.
+                                    // - Array<T> / Tuple: array indexing.
+                                    // - Any other type (Record<K,V>, Object, etc.): fall through
+                                    //   to the generic path that dispatches string or integer
+                                    //   keys correctly.
+                                    let field_ty = class_meta.field_types.get(prop_name);
+                                    let is_array_field = matches!(field_ty,
+                                        Some(perry_types::Type::Array(_)) |
+                                        Some(perry_types::Type::Tuple(_))
+                                    );
+                                    // Also check if the index is a string literal — if so, this
+                                    // is definitely not array access even if the field type is
+                                    // loosely typed (Any/Unknown).
+                                    let index_is_string = matches!(index.as_ref(), Expr::String(_))
+                                        || matches!(index.as_ref(), Expr::LocalGet(idx_id)
+                                            if locals.get(idx_id).map(|i| i.is_string).unwrap_or(false));
+                                    if is_array_field && !index_is_string {
+                                        // Get the object pointer
+                                        let obj_val = builder.use_var(obj_info.var);
+                                        let obj_ptr = ensure_i64(builder, obj_val);
+
+                                        // Load the array from the property (inline field access)
+                                        let field_offset = 24 + (field_idx as i32) * 8;
+                                        let arr_val_f64 = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
+
+                                        // Extract the array pointer from NaN-boxed value
+                                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                        let ptr_call = builder.ins().call(get_ptr_ref, &[arr_val_f64]);
+                                        let arr_ptr = builder.inst_results(ptr_call)[0];
+
+                                        // Get the index as i32
+                                        let idx_i32 = if let Expr::Integer(n) = index.as_ref() {
+                                            builder.ins().iconst(types::I32, *n)
                                         } else {
-                                            false
-                                        }
-                                    };
+                                            let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
+                                            let idx_f64 = ensure_f64(builder, idx_val);
+                                            builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
+                                        };
 
-                                    if field_is_array && !index_is_string {
+                                        // Call js_array_get_jsvalue to get the element
+                                        let get_func = extern_funcs.get("js_array_get_jsvalue")
+                                            .ok_or_else(|| anyhow!("js_array_get_jsvalue not declared"))?;
+                                        let get_ref = module.declare_func_in_func(*get_func, builder.func);
+                                        let get_call = builder.ins().call(get_ref, &[arr_ptr, idx_i32]);
+                                        let jsvalue_bits = builder.inst_results(get_call)[0];
 
-                                    // Get the object pointer
-                                    let obj_val = builder.use_var(obj_info.var);
-                                    let obj_ptr = ensure_i64(builder, obj_val);
+                                        // Convert u64 bits to f64
+                                        let result = builder.ins().bitcast(types::F64, MemFlags::new(), jsvalue_bits);
 
-                                    // Load the array from the property (inline field access)
-                                    let field_offset = 24 + (field_idx as i32) * 8;
-                                    let arr_val_f64 = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
-
-                                    // Extract the array pointer from NaN-boxed value
-                                    let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
-                                        .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
-                                    let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
-                                    let ptr_call = builder.ins().call(get_ptr_ref, &[arr_val_f64]);
-                                    let arr_ptr = builder.inst_results(ptr_call)[0];
-
-                                    // Get the index as i32
-                                    let idx_i32 = if let Expr::Integer(n) = index.as_ref() {
-                                        builder.ins().iconst(types::I32, *n)
-                                    } else {
-                                        let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
-                                        let idx_f64 = ensure_f64(builder, idx_val);
-                                        builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
-                                    };
-
-                                    // Call js_array_get_jsvalue to get the element
-                                    let get_func = extern_funcs.get("js_array_get_jsvalue")
-                                        .ok_or_else(|| anyhow!("js_array_get_jsvalue not declared"))?;
-                                    let get_ref = module.declare_func_in_func(*get_func, builder.func);
-                                    let get_call = builder.ins().call(get_ref, &[arr_ptr, idx_i32]);
-                                    let jsvalue_bits = builder.inst_results(get_call)[0];
-
-                                    // Convert u64 bits to f64
-                                    let result = builder.ins().bitcast(types::F64, MemFlags::new(), jsvalue_bits);
-
-                                    return Ok(result);
-                                    } // end if field_is_array && !index_is_string
+                                        return Ok(result);
+                                    }
+                                    // Otherwise fall through to generic path that handles
+                                    // Record<string,*> / Object etc. with proper string key dispatch.
                                 }
                             }
                         }

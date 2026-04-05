@@ -55,6 +55,18 @@ pub fn inline_functions(module: &mut Module) {
         .map(|c| (c.name.clone(), c.name.clone()))
         .collect();
 
+    // Compute a MODULE-WIDE max LocalId used as the starting point for all
+    // inliner-allocated local IDs. CRITICAL: LocalIds are globally unique across
+    // the whole module (HIR lowering uses a single `fresh_local` counter), so any
+    // newly allocated ID must exceed the max used ANYWHERE in the module — not
+    // just in the current scope (init / function body / method body). Otherwise
+    // the inliner can produce a module-level Let whose id collides with a class
+    // method's parameter id, and the subsequent module_var_data_ids loader in
+    // codegen silently skips loading the global (because `locals.contains_key(id)`
+    // is already true for the method parameter), leaving the method reading the
+    // wrong value from the class field.
+    let module_max_id = find_max_local_id_in_module(module);
+
     // Phase 4: Inline METHOD calls in init statements
     // Only method calls are inlined here (not standalone functions), because method
     // bodies access `this.field` via pointer indirection and never reference module-level
@@ -64,17 +76,25 @@ pub fn inline_functions(module: &mut Module) {
     // the stale cached value instead of the updated global slot.
     {
         let empty_func_candidates: HashMap<FuncId, Function> = HashMap::new();
-        let mut next_local_id = find_max_local_id(&module.init) + 1;
+        let mut next_local_id = module_max_id + 1;
         let mut local_types: HashMap<LocalId, String> = HashMap::new();
         inline_calls_in_stmts(&mut module.init, &empty_func_candidates, &method_candidates, &class_names, &mut local_types, &mut next_local_id);
     }
 
     // Phase 5: Inline calls in function bodies
+    //
+    // Each function body now uses a private ID counter that starts after the
+    // module-wide max AND any IDs previously allocated by the init-phase inliner.
+    // We maintain a running `next_module_id` so each phase advances the shared
+    // counter, preventing collisions between phases.
+    let mut next_module_id = module_max_id + 1;
+    // Advance past any IDs consumed by the init phase by re-scanning the module.
+    next_module_id = next_module_id.max(find_max_local_id_in_module(module) + 1);
     for func in &mut module.functions {
         if func_candidates.contains_key(&func.id) {
             continue;
         }
-        let mut local_id = find_max_local_id(&func.body) + 1;
+        let mut local_id = next_module_id;
         let mut local_types: HashMap<LocalId, String> = HashMap::new();
         // Add function parameters to local_types
         for param in &func.params {
@@ -83,6 +103,7 @@ pub fn inline_functions(module: &mut Module) {
             }
         }
         inline_calls_in_stmts(&mut func.body, &func_candidates, &method_candidates, &class_names, &mut local_types, &mut local_id);
+        next_module_id = local_id;
     }
 
     // Phase 6: Inline calls in class method bodies
@@ -92,7 +113,7 @@ pub fn inline_functions(module: &mut Module) {
             if method_candidates.contains_key(&(class.name.clone(), method.name.clone())) {
                 continue;
             }
-            let mut local_id = find_max_local_id(&method.body) + 1;
+            let mut local_id = next_module_id;
             let mut local_types: HashMap<LocalId, String> = HashMap::new();
             for param in &method.params {
                 if let Type::Named(class_name) = &param.ty {
@@ -100,8 +121,58 @@ pub fn inline_functions(module: &mut Module) {
                 }
             }
             inline_calls_in_stmts(&mut method.body, &func_candidates, &method_candidates, &class_names, &mut local_types, &mut local_id);
+            next_module_id = local_id;
         }
     }
+}
+
+/// Find the maximum LocalId used ANYWHERE in the module: init statements,
+/// function bodies, class constructors, class method bodies, class field
+/// initializers, and closure bodies nested inside any of the above. Used to
+/// compute a safe starting point for inliner-allocated local IDs so they don't
+/// collide with existing HIR ids anywhere in the module.
+fn find_max_local_id_in_module(module: &Module) -> LocalId {
+    let mut max_id: LocalId = 0;
+    max_id = max_id.max(find_max_local_id(&module.init));
+    for func in &module.functions {
+        for param in &func.params {
+            max_id = max_id.max(param.id);
+        }
+        max_id = max_id.max(find_max_local_id(&func.body));
+    }
+    for class in &module.classes {
+        if let Some(ref ctor) = class.constructor {
+            for param in &ctor.params {
+                max_id = max_id.max(param.id);
+            }
+            max_id = max_id.max(find_max_local_id(&ctor.body));
+        }
+        for method in &class.methods {
+            for param in &method.params {
+                max_id = max_id.max(param.id);
+            }
+            max_id = max_id.max(find_max_local_id(&method.body));
+        }
+        for (_, getter) in &class.getters {
+            for param in &getter.params {
+                max_id = max_id.max(param.id);
+            }
+            max_id = max_id.max(find_max_local_id(&getter.body));
+        }
+        for (_, setter) in &class.setters {
+            for param in &setter.params {
+                max_id = max_id.max(param.id);
+            }
+            max_id = max_id.max(find_max_local_id(&setter.body));
+        }
+        for method in &class.static_methods {
+            for param in &method.params {
+                max_id = max_id.max(param.id);
+            }
+            max_id = max_id.max(find_max_local_id(&method.body));
+        }
+    }
+    max_id
 }
 
 /// Check if a function is suitable for inlining
@@ -327,9 +398,28 @@ fn find_max_local_id(stmts: &[Stmt]) -> LocalId {
                     check_expr(arg, max_id);
                 }
             }
+            Expr::CallSpread { callee, args, .. } => {
+                check_expr(callee, max_id);
+                for arg in args {
+                    match arg {
+                        perry_hir::CallArg::Expr(e) | perry_hir::CallArg::Spread(e) => {
+                            check_expr(e, max_id);
+                        }
+                    }
+                }
+            }
             Expr::Array(elements) => {
                 for elem in elements {
                     check_expr(elem, max_id);
+                }
+            }
+            Expr::ArraySpread(elements) => {
+                for elem in elements {
+                    match elem {
+                        perry_hir::ArrayElement::Expr(e) | perry_hir::ArrayElement::Spread(e) => {
+                            check_expr(e, max_id);
+                        }
+                    }
                 }
             }
             Expr::Object(fields) => {
@@ -356,6 +446,44 @@ fn find_max_local_id(stmts: &[Stmt]) -> LocalId {
                 for arg in args {
                     check_expr(arg, max_id);
                 }
+            }
+            // Closure parameters and body contribute to the global LocalId space.
+            // Without recursing here, find_max_local_id undercounts and the inliner
+            // can allocate colliding IDs for newly inserted Lets.
+            Expr::Closure { params, body, captures, mutable_captures, .. } => {
+                for param in params {
+                    *max_id = (*max_id).max(param.id);
+                }
+                for id in captures {
+                    *max_id = (*max_id).max(*id);
+                }
+                for id in mutable_captures {
+                    *max_id = (*max_id).max(*id);
+                }
+                for stmt in body {
+                    check_stmt(stmt, max_id);
+                }
+            }
+            // New/NewDynamic carry argument expressions
+            Expr::New { args, .. } => {
+                for arg in args {
+                    check_expr(arg, max_id);
+                }
+            }
+            Expr::NewDynamic { callee, args } => {
+                check_expr(callee, max_id);
+                for arg in args {
+                    check_expr(arg, max_id);
+                }
+            }
+            // Await/type coercions wrap an inner expression
+            Expr::Await(inner) | Expr::TypeOf(inner) | Expr::Void(inner) |
+            Expr::BigIntCoerce(inner) | Expr::NumberCoerce(inner) |
+            Expr::BooleanCoerce(inner) | Expr::StringCoerce(inner) |
+            Expr::ParseFloat(inner) |
+            Expr::StringFromCharCode(inner) |
+            Expr::JsonStringify(inner) | Expr::JsonParse(inner) => {
+                check_expr(inner, max_id);
             }
             _ => {}
         }
