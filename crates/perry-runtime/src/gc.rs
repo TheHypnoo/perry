@@ -89,6 +89,13 @@ thread_local! {
 /// Threshold: run GC when total arena bytes exceed this
 const GC_THRESHOLD_BYTES: usize = 64 * 1024 * 1024; // 64MB
 
+/// Threshold: run GC when tracked malloc objects exceed this count.
+/// Prevents unbounded growth of cycle-scoped allocations (strings, closures) in
+/// long-running services where arena usage stays flat (free list hits) but
+/// malloc tracking accumulates. Previously GC was only triggered on arena block
+/// allocation — services that never grew the arena never collected.
+const GC_MALLOC_COUNT_THRESHOLD: usize = 100_000;
+
 /// Allocate memory via malloc with GcHeader prepended.
 /// Returns pointer to usable memory AFTER the header.
 /// The allocation is tracked in MALLOC_OBJECTS.
@@ -230,6 +237,14 @@ pub fn gc_check_trigger() {
     use crate::arena::arena_total_bytes;
     let total = arena_total_bytes();
     if total >= GC_THRESHOLD_BYTES {
+        gc_collect_inner();
+        return;
+    }
+    // Also trigger on malloc object count to bound memory growth for
+    // services that stay within a single arena block but produce many
+    // short-lived strings/closures per iteration.
+    let malloc_count = MALLOC_OBJECTS.with(|list| list.borrow().len());
+    if malloc_count >= GC_MALLOC_COUNT_THRESHOLD {
         gc_collect_inner();
     }
 }
