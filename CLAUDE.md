@@ -140,8 +140,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 ## Recent Changes
 
+### v0.4.52
+- feat: labeled `break`/`continue` and `do...while` loops — new HIR variants `Labeled`, `LabeledBreak`, `LabeledContinue`, `DoWhile`; thread-local `LABEL_STACK`/`PENDING_LABEL` in codegen lets nested loops resolve labels without restructuring `loop_ctx`. `contains_loop_control` now recurses into nested loops to detect labeled control flow (prevents unsafe for-unrolling when an inner loop's `break outer`/`continue outer` targets an unrolled outer loop). `test_edge_control_flow` passes.
+- fix: block scoping for `let`/`const` — inner-block bindings no longer leak to the enclosing scope. New `push_block_scope`/`pop_block_scope` on `LoweringContext` wrap bare blocks, `if`/`else` branches, `while`/`for`/`for-of`/`for-in` bodies, and `try`/`finally` blocks. `var` declarations (tracked via `var_hoisted_ids`) are preserved across block exits so they remain function-scoped per JS semantics.
+
 ### v0.4.51
-- feat: labeled `break`/`continue` and `do...while` loops — new HIR variants `Labeled`, `LabeledBreak`, `LabeledContinue`, `DoWhile`; thread-local `LABEL_STACK`/`PENDING_LABEL` in codegen lets nested loops resolve labels without restructuring `loop_ctx`; for/while/do-while all push their exit/continue blocks on the label stack while compiling the body; `contains_loop_control` now recurses into nested loops to detect labeled control flow (prevents unsafe unrolling when an inner loop's `break outer`/`continue outer` targets the unrolled outer loop). Test `test_edge_control_flow` now passes (up from 7 to 8 passing edge tests).
 
 ### v0.4.50
 - feat: comprehensive edge-case test suite — 26 test files in `test-files/test_edge_*.ts` covering closures, classes, generics, truthiness, arrays, strings, type narrowing, control flow, operators, destructuring, async/promises, objects/records, interfaces, numeric edge cases, error handling, iteration, regex/JSON, and complex real-world patterns

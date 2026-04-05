@@ -537,6 +537,54 @@ impl LoweringContext {
         self.functions.truncate(mark.2);
     }
 
+    /// Enter a nested block scope for `{ ... }`, `if`/`else`, loop body, etc.
+    /// Unlike `enter_scope` (function boundaries), this is designed for
+    /// block-scoped `let`/`const`: `pop_block_scope` removes inner `let`/`const`
+    /// bindings while preserving `var`-hoisted ones so they remain visible in
+    /// the enclosing function scope.
+    pub(crate) fn push_block_scope(&self) -> (usize, usize) {
+        (self.locals.len(), self.functions.len())
+    }
+
+    /// Exit a nested block scope introduced by `push_block_scope`. Inner
+    /// `let`/`const` bindings are removed but any `var`-declared locals
+    /// (tracked via `var_hoisted_ids`) are retained, since `var` is
+    /// function-scoped in JS.
+    pub(crate) fn pop_block_scope(&mut self, mark: (usize, usize)) {
+        let (locals_mark, functions_mark) = mark;
+
+        // Preserve var-hoisted locals: move any hoisted entries defined after
+        // the mark to the position just past the mark, then drop the rest.
+        if self.locals.len() > locals_mark {
+            let mut kept: Vec<(String, LocalId, Type)> = Vec::new();
+            for entry in self.locals.drain(locals_mark..) {
+                if self.var_hoisted_ids.contains(&entry.1) {
+                    kept.push(entry);
+                }
+            }
+            self.locals.extend(kept);
+        }
+
+        // Function declarations inside a block are block-scoped in ES6+.
+        // Same pattern as exit_scope: remove/restore function index entries.
+        for i in functions_mark..self.functions.len() {
+            let name = &self.functions[i].0;
+            let mut earlier_idx = None;
+            for j in (0..functions_mark).rev() {
+                if self.functions[j].0 == *name {
+                    earlier_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(j) = earlier_idx {
+                self.functions_index.insert(name.clone(), j);
+            } else {
+                self.functions_index.remove(name);
+            }
+        }
+        self.functions.truncate(functions_mark);
+    }
+
 }
 
 // Re-export extracted module functions
@@ -1690,6 +1738,7 @@ fn lower_stmt(
                 }
                 ast::Decl::Var(var_decl) => {
                     let mutable = var_decl.kind != ast::VarDeclKind::Const;
+                    let is_var = var_decl.kind == ast::VarDeclKind::Var;
                     for decl in &var_decl.decls {
                         // Check if this is a Widget({...}) call from perry/widget
                         if let Some(init) = &decl.init {
@@ -1701,6 +1750,15 @@ fn lower_stmt(
                             }
                         }
                         let stmts = lower_var_decl_with_destructuring(ctx, decl, mutable)?;
+                        // `var` is function-scoped: mark defined locals so
+                        // `pop_block_scope` preserves them when leaving an inner block.
+                        if is_var {
+                            for s in &stmts {
+                                if let Stmt::Let { id, .. } = s {
+                                    ctx.var_hoisted_ids.insert(*id);
+                                }
+                            }
+                        }
                         module.init.extend(stmts);
                     }
                 }
@@ -1752,9 +1810,27 @@ fn lower_stmt(
         }
         ast::Stmt::If(if_stmt) => {
             let condition = lower_expr(ctx, &if_stmt.test)?;
-            let then_branch = lower_body_stmt(ctx, &if_stmt.cons)?;
+            // Each branch introduces its own lexical scope. Skip extra push if
+            // branch is a BlockStmt (handled there) or an If (else-if chain).
+            let then_branch = if matches!(*if_stmt.cons, ast::Stmt::Block(_)) {
+                lower_body_stmt(ctx, &if_stmt.cons)?
+            } else {
+                let mark = ctx.push_block_scope();
+                let stmts = lower_body_stmt(ctx, &if_stmt.cons)?;
+                ctx.pop_block_scope(mark);
+                stmts
+            };
             let else_branch = if_stmt.alt.as_ref()
-                .map(|s| lower_body_stmt(ctx, s))
+                .map(|s| {
+                    if matches!(**s, ast::Stmt::Block(_)) || matches!(**s, ast::Stmt::If(_)) {
+                        lower_body_stmt(ctx, s)
+                    } else {
+                        let mark = ctx.push_block_scope();
+                        let stmts = lower_body_stmt(ctx, s);
+                        ctx.pop_block_scope(mark);
+                        stmts
+                    }
+                })
                 .transpose()?;
             module.init.push(Stmt::If {
                 condition,
@@ -1764,7 +1840,14 @@ fn lower_stmt(
         }
         ast::Stmt::While(while_stmt) => {
             let condition = lower_expr(ctx, &while_stmt.test)?;
-            let body = lower_body_stmt(ctx, &while_stmt.body)?;
+            let body = if matches!(*while_stmt.body, ast::Stmt::Block(_)) {
+                lower_body_stmt(ctx, &while_stmt.body)?
+            } else {
+                let mark = ctx.push_block_scope();
+                let stmts = lower_body_stmt(ctx, &while_stmt.body)?;
+                ctx.pop_block_scope(mark);
+                stmts
+            };
             module.init.push(Stmt::While { condition, body });
         }
         ast::Stmt::DoWhile(do_while_stmt) => {
@@ -1788,6 +1871,9 @@ fn lower_stmt(
             }
         }
         ast::Stmt::For(for_stmt) => {
+            // Push a lexical scope covering init/test/update/body, so
+            // `for (let i = 0; ...)` bindings don't leak to the outer scope.
+            let for_scope_mark = ctx.push_block_scope();
             let init = if let Some(init) = &for_stmt.init {
                 match init {
                     ast::VarDeclOrExpr::VarDecl(var_decl) => {
@@ -1822,17 +1908,20 @@ fn lower_stmt(
             let condition = for_stmt.test.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
             let update = for_stmt.update.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
             let body = lower_body_stmt(ctx, &for_stmt.body)?;
+            ctx.pop_block_scope(for_scope_mark);
             module.init.push(Stmt::For { init, condition, update, body });
         }
         ast::Stmt::Block(block) => {
-            let stmts = lower_block_stmt(ctx, block)?;
+            // Bare block: introduce a lexical scope so inner let/const shadow
+            // without leaking into the enclosing module scope.
+            let stmts = lower_block_stmt_scoped(ctx, block)?;
             for stmt in stmts {
                 module.init.push(stmt);
             }
         }
         ast::Stmt::Try(try_stmt) => {
-            // Lower try body
-            let body = lower_block_stmt(ctx, &try_stmt.block)?;
+            // try body is its own lexical scope
+            let body = lower_block_stmt_scoped(ctx, &try_stmt.block)?;
 
             // Lower catch clause (if present)
             let catch = if let Some(ref catch_clause) = try_stmt.handler {
@@ -1854,9 +1943,9 @@ fn lower_stmt(
                 None
             };
 
-            // Lower finally (if present)
+            // finally block is its own lexical scope
             let finally = if let Some(ref finally_block) = try_stmt.finalizer {
-                Some(lower_block_stmt(ctx, finally_block)?)
+                Some(lower_block_stmt_scoped(ctx, finally_block)?)
             } else {
                 None
             };
@@ -1891,6 +1980,8 @@ fn lower_stmt(
             // for (const x of arr) { body }
             // becomes:
             // { let __arr = arr; for (let __i = 0; __i < __arr.length; __i++) { const x = __arr[__i]; body } }
+            // Push a block scope so loop variables and internal temporaries don't leak.
+            let for_scope_mark = ctx.push_block_scope();
 
             // Lower the iterable expression (the array)
             let arr_expr = lower_expr(ctx, &for_of_stmt.right)?;
@@ -2219,12 +2310,15 @@ fn lower_stmt(
                 }),
                 body: loop_body,
             });
+            ctx.pop_block_scope(for_scope_mark);
         }
         ast::Stmt::ForIn(for_in_stmt) => {
             // Desugar for-in to a for-of over Object.keys(obj):
             // for (const key in obj) { body }
             // becomes:
             // { let __keys = Object.keys(obj); for (let __i = 0; __i < __keys.length; __i++) { const key = __keys[__i]; body } }
+            // Push a block scope so the loop key and internal temporaries don't leak.
+            let for_scope_mark = ctx.push_block_scope();
 
             // Get the iteration variable name
             let key_name = match &for_in_stmt.left {
@@ -2299,6 +2393,7 @@ fn lower_stmt(
                 }),
                 body: loop_body,
             });
+            ctx.pop_block_scope(for_scope_mark);
         }
         _ => {}
     }

@@ -1094,6 +1094,19 @@ pub(crate) fn lower_block_stmt(ctx: &mut LoweringContext, block: &ast::BlockStmt
     Ok(stmts)
 }
 
+/// Lower a block statement that introduces its own lexical scope for
+/// `let`/`const`. Inner bindings shadow outer ones and are removed on exit.
+/// `var` declarations remain visible (function-scoped).
+pub(crate) fn lower_block_stmt_scoped(ctx: &mut LoweringContext, block: &ast::BlockStmt) -> Result<Vec<Stmt>> {
+    let mark = ctx.push_block_scope();
+    let mut stmts = Vec::new();
+    for stmt in &block.stmts {
+        stmts.extend(lower_body_stmt(ctx, stmt)?);
+    }
+    ctx.pop_block_scope(mark);
+    Ok(stmts)
+}
+
 pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Result<Vec<Stmt>> {
     let mut result = Vec::new();
 
@@ -1104,9 +1117,29 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
         }
         ast::Stmt::If(if_stmt) => {
             let condition = lower_expr(ctx, &if_stmt.test)?;
-            let then_branch = lower_body_stmt(ctx, &if_stmt.cons)?;
+            // Each branch introduces its own lexical scope for let/const.
+            // Skip the extra push if the branch is already a BlockStmt (which
+            // will push its own scope via lower_block_stmt_scoped), or another
+            // If (else-if chain) which handles its own scoping.
+            let then_branch = if matches!(*if_stmt.cons, ast::Stmt::Block(_)) {
+                lower_body_stmt(ctx, &if_stmt.cons)?
+            } else {
+                let mark = ctx.push_block_scope();
+                let stmts = lower_body_stmt(ctx, &if_stmt.cons)?;
+                ctx.pop_block_scope(mark);
+                stmts
+            };
             let else_branch = if_stmt.alt.as_ref()
-                .map(|s| lower_body_stmt(ctx, s))
+                .map(|s| {
+                    if matches!(**s, ast::Stmt::Block(_)) || matches!(**s, ast::Stmt::If(_)) {
+                        lower_body_stmt(ctx, s)
+                    } else {
+                        let mark = ctx.push_block_scope();
+                        let stmts = lower_body_stmt(ctx, s);
+                        ctx.pop_block_scope(mark);
+                        stmts
+                    }
+                })
                 .transpose()?;
             result.push(Stmt::If {
                 condition,
@@ -1115,7 +1148,9 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             });
         }
         ast::Stmt::Block(block) => {
-            result.extend(lower_block_stmt(ctx, block)?);
+            // Bare block: introduce a lexical scope so let/const shadow
+            // without leaking into the enclosing scope.
+            result.extend(lower_block_stmt_scoped(ctx, block)?);
         }
         ast::Stmt::Expr(expr_stmt) => {
             // Desugar this.field.splice(...) to:
@@ -1198,8 +1233,18 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
         }
         ast::Stmt::Decl(ast::Decl::Var(var_decl)) => {
             let mutable = var_decl.kind != ast::VarDeclKind::Const;
+            let is_var = var_decl.kind == ast::VarDeclKind::Var;
             for decl in &var_decl.decls {
                 let stmts = lower_var_decl_with_destructuring(ctx, decl, mutable)?;
+                // `var` is function-scoped: mark each defined local so
+                // `pop_block_scope` preserves it when leaving an inner block.
+                if is_var {
+                    for s in &stmts {
+                        if let Stmt::Let { id, .. } = s {
+                            ctx.var_hoisted_ids.insert(*id);
+                        }
+                    }
+                }
                 result.extend(stmts);
             }
         }
@@ -1327,7 +1372,15 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
         }
         ast::Stmt::While(while_stmt) => {
             let condition = lower_expr(ctx, &while_stmt.test)?;
-            let body = lower_body_stmt(ctx, &while_stmt.body)?;
+            // While body introduces its own lexical scope.
+            let body = if matches!(*while_stmt.body, ast::Stmt::Block(_)) {
+                lower_body_stmt(ctx, &while_stmt.body)?
+            } else {
+                let mark = ctx.push_block_scope();
+                let stmts = lower_body_stmt(ctx, &while_stmt.body)?;
+                ctx.pop_block_scope(mark);
+                stmts
+            };
             result.push(Stmt::While { condition, body });
         }
         ast::Stmt::DoWhile(do_while_stmt) => {
@@ -1369,6 +1422,9 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             }
         }
         ast::Stmt::For(for_stmt) => {
+            // Push a block scope covering init/test/update/body, so
+            // `for (let i = 0; ...)` bindings don't leak to the enclosing scope.
+            let for_scope_mark = ctx.push_block_scope();
             let init = if let Some(init) = &for_stmt.init {
                 match init {
                     ast::VarDeclOrExpr::VarDecl(var_decl) => {
@@ -1403,11 +1459,12 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             let condition = for_stmt.test.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
             let update = for_stmt.update.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
             let body = lower_body_stmt(ctx, &for_stmt.body)?;
+            ctx.pop_block_scope(for_scope_mark);
             result.push(Stmt::For { init, condition, update, body });
         }
         ast::Stmt::Try(try_stmt) => {
-            // Lower try body
-            let body = lower_block_stmt(ctx, &try_stmt.block)?;
+            // try body is its own lexical scope
+            let body = lower_block_stmt_scoped(ctx, &try_stmt.block)?;
 
             // Lower catch clause (if present)
             let catch = if let Some(ref catch_clause) = try_stmt.handler {
@@ -1432,9 +1489,9 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                 None
             };
 
-            // Lower finally (if present)
+            // finally block is its own lexical scope
             let finally = if let Some(ref finally_block) = try_stmt.finalizer {
-                Some(lower_block_stmt(ctx, finally_block)?)
+                Some(lower_block_stmt_scoped(ctx, finally_block)?)
             } else {
                 None
             };
@@ -1465,7 +1522,9 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             result.push(Stmt::Switch { discriminant, cases });
         }
         ast::Stmt::ForOf(for_of_stmt) => {
-            // Desugar for-of to a regular for loop (same as in lower_stmt)
+            // Desugar for-of to a regular for loop (same as in lower_stmt).
+            // Push a block scope so loop variables and internal temporaries don't leak.
+            let for_scope_mark = ctx.push_block_scope();
             let arr_expr = lower_expr(ctx, &for_of_stmt.right)?;
 
             // If the iterable is a Map, wrap in MapEntries to convert to array
@@ -1748,9 +1807,12 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                 }),
                 body: loop_body,
             });
+            ctx.pop_block_scope(for_scope_mark);
         }
         ast::Stmt::ForIn(for_in_stmt) => {
-            // Desugar for-in to a for-of over Object.keys(obj) (same as in lower_stmt)
+            // Desugar for-in to a for-of over Object.keys(obj) (same as in lower_stmt).
+            // Push a block scope so loop variables don't leak.
+            let for_scope_mark = ctx.push_block_scope();
             let key_name = match &for_in_stmt.left {
                 ast::ForHead::VarDecl(var_decl) => {
                     if let Some(decl) = var_decl.decls.first() {
@@ -1815,6 +1877,7 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                 }),
                 body: loop_body,
             });
+            ctx.pop_block_scope(for_scope_mark);
         }
         _ => {
             // TODO: handle more statement types
