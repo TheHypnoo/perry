@@ -259,6 +259,13 @@ pub extern "C" fn js_gc_collect() {
     gc_collect_inner();
 }
 
+/// Threshold-based GC trigger (safe for use from the event loop).
+/// Only runs collection if arena or malloc thresholds are exceeded.
+#[no_mangle]
+pub extern "C" fn gc_check_trigger_export() {
+    gc_check_trigger();
+}
+
 /// Main GC collection
 fn gc_collect_inner() {
     let start = std::time::Instant::now();

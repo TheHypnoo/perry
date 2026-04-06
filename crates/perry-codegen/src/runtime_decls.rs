@@ -10710,6 +10710,14 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("gc"), func_id);
         }
 
+        // gc_check_trigger_export() -> void
+        // Threshold-based GC trigger for the event loop (only collects if needed)
+        {
+            let sig = self.module.make_signature();
+            let func_id = self.module.declare_function("gc_check_trigger_export", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("gc_check_trigger_export"), func_id);
+        }
+
         // js_gc_register_global_root(ptr: i64) -> void
         {
             let mut sig = self.module.make_signature();

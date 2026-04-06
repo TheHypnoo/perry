@@ -798,11 +798,21 @@ impl crate::codegen::Compiler {
                         let has_work = builder.ins().icmp(IntCC::NotEqual, any_pending, zero_i32);
                         builder.ins().brif(has_work, loop_body, &[], loop_exit, &[]);
 
-                        // loop_body: tick both timer queues, sleep 10ms, jump back
+                        // loop_body: tick both timer queues, then GC, sleep 10ms, jump back
                         builder.switch_to_block(loop_body);
                         builder.seal_block(loop_body);
                         builder.ins().call(int_tick_ref, &[]);
                         builder.ins().call(cb_tick_ref, &[]);
+
+                        // GC safe point: timer callbacks have returned, so all live JS values
+                        // are stored in module globals, closure boxes, or timer root lists —
+                        // NOT in registers. Uses threshold-based check (not unconditional
+                        // collection) to avoid the overhead of running GC on every loop tick.
+                        if let Some(&gc_trigger_func) = self.extern_funcs.get("gc_check_trigger_export") {
+                            let gc_ref = self.module.declare_func_in_func(gc_trigger_func, builder.func);
+                            builder.ins().call(gc_ref, &[]);
+                        }
+
                         let ten_ms = builder.ins().f64const(10.0);
                         builder.ins().call(sleep_ref, &[ten_ms]);
                         builder.ins().jump(loop_header, &[]);
