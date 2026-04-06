@@ -53,6 +53,95 @@ pub fn register_widget(view: Retained<UIView>) -> i64 {
     handle
 }
 
+#[cfg(feature = "geisterhand")]
+fn alloc_string_result(s: &str, out_len: *mut usize) -> *mut u8 {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let buf = unsafe { libc::malloc(len) as *mut u8 };
+    if buf.is_null() { return std::ptr::null_mut(); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+        *out_len = len;
+    }
+    buf
+}
+
+/// Read the current value of a widget by handle (UITextField → text, UISlider → value, UISwitch → isOn).
+#[cfg(feature = "geisterhand")]
+#[no_mangle]
+pub extern "C" fn perry_ui_read_widget_value(handle: i64, out_len: *mut usize) -> *mut u8 {
+    unsafe { *out_len = 0; }
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            if let Some(tf_cls) = objc2::runtime::AnyClass::get(c"UITextField") {
+                let is_tf: bool = objc2::msg_send![&*view, isKindOfClass: tf_cls];
+                if is_tf {
+                    let val: *const objc2::runtime::AnyObject = objc2::msg_send![&*view, text];
+                    if !val.is_null() {
+                        let ns: &objc2_foundation::NSString = &*(val as *const objc2_foundation::NSString);
+                        return alloc_string_result(&ns.to_string(), out_len);
+                    }
+                }
+            }
+            if let Some(slider_cls) = objc2::runtime::AnyClass::get(c"UISlider") {
+                let is_slider: bool = objc2::msg_send![&*view, isKindOfClass: slider_cls];
+                if is_slider {
+                    let val: f32 = objc2::msg_send![&*view, value];
+                    return alloc_string_result(&format!("{}", val), out_len);
+                }
+            }
+            if let Some(switch_cls) = objc2::runtime::AnyClass::get(c"UISwitch") {
+                let is_switch: bool = objc2::msg_send![&*view, isKindOfClass: switch_cls];
+                if is_switch {
+                    let on: bool = objc2::msg_send![&*view, isOn];
+                    return alloc_string_result(if on { "true" } else { "false" }, out_len);
+                }
+            }
+        }
+    }
+    std::ptr::null_mut()
+}
+
+/// Query all widgets and return JSON with handle, visible, and frame data.
+#[cfg(feature = "geisterhand")]
+#[no_mangle]
+pub extern "C" fn perry_ui_query_widget_tree(out_len: *mut usize) -> *mut u8 {
+    let json = WIDGETS.with(|w| {
+        let widgets = w.borrow();
+        let mut s = String::from("[");
+        for (i, view) in widgets.iter().enumerate() {
+            let handle = (i + 1) as i64;
+            if i > 0 { s.push(','); }
+            unsafe {
+                let hidden: bool = objc2::msg_send![&**view, isHidden];
+                let visible = !hidden;
+                #[repr(C)]
+                #[derive(Copy, Clone)]
+                struct CGRect { x: f64, y: f64, w: f64, h: f64 }
+                let frame: CGRect = objc2::msg_send![&**view, frame];
+                s.push_str(&format!(
+                    r#"{{"handle":{},"visible":{},"frame":{{"x":{:.0},"y":{:.0},"width":{:.0},"height":{:.0}}}}}"#,
+                    handle, visible, frame.x, frame.y, frame.w, frame.h
+                ));
+            }
+        }
+        s.push(']');
+        s
+    });
+    let bytes = json.into_bytes();
+    let len = bytes.len();
+    let buf = unsafe { libc::malloc(len) as *mut u8 };
+    if buf.is_null() {
+        unsafe { *out_len = 0; }
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+        *out_len = len;
+    }
+    buf
+}
+
 /// Retrieve the UIView for a given handle.
 pub fn get_widget(handle: i64) -> Option<Retained<UIView>> {
     WIDGETS.with(|w| {

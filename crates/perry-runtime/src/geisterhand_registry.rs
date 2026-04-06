@@ -42,6 +42,7 @@ pub enum PendingAction {
     SetText { handle: i64, text: String },
     ScrollTo { handle: i64, x: f64, y: f64 },
     ReadValue { handle: i64 },
+    QueryWidgetTree,
 }
 
 static REGISTRY: Mutex<Vec<RegisteredWidget>> = Mutex::new(Vec::new());
@@ -59,6 +60,11 @@ static VALUE_RESULT: Mutex<Option<String>> = Mutex::new(None);
 static VALUE_CONDVAR: Condvar = Condvar::new();
 static VALUE_REQUESTED: Mutex<bool> = Mutex::new(false);
 
+/// Widget tree result: same condvar pattern.
+static TREE_RESULT: Mutex<Option<String>> = Mutex::new(None);
+static TREE_CONDVAR: Condvar = Condvar::new();
+static TREE_REQUESTED: Mutex<bool> = Mutex::new(false);
+
 extern "C" {
     fn js_closure_call0(closure: *const u8) -> f64;
     fn js_closure_call1(closure: *const u8, arg: f64) -> f64;
@@ -75,6 +81,7 @@ static UI_SCREENSHOT_CAPTURE_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_m
 static UI_TEXTFIELD_SET_STRING_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static UI_SCROLL_SET_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static UI_READ_VALUE_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static UI_QUERY_TREE_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Register the platform UI crate's state_set function.
 #[no_mangle]
@@ -106,6 +113,12 @@ pub extern "C" fn perry_geisterhand_register_scroll_set(f: extern "C" fn(i64, f6
 #[no_mangle]
 pub extern "C" fn perry_geisterhand_register_read_value(f: extern "C" fn(i64, *mut usize) -> *mut u8) {
     UI_READ_VALUE_FN.store(f as *mut (), Ordering::Release);
+}
+
+/// Register the platform UI crate's query_tree function.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_register_query_tree(f: extern "C" fn(*mut usize) -> *mut u8) {
+    UI_QUERY_TREE_FN.store(f as *mut (), Ordering::Release);
 }
 
 /// Register a widget callback in the global registry.
@@ -359,6 +372,29 @@ pub extern "C" fn perry_geisterhand_pump() {
                 }
                 VALUE_CONDVAR.notify_all();
             }
+            PendingAction::QueryWidgetTree => {
+                let f = UI_QUERY_TREE_FN.load(Ordering::Acquire);
+                let json = if !f.is_null() {
+                    let mut len: usize = 0;
+                    unsafe {
+                        let func: extern "C" fn(*mut usize) -> *mut u8 = std::mem::transmute(f);
+                        let ptr = func(&mut len);
+                        if !ptr.is_null() && len > 0 {
+                            let s = String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned();
+                            libc::free(ptr as *mut libc::c_void);
+                            s
+                        } else {
+                            "[]".to_string()
+                        }
+                    }
+                } else {
+                    "[]".to_string()
+                };
+                if let Ok(mut r) = TREE_RESULT.lock() {
+                    *r = Some(json);
+                }
+                TREE_CONDVAR.notify_all();
+            }
             PendingAction::CaptureScreenshot => {
                 let f = UI_SCREENSHOT_CAPTURE_FN.load(Ordering::Acquire);
                 let (ptr, len) = if !f.is_null() {
@@ -534,6 +570,48 @@ pub extern "C" fn perry_geisterhand_request_value(handle: i64, out_len: *mut usi
 }
 
 /// Get the closure_f64 for a given handle and callback kind.
+/// Request widget tree with visibility/frame data. Called from HTTP server thread.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_request_tree(out_len: *mut usize) -> *mut u8 {
+    if let Ok(mut requested) = TREE_REQUESTED.lock() {
+        if *requested {
+            unsafe { *out_len = 0; }
+            return std::ptr::null_mut();
+        }
+        *requested = true;
+    }
+    if let Ok(mut result) = TREE_RESULT.lock() {
+        *result = None;
+    }
+    if let Ok(mut q) = PENDING_ACTIONS.lock() {
+        q.push(PendingAction::QueryWidgetTree);
+    }
+    let tree_json = {
+        let result = TREE_RESULT.lock().unwrap();
+        let (result, timeout) = TREE_CONDVAR
+            .wait_timeout_while(result, std::time::Duration::from_secs(5), |r| r.is_none())
+            .unwrap();
+        if timeout.timed_out() { None } else { result.clone() }
+    };
+    if let Ok(mut requested) = TREE_REQUESTED.lock() {
+        *requested = false;
+    }
+    match tree_json {
+        Some(s) if !s.is_empty() => {
+            let bytes = s.into_bytes();
+            let len = bytes.len();
+            let boxed = bytes.into_boxed_slice();
+            let raw = Box::into_raw(boxed);
+            unsafe { *out_len = len; }
+            raw as *mut u8
+        }
+        _ => {
+            unsafe { *out_len = 0; }
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Returns 0.0 if not found.
 #[no_mangle]
 pub extern "C" fn perry_geisterhand_get_closure(handle: i64, callback_kind: u8) -> f64 {

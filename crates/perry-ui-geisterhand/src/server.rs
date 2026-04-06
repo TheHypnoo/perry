@@ -16,6 +16,7 @@ extern "C" {
     fn perry_geisterhand_queue_scroll(handle: i64, x: f64, y: f64);
     fn perry_geisterhand_queue_set_text(handle: i64, text_ptr: *const u8, text_len: usize);
     fn perry_geisterhand_request_value(handle: i64, out_len: *mut usize) -> *mut u8;
+    fn perry_geisterhand_request_tree(out_len: *mut usize) -> *mut u8;
 }
 
 // Callback kind constants (must match perry-runtime/src/geisterhand_registry.rs)
@@ -114,8 +115,23 @@ pub fn run_server(port: u16) {
         }
 
         let response = match (method, path) {
-            // GET /widgets — list all registered widgets (supports ?label= and ?type= filters)
+            // GET /widgets — list all registered widgets
+            // Supports: ?label=, ?type= filters, ?tree=true for visibility+frame data
             (Method::Get, "/widgets") => {
+                // Check for tree mode first
+                let tree_mode = query_param(&full_url, "tree").map(|v| v == "true").unwrap_or(false);
+                if tree_mode {
+                    let mut len: usize = 0;
+                    let ptr = unsafe { perry_geisterhand_request_tree(&mut len) };
+                    if !ptr.is_null() && len > 0 {
+                        let tree_json = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned() };
+                        unsafe { perry_geisterhand_free_string(ptr, len); }
+                        ok_json(&tree_json)
+                    } else {
+                        ok_json("[]")
+                    }
+                } else {
+
                 let mut len: usize = 0;
                 let ptr = unsafe { perry_geisterhand_get_registry_json(&mut len) };
                 let json = if !ptr.is_null() && len > 0 {
@@ -161,6 +177,8 @@ pub fn run_server(port: u16) {
                 } else {
                     ok_json(&json)
                 }
+
+                } // else (non-tree mode)
             }
 
             // POST /click/:handle — fire onClick

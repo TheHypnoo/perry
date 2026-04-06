@@ -114,6 +114,46 @@ pub extern "C" fn perry_ui_read_widget_value(handle: i64, out_len: *mut usize) -
     std::ptr::null_mut()
 }
 
+/// Query all widgets and return JSON with handle, visible, and frame data.
+#[cfg(feature = "geisterhand")]
+#[no_mangle]
+pub extern "C" fn perry_ui_query_widget_tree(out_len: *mut usize) -> *mut u8 {
+    let json = WIDGETS.with(|w| {
+        let widgets = w.borrow();
+        let mut s = String::from("[");
+        for (i, view) in widgets.iter().enumerate() {
+            let handle = (i + 1) as i64;
+            if i > 0 { s.push(','); }
+            unsafe {
+                let hidden: bool = msg_send![&**view, isHidden];
+                let visible = !hidden;
+                #[repr(C)]
+                #[derive(Copy, Clone)]
+                struct CGRect { x: f64, y: f64, w: f64, h: f64 }
+                let frame: CGRect = msg_send![&**view, frame];
+                s.push_str(&format!(
+                    r#"{{"handle":{},"visible":{},"frame":{{"x":{:.0},"y":{:.0},"width":{:.0},"height":{:.0}}}}}"#,
+                    handle, visible, frame.x, frame.y, frame.w, frame.h
+                ));
+            }
+        }
+        s.push(']');
+        s
+    });
+    let bytes = json.into_bytes();
+    let len = bytes.len();
+    let buf = unsafe { libc::malloc(len) as *mut u8 };
+    if buf.is_null() {
+        unsafe { *out_len = 0; }
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+        *out_len = len;
+    }
+    buf
+}
+
 /// Register an external NSView (e.g. from a native library) into the widget system.
 /// The raw pointer is retained and assigned a handle usable with widgetAddChild etc.
 pub fn register_external_nsview(nsview_ptr: i64) -> i64 {
