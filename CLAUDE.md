@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.53
+**Current Version:** 0.4.54
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.54
+- fix: `obj[Direction.Up]` SIGSEGV when index evaluates to `0` — `js_get_string_pointer_unified` returned null for `0.0` because the `bits != 0` guard blocked the number-to-string conversion path; also `is_string_index_expr_get` now returns `false` for `PropertyGet` on object literals (have `object_field_indices`) whose fields may be numeric. `test_edge_enums_const` passes (was 18 diff lines).
 
 ### v0.4.53
 - fix: `const`/`let` inside arrow-function and function-expression bodies were being hoisted to the top of the body — lower.rs classified every `ast::Decl::Var` as hoistable alongside `var` and `function` declarations, so `const result = fn(n)` inside an `if/else` branch would run its initializer eagerly (e.g., memoize returning a closure that called its `fn` capture before the cache-hit check). Now only `VarDeclKind::Var` is hoisted; `Let`/`Const` remain in lexical position. `test_edge_higher_order` memoize test passes.

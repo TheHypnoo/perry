@@ -766,9 +766,11 @@ pub extern "C" fn js_get_string_pointer_unified(value: f64) -> i64 {
         }
     }
 
-    // For numeric values used as property keys (e.g., obj[pool.id]),
-    // convert the number to a string representation
-    if !value.is_nan() && bits != 0 {
+    // For numeric values used as property keys (e.g., obj[pool.id], obj[Direction.Up]),
+    // convert the number to a string representation.
+    // Note: 0.0 (bits == 0) is a valid number that should produce "0", so we must
+    // NOT skip it. The bits != 0 guard above is only for the raw-pointer fallback.
+    if !value.is_nan() {
         let s = crate::string::js_number_to_string(value);
         if !s.is_null() {
             return s as i64;

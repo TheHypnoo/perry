@@ -16631,14 +16631,21 @@ pub(crate) fn compile_expr(
                     Expr::PropertyGet { object, .. } => {
                         // PropertyGet result used as an index key — typically string in JS.
                         // Exception: known class instances with numeric fields (Bug #7: a.x
-                        // where x: number on a class). These have class_name set. For any
-                        // other object (any-typed, union, no class metadata), default to true
-                        // since dynamic property access in JS patterns like c.name returns strings.
+                        // where x: number on a class). These have class_name set.
+                        // Also exception: known object literals (have object_field_indices)
+                        // whose fields may be numeric (e.g., Direction = { Up: 0, ... }).
+                        // For any other object (any-typed, union, no class metadata),
+                        // default to true since dynamic property access in JS patterns
+                        // like c.name returns strings.
                         if let Expr::LocalGet(id) = object.as_ref() {
                             if let Some(info) = locals.get(id) {
                                 if info.is_string { return true; }
                                 // Known class instance — field might be numeric, not safe to assume string
                                 if info.class_name.is_some() { return false; }
+                                // Known object literal — fields may be numeric (e.g., enum-like objects)
+                                // Cannot assume PropertyGet produces a string; fall through to
+                                // numeric path which converts to string via js_jsvalue_to_string
+                                if info.object_field_indices.is_some() { return false; }
                             }
                         }
                         true
