@@ -8951,6 +8951,40 @@ pub(crate) fn compile_expr(
                         }
                     }
 
+                    // Handle Promise.allSettled(array)
+                    if property == "allSettled" {
+                        if let Expr::GlobalGet(_) = object.as_ref() {
+                            if let Some(func_id) = extern_funcs.get("js_promise_all_settled") {
+                                let func_ref = module.declare_func_in_func(*func_id, builder.func);
+                                let arr_ptr = if arg_vals.is_empty() {
+                                    builder.ins().iconst(types::I64, 0)
+                                } else {
+                                    ensure_i64(builder, arg_vals[0])
+                                };
+                                let call = builder.ins().call(func_ref, &[arr_ptr]);
+                                let promise_ptr = builder.inst_results(call)[0];
+                                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr));
+                            }
+                        }
+                    }
+
+                    // Handle Promise.any(array)
+                    if property == "any" {
+                        if let Expr::GlobalGet(_) = object.as_ref() {
+                            if let Some(func_id) = extern_funcs.get("js_promise_any") {
+                                let func_ref = module.declare_func_in_func(*func_id, builder.func);
+                                let arr_ptr = if arg_vals.is_empty() {
+                                    builder.ins().iconst(types::I64, 0)
+                                } else {
+                                    ensure_i64(builder, arg_vals[0])
+                                };
+                                let call = builder.ins().call(func_ref, &[arr_ptr]);
+                                let promise_ptr = builder.inst_results(call)[0];
+                                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr));
+                            }
+                        }
+                    }
+
                     // Handle Promise.delayed(value) - creates a pending promise that resolves on next microtask
                     if property == "delayed" {
                         if let Expr::GlobalGet(_) = object.as_ref() {

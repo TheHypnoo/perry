@@ -3264,6 +3264,32 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_promise_race"), func_id);
         }
 
+        // js_promise_all_settled(promises_arr: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function(
+                "js_promise_all_settled",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_promise_all_settled"), func_id);
+        }
+
+        // js_promise_any(promises_arr: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function(
+                "js_promise_any",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_promise_any"), func_id);
+        }
+
         // js_promise_run_microtasks() -> i32
         {
             let mut sig = self.module.make_signature();

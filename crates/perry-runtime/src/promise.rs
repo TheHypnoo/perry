@@ -711,6 +711,269 @@ pub extern "C" fn js_await_any_promise(value: f64) -> f64 {
     value
 }
 
+/// Build a `{ status: "fulfilled", value: v }` object for Promise.allSettled.
+fn build_settled_fulfilled(value: f64) -> f64 {
+    use crate::object::{js_object_alloc_with_shape, js_object_set_field};
+    let packed = b"status\0value\0";
+    let obj = js_object_alloc_with_shape(0x7FFF_FF10, 2, packed.as_ptr(), packed.len() as u32);
+    let status_str = crate::string::js_string_from_bytes(b"fulfilled".as_ptr(), 9);
+    let status_nb = crate::value::js_nanbox_string(status_str as i64);
+    js_object_set_field(obj, 0, crate::value::JSValue::from_bits(status_nb.to_bits()));
+    js_object_set_field(obj, 1, crate::value::JSValue::from_bits(value.to_bits()));
+    crate::value::js_nanbox_pointer(obj as i64)
+}
+
+/// Build a `{ status: "rejected", reason: r }` object for Promise.allSettled.
+fn build_settled_rejected(reason: f64) -> f64 {
+    use crate::object::{js_object_alloc_with_shape, js_object_set_field};
+    let packed = b"status\0reason\0";
+    let obj = js_object_alloc_with_shape(0x7FFF_FF11, 2, packed.as_ptr(), packed.len() as u32);
+    let status_str = crate::string::js_string_from_bytes(b"rejected".as_ptr(), 8);
+    let status_nb = crate::value::js_nanbox_string(status_str as i64);
+    js_object_set_field(obj, 0, crate::value::JSValue::from_bits(status_nb.to_bits()));
+    js_object_set_field(obj, 1, crate::value::JSValue::from_bits(reason.to_bits()));
+    crate::value::js_nanbox_pointer(obj as i64)
+}
+
+/// Promise.allSettled — never rejects; resolves with an array of result objects
+/// where each entry is `{ status: "fulfilled", value }` or `{ status: "rejected", reason }`.
+#[no_mangle]
+pub extern "C" fn js_promise_all_settled(promises_arr: *const crate::array::ArrayHeader) -> *mut Promise {
+    use crate::array::{js_array_alloc, js_array_get_f64, js_array_length, js_array_set_f64};
+    use crate::closure::{js_closure_alloc, js_closure_set_capture_ptr, js_closure_set_capture_f64};
+    use crate::value::js_nanbox_get_pointer;
+
+    let result_promise = js_promise_new();
+
+    if promises_arr.is_null() {
+        let empty_arr = js_array_alloc(0);
+        unsafe { (*empty_arr).length = 0; }
+        let arr_f64 = crate::value::js_nanbox_pointer(empty_arr as i64);
+        js_promise_resolve(result_promise, arr_f64);
+        return result_promise;
+    }
+
+    let count = js_array_length(promises_arr);
+    if count == 0 {
+        let empty_arr = js_array_alloc(0);
+        unsafe { (*empty_arr).length = 0; }
+        let arr_f64 = crate::value::js_nanbox_pointer(empty_arr as i64);
+        js_promise_resolve(result_promise, arr_f64);
+        return result_promise;
+    }
+
+    let results_arr = js_array_alloc(count);
+    unsafe { (*results_arr).length = count; }
+    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+    for i in 0..count {
+        js_array_set_f64(results_arr, i, f64::from_bits(TAG_UNDEFINED));
+    }
+
+    // state: [remaining_count]
+    let state_arr = js_array_alloc(1);
+    unsafe { (*state_arr).length = 1; }
+    js_array_set_f64(state_arr, 0, count as f64);
+
+    for i in 0..count {
+        let promise_f64 = js_array_get_f64(promises_arr, i);
+        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
+
+        if promise_ptr.is_null() {
+            // Non-promise value — wrap as fulfilled and decrement
+            let wrapped = build_settled_fulfilled(promise_f64);
+            js_array_set_f64(results_arr, i, wrapped);
+            let remaining = js_array_get_f64(state_arr, 0) - 1.0;
+            js_array_set_f64(state_arr, 0, remaining);
+            continue;
+        }
+
+        // Fulfill: store {status:"fulfilled", value:v}
+        let fulfill_closure = js_closure_alloc(promise_all_settled_fulfill_handler as *const u8, 4);
+        js_closure_set_capture_ptr(fulfill_closure, 0, result_promise as i64);
+        js_closure_set_capture_ptr(fulfill_closure, 1, results_arr as i64);
+        js_closure_set_capture_ptr(fulfill_closure, 2, state_arr as i64);
+        js_closure_set_capture_f64(fulfill_closure, 3, i as f64);
+
+        // Reject: store {status:"rejected", reason:r}
+        let reject_closure = js_closure_alloc(promise_all_settled_reject_handler as *const u8, 4);
+        js_closure_set_capture_ptr(reject_closure, 0, result_promise as i64);
+        js_closure_set_capture_ptr(reject_closure, 1, results_arr as i64);
+        js_closure_set_capture_ptr(reject_closure, 2, state_arr as i64);
+        js_closure_set_capture_f64(reject_closure, 3, i as f64);
+
+        js_promise_then(promise_ptr, fulfill_closure, reject_closure);
+    }
+
+    // If all were already non-promises
+    let remaining = js_array_get_f64(state_arr, 0);
+    if remaining == 0.0 {
+        let arr_f64 = crate::value::js_nanbox_pointer(results_arr as i64);
+        js_promise_resolve(result_promise, arr_f64);
+    }
+
+    result_promise
+}
+
+extern "C" fn promise_all_settled_fulfill_handler(closure: *const crate::closure::ClosureHeader, value: f64) -> f64 {
+    use crate::array::{js_array_get_f64, js_array_set_f64, ArrayHeader};
+    use crate::closure::{js_closure_get_capture_ptr, js_closure_get_capture_f64};
+
+    let result_promise = js_closure_get_capture_ptr(closure, 0) as *mut Promise;
+    let results_arr = js_closure_get_capture_ptr(closure, 1) as *mut ArrayHeader;
+    let state_arr = js_closure_get_capture_ptr(closure, 2) as *mut ArrayHeader;
+    if result_promise.is_null() || results_arr.is_null() || state_arr.is_null() { return 0.0; }
+    let index = js_closure_get_capture_f64(closure, 3) as u32;
+
+    let wrapped = build_settled_fulfilled(value);
+    js_array_set_f64(results_arr, index, wrapped);
+
+    let remaining = js_array_get_f64(state_arr, 0) - 1.0;
+    js_array_set_f64(state_arr, 0, remaining);
+
+    if remaining == 0.0 {
+        let arr_f64 = crate::value::js_nanbox_pointer(results_arr as i64);
+        js_promise_resolve(result_promise, arr_f64);
+    }
+    0.0
+}
+
+extern "C" fn promise_all_settled_reject_handler(closure: *const crate::closure::ClosureHeader, reason: f64) -> f64 {
+    use crate::array::{js_array_get_f64, js_array_set_f64, ArrayHeader};
+    use crate::closure::{js_closure_get_capture_ptr, js_closure_get_capture_f64};
+
+    let result_promise = js_closure_get_capture_ptr(closure, 0) as *mut Promise;
+    let results_arr = js_closure_get_capture_ptr(closure, 1) as *mut ArrayHeader;
+    let state_arr = js_closure_get_capture_ptr(closure, 2) as *mut ArrayHeader;
+    if result_promise.is_null() || results_arr.is_null() || state_arr.is_null() { return 0.0; }
+    let index = js_closure_get_capture_f64(closure, 3) as u32;
+
+    let wrapped = build_settled_rejected(reason);
+    js_array_set_f64(results_arr, index, wrapped);
+
+    let remaining = js_array_get_f64(state_arr, 0) - 1.0;
+    js_array_set_f64(state_arr, 0, remaining);
+
+    if remaining == 0.0 {
+        let arr_f64 = crate::value::js_nanbox_pointer(results_arr as i64);
+        js_promise_resolve(result_promise, arr_f64);
+    }
+    0.0
+}
+
+/// Promise.any — settles with the first FULFILLED promise. If all reject, rejects
+/// with an array of rejection reasons (Perry doesn't have AggregateError yet).
+#[no_mangle]
+pub extern "C" fn js_promise_any(promises_arr: *const crate::array::ArrayHeader) -> *mut Promise {
+    use crate::array::{js_array_alloc, js_array_get_f64, js_array_length, js_array_set_f64};
+    use crate::closure::{js_closure_alloc, js_closure_set_capture_ptr, js_closure_set_capture_f64};
+    use crate::value::js_nanbox_get_pointer;
+
+    let result_promise = js_promise_new();
+
+    if promises_arr.is_null() {
+        // Empty input — Promise.any rejects immediately with empty errors array
+        let errors_arr = js_array_alloc(0);
+        unsafe { (*errors_arr).length = 0; }
+        let arr_f64 = crate::value::js_nanbox_pointer(errors_arr as i64);
+        js_promise_reject(result_promise, arr_f64);
+        return result_promise;
+    }
+
+    let count = js_array_length(promises_arr);
+    if count == 0 {
+        let errors_arr = js_array_alloc(0);
+        unsafe { (*errors_arr).length = 0; }
+        let arr_f64 = crate::value::js_nanbox_pointer(errors_arr as i64);
+        js_promise_reject(result_promise, arr_f64);
+        return result_promise;
+    }
+
+    let errors_arr = js_array_alloc(count);
+    unsafe { (*errors_arr).length = count; }
+    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+    for i in 0..count {
+        js_array_set_f64(errors_arr, i, f64::from_bits(TAG_UNDEFINED));
+    }
+
+    // state: [remaining_rejections, settled_flag]
+    let state_arr = js_array_alloc(2);
+    unsafe { (*state_arr).length = 2; }
+    js_array_set_f64(state_arr, 0, count as f64);
+    js_array_set_f64(state_arr, 1, 0.0);
+
+    for i in 0..count {
+        let promise_f64 = js_array_get_f64(promises_arr, i);
+        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
+
+        if promise_ptr.is_null() {
+            // Non-promise value — treat as fulfilled, settle immediately if not yet settled
+            let already_settled = js_array_get_f64(state_arr, 1);
+            if already_settled == 0.0 {
+                js_array_set_f64(state_arr, 1, 1.0);
+                js_promise_resolve(result_promise, promise_f64);
+            }
+            return result_promise;
+        }
+
+        let fulfill_closure = js_closure_alloc(promise_any_fulfill_handler as *const u8, 2);
+        js_closure_set_capture_ptr(fulfill_closure, 0, result_promise as i64);
+        js_closure_set_capture_ptr(fulfill_closure, 1, state_arr as i64);
+
+        let reject_closure = js_closure_alloc(promise_any_reject_handler as *const u8, 4);
+        js_closure_set_capture_ptr(reject_closure, 0, result_promise as i64);
+        js_closure_set_capture_ptr(reject_closure, 1, errors_arr as i64);
+        js_closure_set_capture_ptr(reject_closure, 2, state_arr as i64);
+        js_closure_set_capture_f64(reject_closure, 3, i as f64);
+
+        js_promise_then(promise_ptr, fulfill_closure, reject_closure);
+    }
+
+    result_promise
+}
+
+extern "C" fn promise_any_fulfill_handler(closure: *const crate::closure::ClosureHeader, value: f64) -> f64 {
+    use crate::array::{js_array_get_f64, js_array_set_f64, ArrayHeader};
+    use crate::closure::js_closure_get_capture_ptr;
+
+    let result_promise = js_closure_get_capture_ptr(closure, 0) as *mut Promise;
+    let state_arr = js_closure_get_capture_ptr(closure, 1) as *mut ArrayHeader;
+    if result_promise.is_null() || state_arr.is_null() { return 0.0; }
+
+    let already_settled = js_array_get_f64(state_arr, 1);
+    if already_settled != 0.0 { return 0.0; }
+    js_array_set_f64(state_arr, 1, 1.0);
+
+    js_promise_resolve(result_promise, value);
+    0.0
+}
+
+extern "C" fn promise_any_reject_handler(closure: *const crate::closure::ClosureHeader, reason: f64) -> f64 {
+    use crate::array::{js_array_get_f64, js_array_set_f64, ArrayHeader};
+    use crate::closure::{js_closure_get_capture_ptr, js_closure_get_capture_f64};
+
+    let result_promise = js_closure_get_capture_ptr(closure, 0) as *mut Promise;
+    let errors_arr = js_closure_get_capture_ptr(closure, 1) as *mut ArrayHeader;
+    let state_arr = js_closure_get_capture_ptr(closure, 2) as *mut ArrayHeader;
+    if result_promise.is_null() || errors_arr.is_null() || state_arr.is_null() { return 0.0; }
+    let index = js_closure_get_capture_f64(closure, 3) as u32;
+
+    let already_settled = js_array_get_f64(state_arr, 1);
+    if already_settled != 0.0 { return 0.0; }
+
+    js_array_set_f64(errors_arr, index, reason);
+
+    let remaining = js_array_get_f64(state_arr, 0) - 1.0;
+    js_array_set_f64(state_arr, 0, remaining);
+
+    if remaining == 0.0 {
+        // All rejected — settle with the errors array as the rejection reason
+        js_array_set_f64(state_arr, 1, 1.0);
+        let arr_f64 = crate::value::js_nanbox_pointer(errors_arr as i64);
+        js_promise_reject(result_promise, arr_f64);
+    }
+    0.0
+}
+
 /// GC root scanner: mark all values reachable from promise task queues
 pub fn scan_promise_roots(mark: &mut dyn FnMut(f64)) {
     // Scan TASK_QUEUE entries

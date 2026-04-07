@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.58
+**Current Version:** 0.4.59
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.59
+- feat: `Promise.allSettled` and `Promise.any` — both implemented as new runtime functions `js_promise_all_settled` / `js_promise_any` modeled on `js_promise_all`/`race`. `allSettled` builds `{ status: "fulfilled", value }` / `{ status: "rejected", reason }` result objects via `js_object_alloc_with_shape`. `any` settles with the first fulfilled promise, or rejects with an array of rejection reasons if all reject (Perry doesn't have `AggregateError` yet — it uses a plain array)
 
 ### v0.4.58
 - feat: `String.prototype.at` / `String.prototype.codePointAt` / `String.fromCodePoint` — full Unicode support with UTF-16 code unit indexing semantics (matches JS spec, including surrogate pair handling for emoji); multi-arg `String.fromCodePoint(a, b, c)` and `String.fromCharCode(a, b, c)` lowered to a chain of binary string concats; new HIR variants `StringFromCodePoint`/`StringAt`/`StringCodePointAt` and runtime functions `js_string_from_code_point`/`js_string_at`/`js_string_code_point_at`; `is_string_expr` updated in 4 dispatch sites so concatenated `StringFromCodePoint` results take the string-add path
