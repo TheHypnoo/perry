@@ -7654,6 +7654,82 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_date_get_milliseconds"), func_id);
         }
 
+        // Date static and UTC methods (v0.4.69)
+
+        // js_date_parse(str_ptr: i64) -> f64 (NaN if invalid)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_date_parse", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_date_parse"), func_id);
+        }
+
+        // js_date_utc(year, month, day, hour, minute, second, millisecond: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            for _ in 0..7 {
+                sig.params.push(AbiParam::new(types::F64));
+            }
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_date_utc", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_date_utc"), func_id);
+        }
+
+        // js_date_get_utc_*(timestamp: f64) -> f64
+        for name in &[
+            "js_date_get_utc_day",
+            "js_date_get_utc_full_year",
+            "js_date_get_utc_month",
+            "js_date_get_utc_date",
+            "js_date_get_utc_hours",
+            "js_date_get_utc_minutes",
+            "js_date_get_utc_seconds",
+            "js_date_get_utc_milliseconds",
+            "js_date_get_timezone_offset",
+            "js_date_value_of",
+        ] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Owned(name.to_string()), func_id);
+        }
+
+        // js_date_set_utc_*(timestamp, value: f64) -> f64
+        for name in &[
+            "js_date_set_utc_full_year",
+            "js_date_set_utc_month",
+            "js_date_set_utc_date",
+            "js_date_set_utc_hours",
+            "js_date_set_utc_minutes",
+            "js_date_set_utc_seconds",
+            "js_date_set_utc_milliseconds",
+        ] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Owned(name.to_string()), func_id);
+        }
+
+        // String-returning Date methods: timestamp -> *mut StringHeader (i64)
+        for name in &[
+            "js_date_to_date_string",
+            "js_date_to_time_string",
+            "js_date_to_locale_date_string",
+            "js_date_to_locale_time_string",
+            "js_date_to_locale_string",
+            "js_date_to_json",
+        ] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Owned(name.to_string()), func_id);
+        }
+
         // Error runtime functions
         // js_error_new() -> *mut ErrorHeader
         {

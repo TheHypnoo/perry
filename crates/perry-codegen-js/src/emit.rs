@@ -1870,6 +1870,38 @@ impl JsEmitter {
             Expr::DateGetMinutes(d) => { self.emit_expr(d); self.output.push_str(".getMinutes()"); }
             Expr::DateGetSeconds(d) => { self.emit_expr(d); self.output.push_str(".getSeconds()"); }
             Expr::DateGetMilliseconds(d) => { self.emit_expr(d); self.output.push_str(".getMilliseconds()"); }
+            Expr::DateParse(s) => { self.output.push_str("Date.parse("); self.emit_expr(s); self.output.push(')'); }
+            Expr::DateUtc(args) => {
+                self.output.push_str("Date.UTC(");
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 { self.output.push_str(", "); }
+                    self.emit_expr(a);
+                }
+                self.output.push(')');
+            }
+            Expr::DateGetUtcDay(d) => { self.emit_expr(d); self.output.push_str(".getUTCDay()"); }
+            Expr::DateGetUtcFullYear(d) => { self.emit_expr(d); self.output.push_str(".getUTCFullYear()"); }
+            Expr::DateGetUtcMonth(d) => { self.emit_expr(d); self.output.push_str(".getUTCMonth()"); }
+            Expr::DateGetUtcDate(d) => { self.emit_expr(d); self.output.push_str(".getUTCDate()"); }
+            Expr::DateGetUtcHours(d) => { self.emit_expr(d); self.output.push_str(".getUTCHours()"); }
+            Expr::DateGetUtcMinutes(d) => { self.emit_expr(d); self.output.push_str(".getUTCMinutes()"); }
+            Expr::DateGetUtcSeconds(d) => { self.emit_expr(d); self.output.push_str(".getUTCSeconds()"); }
+            Expr::DateGetUtcMilliseconds(d) => { self.emit_expr(d); self.output.push_str(".getUTCMilliseconds()"); }
+            Expr::DateSetUtcFullYear { date, value } => { self.emit_expr(date); self.output.push_str(".setUTCFullYear("); self.emit_expr(value); self.output.push(')'); }
+            Expr::DateSetUtcMonth { date, value } => { self.emit_expr(date); self.output.push_str(".setUTCMonth("); self.emit_expr(value); self.output.push(')'); }
+            Expr::DateSetUtcDate { date, value } => { self.emit_expr(date); self.output.push_str(".setUTCDate("); self.emit_expr(value); self.output.push(')'); }
+            Expr::DateSetUtcHours { date, value } => { self.emit_expr(date); self.output.push_str(".setUTCHours("); self.emit_expr(value); self.output.push(')'); }
+            Expr::DateSetUtcMinutes { date, value } => { self.emit_expr(date); self.output.push_str(".setUTCMinutes("); self.emit_expr(value); self.output.push(')'); }
+            Expr::DateSetUtcSeconds { date, value } => { self.emit_expr(date); self.output.push_str(".setUTCSeconds("); self.emit_expr(value); self.output.push(')'); }
+            Expr::DateSetUtcMilliseconds { date, value } => { self.emit_expr(date); self.output.push_str(".setUTCMilliseconds("); self.emit_expr(value); self.output.push(')'); }
+            Expr::DateValueOf(d) => { self.emit_expr(d); self.output.push_str(".valueOf()"); }
+            Expr::DateToDateString(d) => { self.emit_expr(d); self.output.push_str(".toDateString()"); }
+            Expr::DateToTimeString(d) => { self.emit_expr(d); self.output.push_str(".toTimeString()"); }
+            Expr::DateToLocaleDateString(d) => { self.emit_expr(d); self.output.push_str(".toLocaleDateString()"); }
+            Expr::DateToLocaleTimeString(d) => { self.emit_expr(d); self.output.push_str(".toLocaleTimeString()"); }
+            Expr::DateToLocaleString(d) => { self.emit_expr(d); self.output.push_str(".toLocaleString()"); }
+            Expr::DateGetTimezoneOffset(d) => { self.emit_expr(d); self.output.push_str(".getTimezoneOffset()"); }
+            Expr::DateToJSON(d) => { self.emit_expr(d); self.output.push_str(".toJSON()"); }
 
             // --- Error ---
             Expr::ErrorNew(msg) => {

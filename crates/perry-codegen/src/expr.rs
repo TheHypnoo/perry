@@ -2731,6 +2731,115 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[date_val]);
             Ok(builder.inst_results(call)[0])
         }
+        // Date.parse(isoString) -> number
+        Expr::DateParse(str_expr) => {
+            let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, str_expr, this_ctx)?;
+            let str_ptr = get_raw_string_ptr(builder, str_val);
+            let func = extern_funcs.get("js_date_parse")
+                .ok_or_else(|| anyhow!("js_date_parse not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[str_ptr]);
+            Ok(builder.inst_results(call)[0])
+        }
+        // Date.UTC(year, month, day?, h?, m?, s?, ms?) -> number
+        Expr::DateUtc(args) => {
+            // Pad to 7 args (year, month, day, hour, minute, second, ms).
+            // Defaults: day=1, hour/min/sec/ms=0.
+            let zero = builder.ins().f64const(0.0);
+            let one = builder.ins().f64const(1.0);
+            let mut vals = Vec::with_capacity(7);
+            for (i, a) in args.iter().enumerate() {
+                if i >= 7 { break; }
+                let v = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, a, this_ctx)?;
+                vals.push(ensure_f64(builder, v));
+            }
+            while vals.len() < 7 {
+                let idx = vals.len();
+                if idx == 2 {
+                    vals.push(one);
+                } else {
+                    vals.push(zero);
+                }
+            }
+            let func = extern_funcs.get("js_date_utc")
+                .ok_or_else(|| anyhow!("js_date_utc not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &vals);
+            Ok(builder.inst_results(call)[0])
+        }
+        // UTC getters / valueOf / getTimezoneOffset — all (timestamp f64) -> f64
+        Expr::DateGetUtcDay(d) | Expr::DateGetUtcFullYear(d) | Expr::DateGetUtcMonth(d) |
+        Expr::DateGetUtcDate(d) | Expr::DateGetUtcHours(d) | Expr::DateGetUtcMinutes(d) |
+        Expr::DateGetUtcSeconds(d) | Expr::DateGetUtcMilliseconds(d) |
+        Expr::DateValueOf(d) | Expr::DateGetTimezoneOffset(d) => {
+            let date_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, d, this_ctx)?;
+            let date_f64 = ensure_f64(builder, date_val);
+            let func_name = match expr {
+                Expr::DateGetUtcDay(_) => "js_date_get_utc_day",
+                Expr::DateGetUtcFullYear(_) => "js_date_get_utc_full_year",
+                Expr::DateGetUtcMonth(_) => "js_date_get_utc_month",
+                Expr::DateGetUtcDate(_) => "js_date_get_utc_date",
+                Expr::DateGetUtcHours(_) => "js_date_get_utc_hours",
+                Expr::DateGetUtcMinutes(_) => "js_date_get_utc_minutes",
+                Expr::DateGetUtcSeconds(_) => "js_date_get_utc_seconds",
+                Expr::DateGetUtcMilliseconds(_) => "js_date_get_utc_milliseconds",
+                Expr::DateValueOf(_) => "js_date_value_of",
+                Expr::DateGetTimezoneOffset(_) => "js_date_get_timezone_offset",
+                _ => unreachable!(),
+            };
+            let func = extern_funcs.get(func_name)
+                .ok_or_else(|| anyhow!("{} not declared", func_name))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[date_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        // UTC setters — return the new timestamp.
+        Expr::DateSetUtcFullYear { date, value } | Expr::DateSetUtcMonth { date, value } |
+        Expr::DateSetUtcDate { date, value } | Expr::DateSetUtcHours { date, value } |
+        Expr::DateSetUtcMinutes { date, value } | Expr::DateSetUtcSeconds { date, value } |
+        Expr::DateSetUtcMilliseconds { date, value } => {
+            let date_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, date, this_ctx)?;
+            let value_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+            let date_f64 = ensure_f64(builder, date_val);
+            let value_f64 = ensure_f64(builder, value_val);
+            let func_name = match expr {
+                Expr::DateSetUtcFullYear { .. } => "js_date_set_utc_full_year",
+                Expr::DateSetUtcMonth { .. } => "js_date_set_utc_month",
+                Expr::DateSetUtcDate { .. } => "js_date_set_utc_date",
+                Expr::DateSetUtcHours { .. } => "js_date_set_utc_hours",
+                Expr::DateSetUtcMinutes { .. } => "js_date_set_utc_minutes",
+                Expr::DateSetUtcSeconds { .. } => "js_date_set_utc_seconds",
+                Expr::DateSetUtcMilliseconds { .. } => "js_date_set_utc_milliseconds",
+                _ => unreachable!(),
+            };
+            let func = extern_funcs.get(func_name)
+                .ok_or_else(|| anyhow!("{} not declared", func_name))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[date_f64, value_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        // Date methods returning strings: toDateString / toTimeString / toLocale* / toJSON
+        Expr::DateToDateString(d) | Expr::DateToTimeString(d) |
+        Expr::DateToLocaleDateString(d) | Expr::DateToLocaleTimeString(d) |
+        Expr::DateToLocaleString(d) | Expr::DateToJSON(d) => {
+            let date_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, d, this_ctx)?;
+            let date_f64 = ensure_f64(builder, date_val);
+            let func_name = match expr {
+                Expr::DateToDateString(_) => "js_date_to_date_string",
+                Expr::DateToTimeString(_) => "js_date_to_time_string",
+                Expr::DateToLocaleDateString(_) => "js_date_to_locale_date_string",
+                Expr::DateToLocaleTimeString(_) => "js_date_to_locale_time_string",
+                Expr::DateToLocaleString(_) => "js_date_to_locale_string",
+                Expr::DateToJSON(_) => "js_date_to_json",
+                _ => unreachable!(),
+            };
+            let func = extern_funcs.get(func_name)
+                .ok_or_else(|| anyhow!("{} not declared", func_name))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[date_f64]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, result_ptr))
+        }
         // Error operations
         Expr::ErrorNew(message_opt) => {
             match message_opt {

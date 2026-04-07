@@ -2938,8 +2938,25 @@ impl WasmModuleEmitter {
             }
             Expr::DateGetTime(e) | Expr::DateToISOString(e) | Expr::DateGetFullYear(e) |
             Expr::DateGetMonth(e) | Expr::DateGetDate(e) | Expr::DateGetHours(e) |
-            Expr::DateGetMinutes(e) | Expr::DateGetSeconds(e) | Expr::DateGetMilliseconds(e) => {
+            Expr::DateGetMinutes(e) | Expr::DateGetSeconds(e) | Expr::DateGetMilliseconds(e) |
+            Expr::DateGetUtcDay(e) | Expr::DateGetUtcFullYear(e) | Expr::DateGetUtcMonth(e) |
+            Expr::DateGetUtcDate(e) | Expr::DateGetUtcHours(e) | Expr::DateGetUtcMinutes(e) |
+            Expr::DateGetUtcSeconds(e) | Expr::DateGetUtcMilliseconds(e) |
+            Expr::DateValueOf(e) | Expr::DateToDateString(e) | Expr::DateToTimeString(e) |
+            Expr::DateToLocaleDateString(e) | Expr::DateToLocaleTimeString(e) |
+            Expr::DateToLocaleString(e) | Expr::DateGetTimezoneOffset(e) | Expr::DateToJSON(e) |
+            Expr::DateParse(e) => {
                 self.collect_strings_in_expr(e);
+            }
+            Expr::DateUtc(args) => {
+                for a in args { self.collect_strings_in_expr(a); }
+            }
+            Expr::DateSetUtcFullYear { date, value } | Expr::DateSetUtcMonth { date, value } |
+            Expr::DateSetUtcDate { date, value } | Expr::DateSetUtcHours { date, value } |
+            Expr::DateSetUtcMinutes { date, value } | Expr::DateSetUtcSeconds { date, value } |
+            Expr::DateSetUtcMilliseconds { date, value } => {
+                self.collect_strings_in_expr(date);
+                self.collect_strings_in_expr(value);
             }
             Expr::ErrorNew(msg) => {
                 if let Some(m) = msg { self.collect_strings_in_expr(m); }
@@ -6060,6 +6077,141 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_frame_begin(func, 1);
                 self.emit_store_arg(func, 0, d);
                 self.emit_memcall(func, "date_get_milliseconds", 1);
+            }
+            Expr::DateParse(s) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, s);
+                self.emit_memcall(func, "date_parse", 1);
+            }
+            Expr::DateUtc(args) => {
+                let n = args.len().max(1) as u32;
+                self.emit_frame_begin(func, n);
+                for (i, a) in args.iter().enumerate() {
+                    self.emit_store_arg(func, i as u32, a);
+                }
+                self.emit_memcall(func, "date_utc", n);
+            }
+            Expr::DateGetUtcDay(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_utc_day", 1);
+            }
+            Expr::DateGetUtcFullYear(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_utc_full_year", 1);
+            }
+            Expr::DateGetUtcMonth(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_utc_month", 1);
+            }
+            Expr::DateGetUtcDate(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_utc_date", 1);
+            }
+            Expr::DateGetUtcHours(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_utc_hours", 1);
+            }
+            Expr::DateGetUtcMinutes(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_utc_minutes", 1);
+            }
+            Expr::DateGetUtcSeconds(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_utc_seconds", 1);
+            }
+            Expr::DateGetUtcMilliseconds(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_utc_milliseconds", 1);
+            }
+            Expr::DateValueOf(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_value_of", 1);
+            }
+            Expr::DateGetTimezoneOffset(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_get_timezone_offset", 1);
+            }
+            Expr::DateToDateString(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_to_date_string", 1);
+            }
+            Expr::DateToTimeString(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_to_time_string", 1);
+            }
+            Expr::DateToLocaleDateString(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_to_locale_date_string", 1);
+            }
+            Expr::DateToLocaleTimeString(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_to_locale_time_string", 1);
+            }
+            Expr::DateToLocaleString(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_to_locale_string", 1);
+            }
+            Expr::DateToJSON(d) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, d);
+                self.emit_memcall(func, "date_to_json", 1);
+            }
+            Expr::DateSetUtcFullYear { date, value } => {
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, date);
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall(func, "date_set_utc_full_year", 2);
+            }
+            Expr::DateSetUtcMonth { date, value } => {
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, date);
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall(func, "date_set_utc_month", 2);
+            }
+            Expr::DateSetUtcDate { date, value } => {
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, date);
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall(func, "date_set_utc_date", 2);
+            }
+            Expr::DateSetUtcHours { date, value } => {
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, date);
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall(func, "date_set_utc_hours", 2);
+            }
+            Expr::DateSetUtcMinutes { date, value } => {
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, date);
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall(func, "date_set_utc_minutes", 2);
+            }
+            Expr::DateSetUtcSeconds { date, value } => {
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, date);
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall(func, "date_set_utc_seconds", 2);
+            }
+            Expr::DateSetUtcMilliseconds { date, value } => {
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, date);
+                self.emit_store_arg(func, 1, value);
+                self.emit_memcall(func, "date_set_utc_milliseconds", 2);
             }
 
             // --- Error ---

@@ -4702,12 +4702,20 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 }
                             }
 
-                            // Check for Date.now() static method call
+                            // Check for Date.now() / Date.parse() / Date.UTC() static method calls
                             if obj_ident.sym.as_ref() == "Date" {
                                 if let ast::MemberProp::Ident(method_ident) = &member.prop {
                                     let method_name = method_ident.sym.as_ref();
                                     if method_name == "now" {
                                         return Ok(Expr::DateNow);
+                                    }
+                                    if method_name == "parse" {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::DateParse(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    if method_name == "UTC" {
+                                        return Ok(Expr::DateUtc(args));
                                     }
                                 }
                             }
@@ -4752,6 +4760,97 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 "getMilliseconds" => {
                                     let date_expr = lower_expr(ctx, &member.obj)?;
                                     return Ok(Expr::DateGetMilliseconds(Box::new(date_expr)));
+                                }
+                                // UTC getters
+                                "getUTCDay" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetUtcDay(Box::new(date_expr)));
+                                }
+                                "getUTCFullYear" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetUtcFullYear(Box::new(date_expr)));
+                                }
+                                "getUTCMonth" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetUtcMonth(Box::new(date_expr)));
+                                }
+                                "getUTCDate" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetUtcDate(Box::new(date_expr)));
+                                }
+                                "getUTCHours" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetUtcHours(Box::new(date_expr)));
+                                }
+                                "getUTCMinutes" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetUtcMinutes(Box::new(date_expr)));
+                                }
+                                "getUTCSeconds" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetUtcSeconds(Box::new(date_expr)));
+                                }
+                                "getUTCMilliseconds" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetUtcMilliseconds(Box::new(date_expr)));
+                                }
+                                // Other getters/methods
+                                "valueOf" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateValueOf(Box::new(date_expr)));
+                                }
+                                "toDateString" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateToDateString(Box::new(date_expr)));
+                                }
+                                "toTimeString" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateToTimeString(Box::new(date_expr)));
+                                }
+                                "toLocaleDateString" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateToLocaleDateString(Box::new(date_expr)));
+                                }
+                                "toLocaleTimeString" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateToLocaleTimeString(Box::new(date_expr)));
+                                }
+                                "toLocaleString" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateToLocaleString(Box::new(date_expr)));
+                                }
+                                "getTimezoneOffset" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetTimezoneOffset(Box::new(date_expr)));
+                                }
+                                "toJSON" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateToJSON(Box::new(date_expr)));
+                                }
+                                // UTC setters — mutate the local variable in place
+                                "setUTCFullYear" | "setUTCMonth" | "setUTCDate" |
+                                "setUTCHours" | "setUTCMinutes" | "setUTCSeconds" |
+                                "setUTCMilliseconds" => {
+                                    if args.len() >= 1 {
+                                        let value_expr = args.into_iter().next().unwrap();
+                                        let date_expr = lower_expr(ctx, &member.obj)?;
+                                        let setter_call = match method_name {
+                                            "setUTCFullYear" => Expr::DateSetUtcFullYear { date: Box::new(date_expr.clone()), value: Box::new(value_expr) },
+                                            "setUTCMonth" => Expr::DateSetUtcMonth { date: Box::new(date_expr.clone()), value: Box::new(value_expr) },
+                                            "setUTCDate" => Expr::DateSetUtcDate { date: Box::new(date_expr.clone()), value: Box::new(value_expr) },
+                                            "setUTCHours" => Expr::DateSetUtcHours { date: Box::new(date_expr.clone()), value: Box::new(value_expr) },
+                                            "setUTCMinutes" => Expr::DateSetUtcMinutes { date: Box::new(date_expr.clone()), value: Box::new(value_expr) },
+                                            "setUTCSeconds" => Expr::DateSetUtcSeconds { date: Box::new(date_expr.clone()), value: Box::new(value_expr) },
+                                            "setUTCMilliseconds" => Expr::DateSetUtcMilliseconds { date: Box::new(date_expr.clone()), value: Box::new(value_expr) },
+                                            _ => unreachable!(),
+                                        };
+                                        // If receiver is a local variable, mutate it in place by wrapping
+                                        // the setter result in a LocalSet so the new timestamp is stored back.
+                                        if let Expr::LocalGet(local_id) = &date_expr {
+                                            return Ok(Expr::LocalSet(*local_id, Box::new(setter_call)));
+                                        }
+                                        return Ok(setter_call);
+                                    }
                                 }
                                 _ => {} // Fall through to other handling
                             }

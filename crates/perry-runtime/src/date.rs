@@ -261,6 +261,287 @@ pub extern "C" fn js_date_get_milliseconds(timestamp: f64) -> f64 {
     (ts_ms % 1000).abs() as f64
 }
 
+// =====================================================================================
+// v0.4.69 — Date method gap fill: parse, UTC, getUTC*, setUTC*, valueOf, toLocale*, etc.
+// =====================================================================================
+
+/// Compute the UTC day of week (0=Sunday, 6=Saturday) for a second-precision timestamp.
+fn weekday_from_timestamp(secs: i64) -> u32 {
+    // 1970-01-01 was a Thursday (day 4 in JS day-of-week semantics).
+    let days = if secs >= 0 {
+        secs / 86400
+    } else {
+        (secs - 86399) / 86400  // floor division for negatives
+    };
+    let dow = (days + 4).rem_euclid(7);
+    dow as u32
+}
+
+/// Allocate a StringHeader pointer holding `s`.
+fn alloc_runtime_string(s: &str) -> *mut crate::StringHeader {
+    use std::alloc::{alloc, Layout};
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    unsafe {
+        let layout = Layout::from_size_align(
+            std::mem::size_of::<crate::StringHeader>() + len.max(1),
+            std::mem::align_of::<crate::StringHeader>()
+        ).unwrap();
+        let ptr = alloc(layout) as *mut crate::StringHeader;
+        (*ptr).length = len as u32;
+        let data_ptr = (ptr as *mut u8).add(std::mem::size_of::<crate::StringHeader>());
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, len);
+        ptr
+    }
+}
+
+/// Date.parse(isoString) — parse an ISO 8601 string and return ms since epoch.
+/// Returns NaN for invalid input.
+#[no_mangle]
+pub extern "C" fn js_date_parse(str_ptr: *const crate::StringHeader) -> f64 {
+    if str_ptr.is_null() || (str_ptr as usize) < 0x1000 {
+        return f64::NAN;
+    }
+    unsafe {
+        let len = (*str_ptr).length as usize;
+        let data = (str_ptr as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+        let bytes = std::slice::from_raw_parts(data, len);
+        match std::str::from_utf8(bytes) {
+            Ok(s) => parse_date_string(s),
+            Err(_) => f64::NAN,
+        }
+    }
+}
+
+/// Date.UTC(year, month, day, hour, minute, second, ms) — all f64.
+/// month is 0-indexed (matches JS). Defaults: day=1, hour/min/sec/ms=0.
+#[no_mangle]
+pub extern "C" fn js_date_utc(
+    year: f64,
+    month: f64,
+    day: f64,
+    hour: f64,
+    minute: f64,
+    second: f64,
+    millisecond: f64,
+) -> f64 {
+    let y = year as i32;
+    // JS month is 0-based but components_to_timestamp expects 1-based
+    let m = (month as i32 + 1) as u32;
+    let d = day as u32;
+    let h = hour as u32;
+    let mi = minute as u32;
+    let s = second as u32;
+    let ms = millisecond as i64;
+    let secs = components_to_timestamp(y, m, d, h, mi, s);
+    (secs * 1000 + ms) as f64
+}
+
+// --- UTC getters: same impl as the regular getters since we store UTC internally ---
+
+#[no_mangle]
+pub extern "C" fn js_date_get_utc_day(timestamp: f64) -> f64 {
+    if timestamp.is_nan() { return f64::NAN; }
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms.div_euclid(1000);
+    weekday_from_timestamp(secs) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_get_utc_full_year(timestamp: f64) -> f64 {
+    js_date_get_full_year(timestamp)
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_get_utc_month(timestamp: f64) -> f64 {
+    js_date_get_month(timestamp)
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_get_utc_date(timestamp: f64) -> f64 {
+    js_date_get_date(timestamp)
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_get_utc_hours(timestamp: f64) -> f64 {
+    js_date_get_hours(timestamp)
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_get_utc_minutes(timestamp: f64) -> f64 {
+    js_date_get_minutes(timestamp)
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_get_utc_seconds(timestamp: f64) -> f64 {
+    js_date_get_seconds(timestamp)
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_get_utc_milliseconds(timestamp: f64) -> f64 {
+    js_date_get_milliseconds(timestamp)
+}
+
+/// date.valueOf() — same as getTime(), returns ms timestamp.
+#[no_mangle]
+pub extern "C" fn js_date_value_of(timestamp: f64) -> f64 {
+    timestamp
+}
+
+/// date.getTimezoneOffset() — Perry stores all dates in UTC, so the offset is 0.
+#[no_mangle]
+pub extern "C" fn js_date_get_timezone_offset(_timestamp: f64) -> f64 {
+    0.0
+}
+
+// --- UTC setters: rebuild the timestamp with one component replaced ---
+
+fn rebuild_with(timestamp: f64,
+    year: Option<i32>, month: Option<u32>, day: Option<u32>,
+    hour: Option<u32>, minute: Option<u32>, second: Option<u32>,
+    millisecond: Option<i64>,
+) -> f64 {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms.div_euclid(1000);
+    let cur_ms = ts_ms.rem_euclid(1000);
+    let (cy, cm, cd, ch, cmi, cs) = timestamp_to_components(secs);
+    let new_secs = components_to_timestamp(
+        year.unwrap_or(cy),
+        month.unwrap_or(cm),
+        day.unwrap_or(cd),
+        hour.unwrap_or(ch),
+        minute.unwrap_or(cmi),
+        second.unwrap_or(cs),
+    );
+    let new_ms = millisecond.unwrap_or(cur_ms);
+    (new_secs * 1000 + new_ms) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_full_year(timestamp: f64, value: f64) -> f64 {
+    rebuild_with(timestamp, Some(value as i32), None, None, None, None, None, None)
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_month(timestamp: f64, value: f64) -> f64 {
+    // JS months are 0-based; components_to_timestamp wants 1-based.
+    rebuild_with(timestamp, None, Some(value as u32 + 1), None, None, None, None, None)
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_date(timestamp: f64, value: f64) -> f64 {
+    rebuild_with(timestamp, None, None, Some(value as u32), None, None, None, None)
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_hours(timestamp: f64, value: f64) -> f64 {
+    rebuild_with(timestamp, None, None, None, Some(value as u32), None, None, None)
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_minutes(timestamp: f64, value: f64) -> f64 {
+    rebuild_with(timestamp, None, None, None, None, Some(value as u32), None, None)
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_seconds(timestamp: f64, value: f64) -> f64 {
+    rebuild_with(timestamp, None, None, None, None, None, Some(value as u32), None)
+}
+
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_milliseconds(timestamp: f64, value: f64) -> f64 {
+    rebuild_with(timestamp, None, None, None, None, None, None, Some(value as i64))
+}
+
+// --- String-returning Date methods ---
+
+const WEEKDAY_NAMES: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTH_NAMES: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// date.toDateString() — e.g. "Mon Jan 15 2024"
+#[no_mangle]
+pub extern "C" fn js_date_to_date_string(timestamp: f64) -> *mut crate::StringHeader {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms.div_euclid(1000);
+    let (year, month, day, _, _, _) = timestamp_to_components(secs);
+    let dow = weekday_from_timestamp(secs) as usize;
+    let s = format!(
+        "{} {} {:02} {:04}",
+        WEEKDAY_NAMES[dow], MONTH_NAMES[(month - 1) as usize], day, year
+    );
+    alloc_runtime_string(&s)
+}
+
+/// date.toTimeString() — e.g. "12:30:45 GMT+0000 (Coordinated Universal Time)"
+#[no_mangle]
+pub extern "C" fn js_date_to_time_string(timestamp: f64) -> *mut crate::StringHeader {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms.div_euclid(1000);
+    let (_, _, _, hour, minute, second) = timestamp_to_components(secs);
+    let s = format!(
+        "{:02}:{:02}:{:02} GMT+0000 (Coordinated Universal Time)",
+        hour, minute, second
+    );
+    alloc_runtime_string(&s)
+}
+
+/// date.toLocaleDateString() — simple en-US-style date.
+#[no_mangle]
+pub extern "C" fn js_date_to_locale_date_string(timestamp: f64) -> *mut crate::StringHeader {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms.div_euclid(1000);
+    let (year, month, day, _, _, _) = timestamp_to_components(secs);
+    let s = format!("{}/{}/{}", month, day, year);
+    alloc_runtime_string(&s)
+}
+
+/// date.toLocaleTimeString() — simple H:MM:SS AM/PM en-US style.
+#[no_mangle]
+pub extern "C" fn js_date_to_locale_time_string(timestamp: f64) -> *mut crate::StringHeader {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms.div_euclid(1000);
+    let (_, _, _, hour, minute, second) = timestamp_to_components(secs);
+    let (h12, suffix) = if hour == 0 {
+        (12, "AM")
+    } else if hour < 12 {
+        (hour, "AM")
+    } else if hour == 12 {
+        (12, "PM")
+    } else {
+        (hour - 12, "PM")
+    };
+    let s = format!("{}:{:02}:{:02} {}", h12, minute, second, suffix);
+    alloc_runtime_string(&s)
+}
+
+/// date.toLocaleString() — combined date and time.
+#[no_mangle]
+pub extern "C" fn js_date_to_locale_string(timestamp: f64) -> *mut crate::StringHeader {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms.div_euclid(1000);
+    let (year, month, day, hour, minute, second) = timestamp_to_components(secs);
+    let (h12, suffix) = if hour == 0 {
+        (12, "AM")
+    } else if hour < 12 {
+        (hour, "AM")
+    } else if hour == 12 {
+        (12, "PM")
+    } else {
+        (hour - 12, "PM")
+    };
+    let s = format!("{}/{}/{}, {}:{:02}:{:02} {}", month, day, year, h12, minute, second, suffix);
+    alloc_runtime_string(&s)
+}
+
+/// date.toJSON() — same as toISOString() per ECMA-262.
+#[no_mangle]
+pub extern "C" fn js_date_to_json(timestamp: f64) -> *mut crate::StringHeader {
+    js_date_to_iso_string(timestamp)
+}
+
 /// Convert Unix timestamp (seconds) to date components (year, month, day, hour, minute, second)
 /// Returns components in UTC
 pub fn timestamp_to_components(secs: i64) -> (i32, u32, u32, u32, u32, u32) {

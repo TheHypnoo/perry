@@ -889,8 +889,25 @@ impl crate::codegen::Compiler {
             }
             Expr::DateGetTime(date) | Expr::DateToISOString(date) | Expr::DateGetFullYear(date) |
             Expr::DateGetMonth(date) | Expr::DateGetDate(date) | Expr::DateGetHours(date) |
-            Expr::DateGetMinutes(date) | Expr::DateGetSeconds(date) | Expr::DateGetMilliseconds(date) => {
+            Expr::DateGetMinutes(date) | Expr::DateGetSeconds(date) | Expr::DateGetMilliseconds(date) |
+            Expr::DateGetUtcDay(date) | Expr::DateGetUtcFullYear(date) | Expr::DateGetUtcMonth(date) |
+            Expr::DateGetUtcDate(date) | Expr::DateGetUtcHours(date) | Expr::DateGetUtcMinutes(date) |
+            Expr::DateGetUtcSeconds(date) | Expr::DateGetUtcMilliseconds(date) |
+            Expr::DateValueOf(date) | Expr::DateToDateString(date) | Expr::DateToTimeString(date) |
+            Expr::DateToLocaleDateString(date) | Expr::DateToLocaleTimeString(date) |
+            Expr::DateToLocaleString(date) | Expr::DateGetTimezoneOffset(date) | Expr::DateToJSON(date) |
+            Expr::DateParse(date) => {
                 self.collect_closures_from_expr(date, closures, enclosing_class);
+            }
+            Expr::DateUtc(args) => {
+                for a in args { self.collect_closures_from_expr(a, closures, enclosing_class); }
+            }
+            Expr::DateSetUtcFullYear { date, value } | Expr::DateSetUtcMonth { date, value } |
+            Expr::DateSetUtcDate { date, value } | Expr::DateSetUtcHours { date, value } |
+            Expr::DateSetUtcMinutes { date, value } | Expr::DateSetUtcSeconds { date, value } |
+            Expr::DateSetUtcMilliseconds { date, value } => {
+                self.collect_closures_from_expr(date, closures, enclosing_class);
+                self.collect_closures_from_expr(value, closures, enclosing_class);
             }
             // Error operations
             Expr::ErrorNew(Some(msg)) => {

@@ -1281,6 +1281,39 @@ pub enum Expr {
     DateGetSeconds(Box<Expr>),            // date.getSeconds() -> number (0-59)
     DateGetMilliseconds(Box<Expr>),       // date.getMilliseconds() -> number (0-999)
 
+    // Date static methods
+    DateParse(Box<Expr>),                 // Date.parse(isoString) -> number
+    DateUtc(Vec<Expr>),                   // Date.UTC(year, month, day, h?, m?, s?) -> number
+
+    // Date getters (UTC variants - for Perry these are the same since we store UTC timestamps)
+    DateGetUtcDay(Box<Expr>),             // date.getUTCDay() -> number (0-6)
+    DateGetUtcFullYear(Box<Expr>),        // date.getUTCFullYear() -> number
+    DateGetUtcMonth(Box<Expr>),           // date.getUTCMonth() -> number (0-11)
+    DateGetUtcDate(Box<Expr>),            // date.getUTCDate() -> number (1-31)
+    DateGetUtcHours(Box<Expr>),           // date.getUTCHours() -> number (0-23)
+    DateGetUtcMinutes(Box<Expr>),         // date.getUTCMinutes() -> number (0-59)
+    DateGetUtcSeconds(Box<Expr>),         // date.getUTCSeconds() -> number (0-59)
+    DateGetUtcMilliseconds(Box<Expr>),    // date.getUTCMilliseconds() -> number (0-999)
+
+    // Date setters (UTC variants) — return the new timestamp
+    DateSetUtcFullYear { date: Box<Expr>, value: Box<Expr> },
+    DateSetUtcMonth { date: Box<Expr>, value: Box<Expr> },
+    DateSetUtcDate { date: Box<Expr>, value: Box<Expr> },
+    DateSetUtcHours { date: Box<Expr>, value: Box<Expr> },
+    DateSetUtcMinutes { date: Box<Expr>, value: Box<Expr> },
+    DateSetUtcSeconds { date: Box<Expr>, value: Box<Expr> },
+    DateSetUtcMilliseconds { date: Box<Expr>, value: Box<Expr> },
+
+    // Date misc
+    DateValueOf(Box<Expr>),               // date.valueOf() -> number (same as getTime)
+    DateToDateString(Box<Expr>),          // date.toDateString() -> string
+    DateToTimeString(Box<Expr>),          // date.toTimeString() -> string
+    DateToLocaleDateString(Box<Expr>),    // date.toLocaleDateString() -> string
+    DateToLocaleTimeString(Box<Expr>),    // date.toLocaleTimeString() -> string
+    DateToLocaleString(Box<Expr>),        // date.toLocaleString() -> string
+    DateGetTimezoneOffset(Box<Expr>),     // date.getTimezoneOffset() -> number
+    DateToJSON(Box<Expr>),                // date.toJSON() -> string
+
     // Error operations
     ErrorNew(Option<Box<Expr>>),          // new Error() or new Error(message) -> Error object
     ErrorMessage(Box<Expr>),              // error.message -> string
