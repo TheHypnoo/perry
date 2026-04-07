@@ -13,8 +13,7 @@ Perry compiles TypeScript to native executables for 7 platforms from the same so
 | Android | `--target android` | JNI/Android SDK | Full support (112/112) |
 | Windows | `--target windows` | Win32 | Full support (112/112) |
 | Linux | `--target linux` | GTK4 | Full support (112/112) |
-| Web | `--target web` | DOM/CSS | Full support (127/127) |
-| WebAssembly | `--target wasm` | — | Core language (no UI) |
+| Web / WebAssembly | `--target web` *(alias `--target wasm`)* | DOM/CSS via WASM bridge | Full support (168 widgets) |
 
 ## Cross-Compilation
 
@@ -26,11 +25,10 @@ perry app.ts -o app
 perry app.ts -o app --target ios-simulator
 perry app.ts -o app --target tvos-simulator
 perry app.ts -o app --target watchos-simulator
-perry app.ts -o app --target web
+perry app.ts -o app --target web   # alias: --target wasm
 perry app.ts -o app --target windows
 perry app.ts -o app --target linux
 perry app.ts -o app --target android
-perry app.ts -o app --target wasm
 ```
 
 ## Platform Detection
@@ -46,8 +44,9 @@ declare const __platform__: number;
 // 2 = Android
 // 3 = Windows
 // 4 = Linux
-// 5 = watchOS
+// 5 = Web (browser, --target web / --target wasm)
 // 6 = tvOS
+// 7 = watchOS
 
 if (__platform__ === 0) {
   console.log("Running on macOS");
@@ -62,15 +61,16 @@ if (__platform__ === 0) {
 
 ## Platform Feature Matrix
 
-| Feature | macOS | iOS | tvOS | watchOS | Android | Windows | Linux | Web | WASM |
-|---------|-------|-----|------|---------|---------|---------|-------|-----|------|
-| CLI programs | Yes | — | — | — | — | Yes | Yes | — | Yes |
-| Native UI | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | — |
-| Game engines | Yes | Yes | Yes | — | Yes | Yes | Yes | — | — |
-| File system | Yes | Sandboxed | Sandboxed | — | Sandboxed | Yes | Yes | — | — |
-| Networking | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Fetch | — |
-| System APIs | Yes | Partial | Partial | Minimal | Partial | Yes | Yes | Partial | — |
-| Widgets (WidgetKit) | — | Yes | — | Yes | — | — | — | — | — |
+| Feature | macOS | iOS | tvOS | watchOS | Android | Windows | Linux | Web (WASM) |
+|---------|-------|-----|------|---------|---------|---------|-------|------------|
+| CLI programs | Yes | — | — | — | — | Yes | Yes | — |
+| Native UI (DOM on web) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Game engines | Yes | Yes | Yes | — | Yes | Yes | Yes | Via FFI |
+| File system | Yes | Sandboxed | Sandboxed | — | Sandboxed | Yes | Yes | File System Access API |
+| Networking | Yes | Yes | Yes | Yes | Yes | Yes | Yes | `fetch` / `WebSocket` |
+| System APIs | Yes | Partial | Partial | Minimal | Partial | Yes | Yes | Partial |
+| Widgets (WidgetKit) | — | Yes | — | Yes | — | — | — | — |
+| Threading | Native | Native | Native | Native | Native | Native | Native | Web Workers |
 
 ## Next Steps
 

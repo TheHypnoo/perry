@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.64
+**Current Version:** 0.4.65
 
 ## Workflow Requirements
 
@@ -139,6 +139,19 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.65
+- feat(wasm): `--target web` (alias `--target wasm`) now compiles real-world multi-module apps end-to-end. Mango (50 modules, 998 functions, classes, async, fetch with headers, Hone code editor FFI) compiles to WASM, validates, instantiates, and renders its welcome screen in the browser matching the native app. Major fixes:
+  - **class param counts**: constructors/methods/getters/setters now register in `func_param_counts` so `new Foo(a, b)` against a 4-arg ctor pads with `TAG_UNDEFINED` instead of underflowing the WASM stack ("call needs 2, got 1"). `new ClassName` and `super()` call sites consume the registered count and emit padding.
+  - **module-level `const`/`let` promoted to WASM globals**: top-level Lets are now in a `module_let_globals: BTreeMap<(usize, LocalId), u32>` indexed by (mod_idx, LocalId). Two modules with `let id=1` no longer alias each other (telemetry's `CHIRP_URL` was reading connection-store's `isWeb` Boolean), and functions can now access top-level consts (previously they couldn't — local maps didn't include init Lets). `LocalGet`/`LocalSet`/`Stmt::Let` check `module_let_globals` first; per-module init local maps prevent inner Let collisions.
+  - **`FetchWithOptions` strings now interned**: `collect_strings_in_expr` was missing `Expr::FetchWithOptions` / `FetchGetWithAuth` / `FetchPostWithAuth` cases, so header keys ("Content-Type", "X-Chirp-Key") and URL/body literals fell through the catch-all and resolved to string id 0 ("Authorization"). Headers now serialize correctly.
+  - **constructor field initializers**: were doing `local.get` on uninitialized `temp_local_i32` and corrupting memory at address 0. Now compute `sp - 24` and `local.set` the temp before storing fields.
+  - **`temp_store_local`**: dedicated 2nd i64 temp for `emit_store_arg` so nested calls don't clobber `temp_local`.
+  - **all user functions exported as `__wasm_func_<idx>`** so async JS function bodies can call back into WASM via `wasmInstance.exports`.
+  - **Async JS Call emit**: added missing `Expr::ExternFuncRef` case (was producing `fromJsValue(funcRef)(args)` instead of `funcRef(args)`); converts f64 args to BigInt at the JS↔WASM i64 boundary.
+  - **`new ClassName(...)` JS emit extra paren** removed.
+  - `wasm_runtime.js`: FFI namespace wrapped in a `Proxy` that auto-stubs missing imports with no-ops returning `TAG_UNDEFINED` (lets apps with native FFI like Hone Editor instantiate in the browser); new `wrapImportsForI64` wraps every host import to bit-reinterpret BigInt args ↔ f64 internally so `BigInt(NaN)` doesn't crash on every NaN-boxed return value; `VStack`/`HStack` accept and append a children array; `scrollviewSetChild` (lowercase v) added alongside `scrollViewSetChild` to match user-facing imports.
+  - Result: a 4 MB self-contained HTML file boots, runs init across all 50 modules, creates DOM widgets, makes real `fetch()` calls (with correct URL + headers), and renders mango's welcome screen.
 
 ### v0.4.64
 - perf/cleanup: drop dead `postgres`/`redis`/`whoami` deps from `perry-runtime` — `perry-runtime/Cargo.toml` had `default = ["full"]` which transitively pulled `dep:postgres`, `dep:redis`, and `dep:whoami` into every Perry binary that links libperry_runtime.a. Verified via grep that none were imported: `postgres` and `whoami` had zero references anywhere, `redis` was only used by `redis_client.rs` whose `js_redis_*` symbols nothing in codegen ever resolved (perry-stdlib's `ioredis.rs` is the live Redis path via `js_ioredis_*`). Deleted `redis_client.rs`, removed the three `dep:` entries from the `full` feature list and from `[dependencies]`. Real Redis/Mongo/Postgres support is unchanged — perry-stdlib's `ioredis.rs`/`mongodb.rs`/`pg.rs` (sqlx) all still build and link end-to-end with `--minimal-stdlib`. Measured: minimal-stdlib `libperry_stdlib.a` for `--features http-client` shrank 56 MB → 55 MB and the `perry_runtime-*` member shrank 3.24 MB → 3.10 MB; final binary unchanged because `-dead_strip` was already removing the orphaned redis code at link time, but build time, archive size, and dep hygiene all improve.

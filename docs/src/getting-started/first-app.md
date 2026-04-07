@@ -86,8 +86,8 @@ perry app.ts -o app
 # iOS Simulator
 perry app.ts -o app --target ios-simulator
 
-# Web (generates HTML)
-perry app.ts -o app --target web
+# Web (compiles to WebAssembly + DOM bridge in a self-contained HTML file)
+perry app.ts -o app --target web   # alias: --target wasm
 open app.html
 
 # Other platforms

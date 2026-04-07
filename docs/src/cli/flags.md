@@ -143,7 +143,7 @@ perry main.ts -o app
 # iOS app for simulator
 perry app.ts -o app --target ios-simulator
 
-# Web app
+# Web app (WASM with DOM bridge — alias: --target wasm)
 perry app.ts -o app --target web
 
 # Plugin shared library
@@ -161,10 +161,10 @@ perry compile app.ts -o app -vvv
 # Type-checked compilation
 perry app.ts -o app --type-check
 
-# WebAssembly
-perry app.ts -o app --target wasm
+# Raw WASM binary (no HTML wrapper)
+perry app.ts -o app.wasm --target wasm
 
-# Minified web output
+# Minified web output (compresses embedded JS bridge)
 perry app.ts -o app --target web --minify
 ```
 

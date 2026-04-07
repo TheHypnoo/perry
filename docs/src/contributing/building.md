@@ -68,8 +68,9 @@ perry/
 │   ├── perry-types/        # Type definitions
 │   ├── perry-hir/          # HIR and lowering
 │   ├── perry-transform/    # IR passes
-│   ├── perry-codegen/      # Cranelift codegen
-│   ├── perry-codegen-js/   # Web target codegen
+│   ├── perry-codegen/      # Cranelift native codegen
+│   ├── perry-codegen-wasm/ # WebAssembly codegen (--target web / --target wasm)
+│   ├── perry-codegen-js/   # JS minifier (formerly the web target's codegen)
 │   ├── perry-codegen-swiftui/ # Widget codegen
 │   ├── perry-runtime/      # Runtime library
 │   ├── perry-stdlib/       # npm package implementations

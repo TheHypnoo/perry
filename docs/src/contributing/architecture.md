@@ -28,7 +28,8 @@ Native Executable
 | `perry-hir` | HIR data structures (`ir.rs`) and AST→HIR lowering (`lower.rs`) |
 | `perry-transform` | IR passes: function inlining, closure conversion, async lowering |
 | `perry-codegen` | Cranelift-based native code generation (12 modules) |
-| `perry-codegen-js` | JavaScript code generation for `--target web` |
+| `perry-codegen-wasm` | WebAssembly code generation for `--target web` / `--target wasm` (HIR → WASM bytecode + JS bridge) |
+| `perry-codegen-js` | Legacy JavaScript code generator (still present for the JS minifier; the JS-emit `--target web` path was consolidated into `perry-codegen-wasm`) |
 | `perry-codegen-swiftui` | SwiftUI code generation for WidgetKit extensions |
 | `perry-runtime` | Runtime library: NaN-boxed values, GC, arena allocator, objects, arrays, strings |
 | `perry-stdlib` | Node.js API implementations: mysql2, redis, fastify, bcrypt, etc. |
