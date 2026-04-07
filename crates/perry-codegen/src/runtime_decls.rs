@@ -1982,6 +1982,60 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_string_from_code_point"), func_id);
         }
 
+        // js_string_normalize(s: *const StringHeader, form: *const StringHeader) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function(
+                "js_string_normalize",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_normalize"), func_id);
+        }
+
+        // js_string_locale_compare(a: *const StringHeader, b: *const StringHeader) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(
+                "js_string_locale_compare",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_locale_compare"), func_id);
+        }
+
+        // js_string_is_well_formed(s: *const StringHeader) -> f64 (NaN-boxed bool)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(
+                "js_string_is_well_formed",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_is_well_formed"), func_id);
+        }
+
+        // js_string_to_well_formed(s: *const StringHeader) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function(
+                "js_string_to_well_formed",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_to_well_formed"), func_id);
+        }
+
         // js_string_pad_start(s: *const StringHeader, target_length: u32, pad_string: *const StringHeader) -> *mut StringHeader
         {
             let mut sig = self.module.make_signature();

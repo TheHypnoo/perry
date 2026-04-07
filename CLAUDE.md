@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.72
+**Current Version:** 0.4.73
 
 ## Workflow Requirements
 
@@ -140,18 +140,8 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 ## Recent Changes
 
-### v0.4.72
-- feat: `WeakRef`, `FinalizationRegistry`, `WeakMap`, `WeakSet` — pragmatic stub implementation. New HIR variants `WeakRefNew`/`WeakRefDeref`/`FinalizationRegistryNew`/`FinalizationRegistryRegister`/`FinalizationRegistryUnregister` and runtime functions in new `crates/perry-runtime/src/weakref.rs`. WeakRef holds a strong reference (`deref()` always returns the wrapped value); FinalizationRegistry stores `[token, held]` pairs in an `entries` array so `unregister(token)` returns the correct boolean (callbacks never actually fire — Perry's GC doesn't yet track weak refs). WeakMap/WeakSet route through existing Map/Set HIR variants. `test_gap_weakref_finalization.ts` matches Node.js with zero diffs.
-
-### v0.4.71
-- feat: `process.pid` / `process.ppid` / `process.version` / `process.versions` / `process.hrtime.bigint()` / `process.nextTick(cb)` / `process.on('exit', cb)` / `process.chdir(dir)` / `process.kill(pid, sig?)` — new HIR variants and runtime functions in `crates/perry-runtime/src/os.rs`. `process.versions` builds a `{ node, v8, perry }` shape object via `js_object_alloc_with_shape`. `process.hrtime.bigint()` returns a NaN-boxed BigInt of nanoseconds. `process.nextTick(cb)` schedules `cb` via the existing promise microtask machinery. `test_gap_node_process.ts` passes against Node with zero diffs.
-
-### v0.4.70
-- feat: `Error` subclasses + `cause` + `AggregateError` — full ES2022 error surface. New `ErrorHeader` fields `error_kind`, `cause` (raw f64), and `errors` (array pointer). New runtime constructors `js_error_new_with_cause` / `js_typeerror_new` / `js_rangeerror_new` / `js_referenceerror_new` / `js_syntaxerror_new` / `js_aggregateerror_new`. `js_instanceof` now recognizes built-in error types via `error_kind` discriminator. `super(msg)` in classes extending built-in errors sets `this.message`/`this.name`/`this.stack`. `test_gap_error_extensions.ts` passes with zero diff vs Node.
-
-### v0.4.69
-- fix: `return crossModuleAsyncFn()` inside an `async` wrapper corrupted the resolved value to nulls. New `IMPORTED_ASYNC_FUNCS` thread-local + `exported_async_funcs` BTreeSet tracks exported async functions; `is_promise_expr` now handles `Expr::ExternFuncRef` by checking the set first then falling back to a `Promise<T>` return-type check.
-- feat: `Date.parse` / `Date.UTC` / `getUTC*` / `setUTC*` / `valueOf` / `toDateString` / `toTimeString` / `toLocaleDateString` / `toLocaleTimeString` / `toLocaleString` / `getTimezoneOffset` / `toJSON` — full Date method gap fill. New HIR variants threaded through codegen + runtime in `crates/perry-runtime/src/date.rs`. Setters on local-variable receivers desugar to `LocalSet(id, DateSetUtcXxx(LocalGet(id), value))` so `const d = ...; d.setUTCFullYear(2025)` mutates in place. `test_gap_date_methods.ts` passes with zero diffs vs Node.
+### v0.4.73
+- feat: `String.prototype.normalize` / `localeCompare` / `isWellFormed` / `toWellFormed` — adds Unicode normalization (NFC/NFD/NFKC/NFKD via `unicode-normalization` crate), locale-aware comparison (two-pass case-insensitive-then-case-distinguishing matching V8's default ICU collation where lowercase < uppercase), and ES2024 well-formed UTF-16 check/repair (lone surrogates detected and replaced with U+FFFD). New runtime functions `js_string_normalize`/`js_string_locale_compare`/`js_string_is_well_formed`/`js_string_to_well_formed`; dispatched in both the LocalGet and generic-expression string-method paths of `expr.rs`; outer method guard updated to allow them into the dispatch. `typeof ""` static type analysis now returns `"function"` for known string-method properties so ES feature-detection patterns (`typeof "".isWellFormed === "function"`) work.
 
 ### v0.4.68
 - feat: `console.time` / `timeEnd` / `timeLog` / `count` / `countReset` / `group` / `groupEnd` / `groupCollapsed` / `assert` / `dir` / `clear` — new runtime functions in `builtins.rs` backed by two thread-locals (`CONSOLE_TIMERS: HashMap<String, Instant>` and `CONSOLE_COUNTERS: HashMap<String, u64>`). Codegen dispatch added at the property-method site in `expr.rs` next to the existing `console.log` branch. Group methods print the label without indentation tracking yet (a follow-up could add the indent counter once ALL `js_console_log*` paths are taught to read it). `console.dir` is treated as an alias for `console.log` of the first argument. `console.clear` writes the ANSI clear sequence.

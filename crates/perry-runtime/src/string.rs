@@ -784,6 +784,167 @@ pub extern "C" fn js_string_code_point_at(s: *const StringHeader, index: i32) ->
     unit as f64
 }
 
+/// String.prototype.normalize(form) — Unicode normalization.
+/// `form` is one of: NFC (default), NFD, NFKC, NFKD. Pass null/empty for default NFC.
+#[no_mangle]
+pub extern "C" fn js_string_normalize(
+    s: *const StringHeader,
+    form: *const StringHeader,
+) -> *mut StringHeader {
+    if !is_valid_string_ptr(s) {
+        return js_string_from_bytes(std::ptr::null(), 0);
+    }
+    let str_data = string_as_str(s);
+    let form_str = if is_valid_string_ptr(form) {
+        string_as_str(form)
+    } else {
+        "NFC"
+    };
+    use unicode_normalization::UnicodeNormalization;
+    let normalized: String = match form_str {
+        "NFC" => str_data.nfc().collect(),
+        "NFD" => str_data.nfd().collect(),
+        "NFKC" => str_data.nfkc().collect(),
+        "NFKD" => str_data.nfkd().collect(),
+        _ => str_data.nfc().collect(),
+    };
+    let bytes = normalized.as_bytes();
+    js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
+/// String.prototype.localeCompare(other) — returns negative/zero/positive number.
+/// We don't ship a true ICU collator. We approximate the Unicode default
+/// collation with a two-pass comparison: first case-insensitive (so the
+/// character class wins) and then case-sensitive with lowercase < uppercase
+/// (matching V8's default ICU behavior where 'a' < 'A').
+#[no_mangle]
+pub extern "C" fn js_string_locale_compare(
+    a: *const StringHeader,
+    b: *const StringHeader,
+) -> f64 {
+    let a_valid = is_valid_string_ptr(a);
+    let b_valid = is_valid_string_ptr(b);
+    if !a_valid && !b_valid {
+        return 0.0;
+    }
+    if !a_valid {
+        return -1.0;
+    }
+    if !b_valid {
+        return 1.0;
+    }
+    let a_str = string_as_str(a);
+    let b_str = string_as_str(b);
+    // Case-insensitive primary comparison
+    let a_lower = a_str.to_lowercase();
+    let b_lower = b_str.to_lowercase();
+    match a_lower.cmp(&b_lower) {
+        std::cmp::Ordering::Less => return -1.0,
+        std::cmp::Ordering::Greater => return 1.0,
+        std::cmp::Ordering::Equal => {}
+    }
+    // Same letters ignoring case — order by case (lowercase < uppercase
+    // per the default Unicode collation tertiary weight).
+    let mut ai = a_str.chars();
+    let mut bi = b_str.chars();
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return 0.0,
+            (None, Some(_)) => return -1.0,
+            (Some(_), None) => return 1.0,
+            (Some(ca), Some(cb)) => {
+                if ca == cb {
+                    continue;
+                }
+                let a_lower = ca.is_lowercase();
+                let b_lower = cb.is_lowercase();
+                if a_lower && !b_lower {
+                    return -1.0;
+                }
+                if !a_lower && b_lower {
+                    return 1.0;
+                }
+                return if (ca as u32) < (cb as u32) { -1.0 } else { 1.0 };
+            }
+        }
+    }
+}
+
+/// String.prototype.isWellFormed() — returns NaN-boxed boolean.
+/// A string is well-formed if it contains no lone surrogates.
+#[no_mangle]
+pub extern "C" fn js_string_is_well_formed(s: *const StringHeader) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    if !is_valid_string_ptr(s) {
+        return f64::from_bits(TAG_TRUE);
+    }
+    let str_data = string_as_str(s);
+    // Rust &str is always valid UTF-8, so it can never contain lone surrogates.
+    // The only way to construct an ill-formed string in Perry is via escape
+    // sequences like "\uD800" — those should be encoded as the WTF-8/CESU-8
+    // 3-byte sequence ED A0 80 (which is invalid UTF-8 and would have already
+    // been rejected by the parser). For safety we walk the UTF-16 view here.
+    let utf16: Vec<u16> = str_data.encode_utf16().collect();
+    let len = utf16.len();
+    let mut i = 0;
+    while i < len {
+        let unit = utf16[i];
+        if (0xD800..=0xDBFF).contains(&unit) {
+            // High surrogate — must be followed by a low surrogate
+            if i + 1 >= len {
+                return f64::from_bits(TAG_FALSE);
+            }
+            let next = utf16[i + 1];
+            if !(0xDC00..=0xDFFF).contains(&next) {
+                return f64::from_bits(TAG_FALSE);
+            }
+            i += 2;
+        } else if (0xDC00..=0xDFFF).contains(&unit) {
+            // Lone low surrogate
+            return f64::from_bits(TAG_FALSE);
+        } else {
+            i += 1;
+        }
+    }
+    f64::from_bits(TAG_TRUE)
+}
+
+/// String.prototype.toWellFormed() — replaces lone surrogates with U+FFFD.
+#[no_mangle]
+pub extern "C" fn js_string_to_well_formed(s: *const StringHeader) -> *mut StringHeader {
+    if !is_valid_string_ptr(s) {
+        return js_string_from_bytes(std::ptr::null(), 0);
+    }
+    let str_data = string_as_str(s);
+    let utf16: Vec<u16> = str_data.encode_utf16().collect();
+    let len = utf16.len();
+    let mut fixed: Vec<u16> = Vec::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        let unit = utf16[i];
+        if (0xD800..=0xDBFF).contains(&unit) {
+            if i + 1 < len && (0xDC00..=0xDFFF).contains(&utf16[i + 1]) {
+                fixed.push(unit);
+                fixed.push(utf16[i + 1]);
+                i += 2;
+                continue;
+            }
+            fixed.push(0xFFFD);
+            i += 1;
+        } else if (0xDC00..=0xDFFF).contains(&unit) {
+            fixed.push(0xFFFD);
+            i += 1;
+        } else {
+            fixed.push(unit);
+            i += 1;
+        }
+    }
+    let result = String::from_utf16(&fixed).unwrap_or_else(|_| str_data.to_string());
+    let bytes = result.as_bytes();
+    js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
 /// Print a string to stdout
 #[no_mangle]
 pub extern "C" fn js_string_print(s: *const StringHeader) {

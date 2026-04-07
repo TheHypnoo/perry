@@ -9946,6 +9946,58 @@ pub(crate) fn compile_expr(
                                             return Ok(builder.inst_results(call)[0]);
                                         }
                                     }
+                                    "normalize" => {
+                                        // str.normalize(form?) — defaults to NFC
+                                        let form_ptr = if !arg_vals.is_empty() {
+                                            let arg_f64 = ensure_f64(builder, arg_vals[0]);
+                                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                            let call = builder.ins().call(get_str_ptr_ref, &[arg_f64]);
+                                            builder.inst_results(call)[0]
+                                        } else {
+                                            builder.ins().iconst(types::I64, 0)
+                                        };
+                                        let func = extern_funcs.get("js_string_normalize")
+                                            .ok_or_else(|| anyhow!("js_string_normalize not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[str_ptr, form_ptr]);
+                                        let result_ptr = builder.inst_results(call)[0];
+                                        return Ok(inline_nanbox_string(builder, result_ptr));
+                                    }
+                                    "localeCompare" => {
+                                        // str.localeCompare(other) — returns f64
+                                        if !arg_vals.is_empty() {
+                                            let other_f64 = ensure_f64(builder, arg_vals[0]);
+                                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                            let other_call = builder.ins().call(get_str_ptr_ref, &[other_f64]);
+                                            let other_ptr = builder.inst_results(other_call)[0];
+                                            let func = extern_funcs.get("js_string_locale_compare")
+                                                .ok_or_else(|| anyhow!("js_string_locale_compare not declared"))?;
+                                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                                            let call = builder.ins().call(func_ref, &[str_ptr, other_ptr]);
+                                            return Ok(builder.inst_results(call)[0]);
+                                        }
+                                    }
+                                    "isWellFormed" => {
+                                        // str.isWellFormed() — returns NaN-boxed bool
+                                        let func = extern_funcs.get("js_string_is_well_formed")
+                                            .ok_or_else(|| anyhow!("js_string_is_well_formed not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[str_ptr]);
+                                        return Ok(builder.inst_results(call)[0]);
+                                    }
+                                    "toWellFormed" => {
+                                        // str.toWellFormed() — returns string
+                                        let func = extern_funcs.get("js_string_to_well_formed")
+                                            .ok_or_else(|| anyhow!("js_string_to_well_formed not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[str_ptr]);
+                                        let result_ptr = builder.inst_results(call)[0];
+                                        return Ok(inline_nanbox_string(builder, result_ptr));
+                                    }
                                     _ => {}
                                 }
                             }
@@ -11594,7 +11646,7 @@ pub(crate) fn compile_expr(
                     // Handle string methods on any expression (e.g., query.queryText.substring(0, 20))
                     // This handles property access chains and other cases where the object is not a LocalGet
                     match property.as_str() {
-                        "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" | "indexOf" | "lastIndexOf" | "includes" | "split" | "search" | "replace" | "replaceAll" | "startsWith" | "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" => {
+                        "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" | "indexOf" | "lastIndexOf" | "includes" | "split" | "search" | "replace" | "replaceAll" | "startsWith" | "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" | "normalize" | "localeCompare" | "isWellFormed" | "toWellFormed" => {
                             // Compile the object expression to get a string value
                             let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
 
@@ -11974,6 +12026,54 @@ pub(crate) fn compile_expr(
                                         let call = builder.ins().call(func_ref, &[str_ptr, index]);
                                         return Ok(builder.inst_results(call)[0]);
                                     }
+                                }
+                                "normalize" => {
+                                    let form_ptr = if !arg_vals.is_empty() {
+                                        let arg_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let call = builder.ins().call(get_str_ptr_ref, &[arg_f64]);
+                                        builder.inst_results(call)[0]
+                                    } else {
+                                        builder.ins().iconst(types::I64, 0)
+                                    };
+                                    let func = extern_funcs.get("js_string_normalize")
+                                        .ok_or_else(|| anyhow!("js_string_normalize not declared"))?;
+                                    let func_ref = module.declare_func_in_func(*func, builder.func);
+                                    let call = builder.ins().call(func_ref, &[str_ptr, form_ptr]);
+                                    let result_ptr = builder.inst_results(call)[0];
+                                    return Ok(inline_nanbox_string(builder, result_ptr));
+                                }
+                                "localeCompare" => {
+                                    if !arg_vals.is_empty() {
+                                        let other_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let other_call = builder.ins().call(get_str_ptr_ref, &[other_f64]);
+                                        let other_ptr = builder.inst_results(other_call)[0];
+                                        let func = extern_funcs.get("js_string_locale_compare")
+                                            .ok_or_else(|| anyhow!("js_string_locale_compare not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[str_ptr, other_ptr]);
+                                        return Ok(builder.inst_results(call)[0]);
+                                    }
+                                }
+                                "isWellFormed" => {
+                                    let func = extern_funcs.get("js_string_is_well_formed")
+                                        .ok_or_else(|| anyhow!("js_string_is_well_formed not declared"))?;
+                                    let func_ref = module.declare_func_in_func(*func, builder.func);
+                                    let call = builder.ins().call(func_ref, &[str_ptr]);
+                                    return Ok(builder.inst_results(call)[0]);
+                                }
+                                "toWellFormed" => {
+                                    let func = extern_funcs.get("js_string_to_well_formed")
+                                        .ok_or_else(|| anyhow!("js_string_to_well_formed not declared"))?;
+                                    let func_ref = module.declare_func_in_func(*func, builder.func);
+                                    let call = builder.ins().call(func_ref, &[str_ptr]);
+                                    let result_ptr = builder.inst_results(call)[0];
+                                    return Ok(inline_nanbox_string(builder, result_ptr));
                                 }
                                 _ => {}
                             }
@@ -24645,6 +24745,25 @@ pub(crate) fn compile_expr(
                 Expr::Null => Some("object"), // typeof null === "object"
                 Expr::Array(_) | Expr::ArraySpread(_) | Expr::Object(_) | Expr::ObjectSpread { .. } => Some("object"),
                 Expr::Closure { .. } | Expr::FuncRef(_) | Expr::ExternFuncRef { .. } => Some("function"),
+                // typeof "".methodName for known string methods returns "function".
+                // Used for ES feature detection patterns like
+                //   `typeof "".isWellFormed === "function"`.
+                Expr::PropertyGet { object, property } if matches!(object.as_ref(), Expr::String(_)) => {
+                    if matches!(property.as_str(),
+                        "at" | "charAt" | "charCodeAt" | "codePointAt" | "concat" |
+                        "includes" | "indexOf" | "isWellFormed" | "lastIndexOf" |
+                        "localeCompare" | "match" | "matchAll" | "normalize" |
+                        "padEnd" | "padStart" | "repeat" | "replace" | "replaceAll" |
+                        "search" | "slice" | "split" | "startsWith" | "endsWith" |
+                        "substr" | "substring" | "toLocaleLowerCase" | "toLocaleUpperCase" |
+                        "toLowerCase" | "toString" | "toUpperCase" | "toWellFormed" |
+                        "trim" | "trimEnd" | "trimStart" | "valueOf"
+                    ) {
+                        Some("function")
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             };
 

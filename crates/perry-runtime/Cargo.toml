@@ -38,6 +38,7 @@ dirs = { version = "5", optional = true }
 lazy_static = "1.4"
 
 serde_json = "1"
+unicode-normalization = "0.1"
 
 # We'll add GC bindings later
 # For now, use a simple bump allocator or leak memory for MVP
