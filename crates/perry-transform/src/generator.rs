@@ -161,6 +161,24 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
         exit: StateExit::Done,
     });
 
+    // Collect hoisted var IDs first so we know which Lets to rewrite
+    let hoisted_ids: std::collections::HashSet<LocalId> = collect_hoisted_vars(&func.body)
+        .iter().map(|(id, _, _)| *id).collect();
+
+    // Rewrite `Let { id, init: Some(expr) }` → `Expr(LocalSet(id, expr))` for hoisted
+    // variables inside state bodies. Without this, the Let creates a fresh local that
+    // shadows the captured box, and subsequent mutations in other states don't see the
+    // update.
+    for state in &mut states {
+        for stmt in &mut state.body {
+            if let Stmt::Let { id, init: Some(init_expr), .. } = stmt {
+                if hoisted_ids.contains(id) {
+                    *stmt = Stmt::Expr(Expr::LocalSet(*id, Box::new(init_expr.clone())));
+                }
+            }
+        }
+    }
+
     // Build the if-chain inside while(true)
     let mut while_body: Vec<Stmt> = Vec::new();
     for state in &states {
@@ -463,24 +481,21 @@ fn linearize_body(
             Stmt::While { condition, body: while_body }
                 if body_contains_yield(while_body) =>
             {
-                let cond_state = *state_num;
-                *state_num += 1;
-
-                // Pre-loop code
+                // Pre-loop code gets its own state (if non-empty)
                 let pre_body = std::mem::take(current);
                 if !pre_body.is_empty() {
-                    let pre_state = cond_state;
-                    // Actually we need to adjust: put pre-loop code before cond_state
-                    // Re-assign: pre_state is cond_state - 1, and cond is the next
-                    // For simplicity, fold pre-loop code as a goto to condition
+                    let pre_state = *state_num;
+                    *state_num += 1;
+                    let cond_target = *state_num; // will be the cond_state below
                     states.push(State {
                         num: pre_state,
                         body: pre_body,
-                        exit: StateExit::Goto(cond_state),
+                        exit: StateExit::Goto(cond_target),
                     });
-                    // We already incremented state_num, so cond_state is already taken
-                    // Need to adjust...
                 }
+
+                let cond_state = *state_num;
+                *state_num += 1;
 
                 let body_state = *state_num;
                 // Condition check
