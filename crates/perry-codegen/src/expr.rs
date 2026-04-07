@@ -24643,6 +24643,51 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[obj_f64, key_f64]);
             Ok(builder.inst_results(call)[0])
         }
+        // Object property descriptor methods — all call f64→f64 runtime functions
+        Expr::ObjectDefineProperty(obj_expr, key_expr, desc_expr) => {
+            let obj = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, obj_expr, this_ctx)?;
+            let key = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, key_expr, this_ctx)?;
+            let desc = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, desc_expr, this_ctx)?;
+            let obj_f64 = if builder.func.dfg.value_type(obj) == types::I64 { inline_nanbox_pointer(builder, obj) } else { obj };
+            let key_f64 = if builder.func.dfg.value_type(key) == types::I64 { inline_nanbox_string(builder, key) } else { key };
+            let desc_f64 = if builder.func.dfg.value_type(desc) == types::I64 { inline_nanbox_pointer(builder, desc) } else { desc };
+            let func = extern_funcs.get("js_object_define_property").ok_or_else(|| anyhow!("js_object_define_property not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[obj_f64, key_f64, desc_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ObjectGetOwnPropertyDescriptor(obj_expr, key_expr) => {
+            let obj = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, obj_expr, this_ctx)?;
+            let key = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, key_expr, this_ctx)?;
+            let obj_f64 = if builder.func.dfg.value_type(obj) == types::I64 { inline_nanbox_pointer(builder, obj) } else { obj };
+            let key_f64 = if builder.func.dfg.value_type(key) == types::I64 { inline_nanbox_string(builder, key) } else { key };
+            let func = extern_funcs.get("js_object_get_own_property_descriptor").ok_or_else(|| anyhow!("missing"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[obj_f64, key_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ObjectGetOwnPropertyNames(obj_expr) | Expr::ObjectFreeze(obj_expr) | Expr::ObjectSeal(obj_expr) |
+        Expr::ObjectPreventExtensions(obj_expr) | Expr::ObjectIsFrozen(obj_expr) | Expr::ObjectIsSealed(obj_expr) |
+        Expr::ObjectIsExtensible(obj_expr) | Expr::ObjectGetPrototypeOf(obj_expr) | Expr::ObjectCreate(obj_expr) => {
+            let runtime_name = match expr {
+                Expr::ObjectGetOwnPropertyNames(_) => "js_object_get_own_property_names",
+                Expr::ObjectFreeze(_) => "js_object_freeze",
+                Expr::ObjectSeal(_) => "js_object_seal",
+                Expr::ObjectPreventExtensions(_) => "js_object_prevent_extensions",
+                Expr::ObjectIsFrozen(_) => "js_object_is_frozen",
+                Expr::ObjectIsSealed(_) => "js_object_is_sealed",
+                Expr::ObjectIsExtensible(_) => "js_object_is_extensible",
+                Expr::ObjectGetPrototypeOf(_) => "js_object_get_prototype_of",
+                Expr::ObjectCreate(_) => "js_object_create",
+                _ => unreachable!(),
+            };
+            let obj = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, obj_expr, this_ctx)?;
+            let obj_f64 = if builder.func.dfg.value_type(obj) == types::I64 { inline_nanbox_pointer(builder, obj) } else { obj };
+            let func = extern_funcs.get(runtime_name).ok_or_else(|| anyhow!("{} not declared", runtime_name))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[obj_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
         Expr::ObjectKeys(obj_expr) => {
             // Object.keys(obj) - returns an array of string keys
             // Call js_dynamic_object_keys runtime function (handles Error objects too)
