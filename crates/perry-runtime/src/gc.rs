@@ -839,7 +839,7 @@ unsafe fn trace_promise(user_ptr: *mut u8, valid_ptrs: &HashSet<usize>, worklist
     }
 }
 
-/// Trace error fields (message, name, stack are all StringHeader pointers)
+/// Trace error fields (message, name, stack are StringHeader pointers; cause is f64; errors is array)
 unsafe fn trace_error(user_ptr: *mut u8, valid_ptrs: &HashSet<usize>, worklist: &mut Vec<*mut GcHeader>) {
     let error = user_ptr as *const crate::error::ErrorHeader;
 
@@ -852,6 +852,37 @@ unsafe fn trace_error(user_ptr: *mut u8, valid_ptrs: &HashSet<usize>, worklist: 
                     (*header).gc_flags |= GC_FLAG_MARKED;
                     worklist.push(header);
                 }
+            }
+        }
+    }
+
+    // Trace `cause` if it's a NaN-boxed pointer-like value
+    let cause_bits = (*error).cause.to_bits();
+    let top16 = (cause_bits >> 48) as u16;
+    // POINTER_TAG=0x7FFD, STRING_TAG=0x7FFF, BIGINT_TAG=0x7FFA
+    if top16 == 0x7FFD || top16 == 0x7FFF || top16 == 0x7FFA {
+        let cause_ptr = (cause_bits & 0x0000_FFFF_FFFF_FFFF) as *const u8;
+        if !cause_ptr.is_null() {
+            let ptr_usize = cause_ptr as usize;
+            if valid_ptrs.contains(&ptr_usize) {
+                let header = header_from_user_ptr(cause_ptr);
+                if (*header).gc_flags & GC_FLAG_MARKED == 0 {
+                    (*header).gc_flags |= GC_FLAG_MARKED;
+                    worklist.push(header);
+                }
+            }
+        }
+    }
+
+    // Trace `errors` array
+    let errors_ptr = (*error).errors;
+    if !errors_ptr.is_null() {
+        let ptr_usize = errors_ptr as usize;
+        if valid_ptrs.contains(&ptr_usize) {
+            let header = header_from_user_ptr(errors_ptr as *const u8);
+            if (*header).gc_flags & GC_FLAG_MARKED == 0 {
+                (*header).gc_flags |= GC_FLAG_MARKED;
+                worklist.push(header);
             }
         }
     }

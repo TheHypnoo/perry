@@ -226,6 +226,24 @@ fn collect_referenced_locals_expr(expr: &Expr, out: &mut std::collections::HashS
         | Expr::MapKeys(expr) | Expr::MapValues(expr) | Expr::MapNewFromArray(expr) => {
             collect_referenced_locals_expr(expr, out);
         }
+        // Error operations
+        Expr::ErrorNew(Some(msg)) => {
+            collect_referenced_locals_expr(msg, out);
+        }
+        Expr::ErrorMessage(err) => {
+            collect_referenced_locals_expr(err, out);
+        }
+        Expr::ErrorNewWithCause { message, cause } => {
+            collect_referenced_locals_expr(message, out);
+            collect_referenced_locals_expr(cause, out);
+        }
+        Expr::TypeErrorNew(msg) | Expr::RangeErrorNew(msg) | Expr::ReferenceErrorNew(msg) | Expr::SyntaxErrorNew(msg) => {
+            collect_referenced_locals_expr(msg, out);
+        }
+        Expr::AggregateErrorNew { errors, message } => {
+            collect_referenced_locals_expr(errors, out);
+            collect_referenced_locals_expr(message, out);
+        }
         // Leaf nodes with no LocalId references
         _ => {}
     }
@@ -915,6 +933,17 @@ impl crate::codegen::Compiler {
             }
             Expr::ErrorMessage(err) => {
                 self.collect_closures_from_expr(err, closures, enclosing_class);
+            }
+            Expr::ErrorNewWithCause { message, cause } => {
+                self.collect_closures_from_expr(message, closures, enclosing_class);
+                self.collect_closures_from_expr(cause, closures, enclosing_class);
+            }
+            Expr::TypeErrorNew(msg) | Expr::RangeErrorNew(msg) | Expr::ReferenceErrorNew(msg) | Expr::SyntaxErrorNew(msg) => {
+                self.collect_closures_from_expr(msg, closures, enclosing_class);
+            }
+            Expr::AggregateErrorNew { errors, message } => {
+                self.collect_closures_from_expr(errors, closures, enclosing_class);
+                self.collect_closures_from_expr(message, closures, enclosing_class);
             }
             // URL getter operations
             Expr::UrlGetHref(url) | Expr::UrlGetPathname(url) | Expr::UrlGetProtocol(url) |

@@ -7757,6 +7757,43 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_error_get_message"), func_id);
         }
 
+        // js_error_new_with_cause(message: *mut StringHeader, cause: f64) -> *mut ErrorHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_error_new_with_cause", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_error_new_with_cause"), func_id);
+        }
+
+        // js_typeerror_new / js_rangeerror_new / js_referenceerror_new / js_syntaxerror_new
+        for name in ["js_typeerror_new", "js_rangeerror_new", "js_referenceerror_new", "js_syntaxerror_new"] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // message pointer
+            sig.returns.push(AbiParam::new(types::I64)); // error pointer
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Owned(name.to_string()), func_id);
+        }
+
+        // js_aggregateerror_new(errors: *mut ArrayHeader, message: *mut StringHeader) -> *mut ErrorHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_aggregateerror_new", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_aggregateerror_new"), func_id);
+        }
+
+        // js_register_class_extends_error(class_id: u32) -> void
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_register_class_extends_error", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_register_class_extends_error"), func_id);
+        }
+
         // Delete operator runtime functions
         // js_object_delete_field(obj: *mut ObjectHeader, field_name: *const StringHeader) -> i32
         {

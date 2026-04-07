@@ -1682,6 +1682,16 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
                 let stack = crate::error::js_error_get_stack(error_ptr);
                 return js_nanbox_string(stack as i64);
             }
+            "cause" => {
+                return crate::error::js_error_get_cause(error_ptr);
+            }
+            "errors" => {
+                let arr = crate::error::js_error_get_errors(error_ptr);
+                if arr.is_null() {
+                    return f64::from_bits(TAG_UNDEFINED);
+                }
+                return js_nanbox_pointer(arr as i64);
+            }
             _ => {
                 // Error objects don't have other properties
                 return f64::from_bits(TAG_UNDEFINED);

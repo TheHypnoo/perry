@@ -1917,6 +1917,40 @@ impl JsEmitter {
                 self.emit_expr(err);
                 self.output.push_str(".message");
             }
+            Expr::ErrorNewWithCause { message, cause } => {
+                self.output.push_str("new Error(");
+                self.emit_expr(message);
+                self.output.push_str(", { cause: ");
+                self.emit_expr(cause);
+                self.output.push_str(" })");
+            }
+            Expr::TypeErrorNew(msg) => {
+                self.output.push_str("new TypeError(");
+                self.emit_expr(msg);
+                self.output.push(')');
+            }
+            Expr::RangeErrorNew(msg) => {
+                self.output.push_str("new RangeError(");
+                self.emit_expr(msg);
+                self.output.push(')');
+            }
+            Expr::ReferenceErrorNew(msg) => {
+                self.output.push_str("new ReferenceError(");
+                self.emit_expr(msg);
+                self.output.push(')');
+            }
+            Expr::SyntaxErrorNew(msg) => {
+                self.output.push_str("new SyntaxError(");
+                self.emit_expr(msg);
+                self.output.push(')');
+            }
+            Expr::AggregateErrorNew { errors, message } => {
+                self.output.push_str("new AggregateError(");
+                self.emit_expr(errors);
+                self.output.push_str(", ");
+                self.emit_expr(message);
+                self.output.push(')');
+            }
 
             // --- URL ---
             Expr::UrlNew { url, base } => {

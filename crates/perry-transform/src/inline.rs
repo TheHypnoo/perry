@@ -1355,6 +1355,17 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         Expr::ErrorNew(Some(inner)) | Expr::ErrorMessage(inner) => {
             substitute_locals(inner, param_map, next_local_id);
         }
+        Expr::ErrorNewWithCause { message, cause } => {
+            substitute_locals(message, param_map, next_local_id);
+            substitute_locals(cause, param_map, next_local_id);
+        }
+        Expr::TypeErrorNew(m) | Expr::RangeErrorNew(m) | Expr::ReferenceErrorNew(m) | Expr::SyntaxErrorNew(m) => {
+            substitute_locals(m, param_map, next_local_id);
+        }
+        Expr::AggregateErrorNew { errors, message } => {
+            substitute_locals(errors, param_map, next_local_id);
+            substitute_locals(message, param_map, next_local_id);
+        }
         // Date operations
         Expr::DateNew(Some(inner)) | Expr::DateGetTime(inner) |
         Expr::DateToISOString(inner) | Expr::DateGetFullYear(inner) |

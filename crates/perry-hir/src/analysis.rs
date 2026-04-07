@@ -583,6 +583,17 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
         Expr::ErrorMessage(err) => {
             collect_local_refs_expr(err, refs, visited);
         }
+        Expr::ErrorNewWithCause { message, cause } => {
+            collect_local_refs_expr(message, refs, visited);
+            collect_local_refs_expr(cause, refs, visited);
+        }
+        Expr::TypeErrorNew(m) | Expr::RangeErrorNew(m) | Expr::ReferenceErrorNew(m) | Expr::SyntaxErrorNew(m) => {
+            collect_local_refs_expr(m, refs, visited);
+        }
+        Expr::AggregateErrorNew { errors, message } => {
+            collect_local_refs_expr(errors, refs, visited);
+            collect_local_refs_expr(message, refs, visited);
+        }
         // Uint8Array operations
         Expr::Uint8ArrayNew(size) => {
             if let Some(s) = size {
@@ -1390,6 +1401,17 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
         }
         Expr::ErrorMessage(err) => {
             collect_assigned_locals_expr(err, assigned);
+        }
+        Expr::ErrorNewWithCause { message, cause } => {
+            collect_assigned_locals_expr(message, assigned);
+            collect_assigned_locals_expr(cause, assigned);
+        }
+        Expr::TypeErrorNew(m) | Expr::RangeErrorNew(m) | Expr::ReferenceErrorNew(m) | Expr::SyntaxErrorNew(m) => {
+            collect_assigned_locals_expr(m, assigned);
+        }
+        Expr::AggregateErrorNew { errors, message } => {
+            collect_assigned_locals_expr(errors, assigned);
+            collect_assigned_locals_expr(message, assigned);
         }
         // Uint8Array operations
         Expr::Uint8ArrayNew(size) => {

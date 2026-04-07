@@ -130,6 +130,49 @@ pub fn clear_overflow_for_ptr(obj_ptr: usize) {
 /// Global class registry mapping class_id -> parent_class_id for inheritance chain lookups
 static CLASS_REGISTRY: RwLock<Option<HashMap<u32, u32>>> = RwLock::new(None);
 
+/// Global registry of class IDs that extend the built-in Error class
+/// (or extend something that extends Error). Populated via
+/// `js_register_class_extends_error` from codegen module init.
+static EXTENDS_ERROR_REGISTRY: RwLock<Option<std::collections::HashSet<u32>>> = RwLock::new(None);
+
+/// Mark a user-defined class as extending the built-in Error class.
+/// Called from class constructor codegen when the class extends Error/TypeError/etc.
+#[no_mangle]
+pub extern "C" fn js_register_class_extends_error(class_id: u32) {
+    let mut registry = EXTENDS_ERROR_REGISTRY.write().unwrap();
+    if registry.is_none() {
+        *registry = Some(std::collections::HashSet::new());
+    }
+    registry.as_mut().unwrap().insert(class_id);
+}
+
+/// Check if a class id extends the built-in Error class
+pub(crate) fn extends_builtin_error(class_id: u32) -> bool {
+    let registry = EXTENDS_ERROR_REGISTRY.read().unwrap();
+    if let Some(reg) = registry.as_ref() {
+        if reg.contains(&class_id) {
+            return true;
+        }
+        // Walk parent chain in CLASS_REGISTRY
+        let mut current = class_id;
+        let parent_reg = CLASS_REGISTRY.read().unwrap();
+        if let Some(pr) = parent_reg.as_ref() {
+            for _ in 0..32 {
+                match pr.get(&current).copied() {
+                    Some(parent) if parent != 0 => {
+                        if reg.contains(&parent) {
+                            return true;
+                        }
+                        current = parent;
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+    false
+}
+
 // ============================================================================
 // Class method vtable registry — enables runtime dispatch for interface-typed
 // and dynamically-typed method calls.  Each class registers its methods and
@@ -1551,6 +1594,49 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
     }
 
     unsafe {
+        // Special handling for built-in Error and its subclasses.
+        // Check if this is an ErrorHeader (object_type == OBJECT_TYPE_ERROR at offset 0).
+        // Use the GC header to confirm it's a heap-allocated error before reading kind.
+        let gc_header = (obj_ptr as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        let gc_type = (*gc_header).obj_type;
+        if gc_type == crate::gc::GC_TYPE_ERROR {
+            let err_ptr = obj_ptr as *const crate::error::ErrorHeader;
+            let kind = (*err_ptr).error_kind;
+            return match class_id {
+                crate::error::CLASS_ID_ERROR => true_val, // every error is-a Error
+                crate::error::CLASS_ID_TYPE_ERROR => {
+                    if kind == crate::error::ERROR_KIND_TYPE_ERROR { true_val } else { false_val }
+                }
+                crate::error::CLASS_ID_RANGE_ERROR => {
+                    if kind == crate::error::ERROR_KIND_RANGE_ERROR { true_val } else { false_val }
+                }
+                crate::error::CLASS_ID_REFERENCE_ERROR => {
+                    if kind == crate::error::ERROR_KIND_REFERENCE_ERROR { true_val } else { false_val }
+                }
+                crate::error::CLASS_ID_SYNTAX_ERROR => {
+                    if kind == crate::error::ERROR_KIND_SYNTAX_ERROR { true_val } else { false_val }
+                }
+                crate::error::CLASS_ID_AGGREGATE_ERROR => {
+                    if kind == crate::error::ERROR_KIND_AGGREGATE_ERROR { true_val } else { false_val }
+                }
+                _ => false_val,
+            };
+        }
+
+        // For user-defined classes that extend Error: when the target class_id is
+        // CLASS_ID_ERROR, walk the parent chain looking for any class whose name is "Error".
+        // Since user classes can't actually inherit from a built-in Error class_id, we
+        // approximate this by also returning true if the target is CLASS_ID_ERROR and
+        // the value is a regular object whose registered class chain includes a class
+        // marked as `extends_error`. The simpler approach: check the parent_name in
+        // the class registry.
+        if class_id == crate::error::CLASS_ID_ERROR {
+            let obj_class_id = (*obj_ptr).class_id;
+            if extends_builtin_error(obj_class_id) {
+                return true_val;
+            }
+        }
+
         // Check if the object's class_id matches directly
         let obj_class_id = (*obj_ptr).class_id;
         if obj_class_id == class_id {

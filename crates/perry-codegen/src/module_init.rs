@@ -151,6 +151,23 @@ impl crate::codegen::Compiler {
             })
             .collect();
 
+        // Pre-collect class IDs for classes whose parent is a built-in Error class.
+        // These will be registered in the runtime so `instanceof Error` works on user
+        // subclasses like `class HttpError extends Error`.
+        const ERROR_PARENT_NAMES: &[&str] = &[
+            "Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "AggregateError",
+        ];
+        let error_subclass_ids: Vec<u32> = self.classes.iter()
+            .filter_map(|(_, meta)| {
+                if let Some(ref parent) = meta.parent_class {
+                    if ERROR_PARENT_NAMES.contains(&parent.as_str()) {
+                        return Some(meta.id);
+                    }
+                }
+                None
+            })
+            .collect();
+
         // Use fresh FunctionBuilderContext to avoid variable ID conflicts
         // The shared self.func_ctx accumulates variable declarations across functions
         let mut init_func_ctx = FunctionBuilderContext::new();
@@ -547,6 +564,16 @@ impl crate::codegen::Compiler {
                             class_id_val, name_ptr, name_len, func_ptr,
                         ]);
                     }
+                }
+            }
+
+            // Register classes that extend Error so `instanceof Error` works on user subclasses
+            if !error_subclass_ids.is_empty() {
+                let register_extends_id = *self.extern_funcs.get("js_register_class_extends_error").unwrap();
+                let register_extends_ref = self.module.declare_func_in_func(register_extends_id, builder.func);
+                for cid in &error_subclass_ids {
+                    let cid_val = builder.ins().iconst(types::I32, *cid as i64);
+                    builder.ins().call(register_extends_ref, &[cid_val]);
                 }
             }
 

@@ -5754,7 +5754,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     }
                                     "includes" if args.len() >= 1 => {
                                         let array_expr = lower_expr(ctx, &member.obj)?;
-                                        if matches!(&array_expr,
+                                        // Don't treat error string properties as arrays
+                                        let is_error_string_prop = matches!(&array_expr,
+                                            Expr::PropertyGet { property, .. }
+                                            if matches!(property.as_str(), "stack" | "message" | "name")
+                                        );
+                                        if !is_error_string_prop && matches!(&array_expr,
                                             Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } |
                                             Expr::ArraySlice { .. } | Expr::Array(_) |
                                             Expr::ArrayFrom(_) | Expr::StringSplit(_, _) |
@@ -7228,19 +7233,68 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             return Ok(Expr::DateNew(Some(Box::new(args.into_iter().next().unwrap()))));
                         }
                     }
-                    // Handle Error and its subclasses
-                    if class_name == "Error" || class_name == "TypeError" || class_name == "RangeError"
-                        || class_name == "ReferenceError" || class_name == "SyntaxError"
-                        || class_name == "BugIndicatingError" {
-                        // new Error() or new Error(message)
+                    // Handle AggregateError separately (2-arg form: errors array, message)
+                    if class_name == "AggregateError" {
                         let args = new_expr.args.as_ref()
                             .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
                             .transpose()?
                             .unwrap_or_default();
+                        let mut iter = args.into_iter();
+                        let errors = iter.next().unwrap_or(Expr::Array(vec![]));
+                        let message = iter.next().unwrap_or(Expr::String("".to_string()));
+                        return Ok(Expr::AggregateErrorNew {
+                            errors: Box::new(errors),
+                            message: Box::new(message),
+                        });
+                    }
+
+                    // Handle Error and its subclasses
+                    if class_name == "Error" || class_name == "TypeError" || class_name == "RangeError"
+                        || class_name == "ReferenceError" || class_name == "SyntaxError"
+                        || class_name == "BugIndicatingError" {
+                        // new Error() / new Error(message) / new Error(message, { cause })
+                        let args = new_expr.args.as_ref()
+                            .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
+                            .transpose()?
+                            .unwrap_or_default();
+
+                        // Detect 2-arg form: new Error(msg, { cause })
+                        if args.len() == 2 && class_name == "Error" {
+                            let mut iter = args.into_iter();
+                            let msg = iter.next().unwrap();
+                            let opts = iter.next().unwrap();
+                            // Try to extract `.cause` from the options object literal
+                            if let Expr::Object(fields) = &opts {
+                                for (key, val) in fields {
+                                    if key == "cause" {
+                                        return Ok(Expr::ErrorNewWithCause {
+                                            message: Box::new(msg),
+                                            cause: Box::new(val.clone()),
+                                        });
+                                    }
+                                }
+                            }
+                            // Fallback: just create the error without cause
+                            return Ok(Expr::ErrorNew(Some(Box::new(msg))));
+                        }
+
                         if args.is_empty() {
-                            return Ok(Expr::ErrorNew(None));
+                            return match class_name.as_str() {
+                                "TypeError" => Ok(Expr::TypeErrorNew(Box::new(Expr::String("".to_string())))),
+                                "RangeError" => Ok(Expr::RangeErrorNew(Box::new(Expr::String("".to_string())))),
+                                "ReferenceError" => Ok(Expr::ReferenceErrorNew(Box::new(Expr::String("".to_string())))),
+                                "SyntaxError" => Ok(Expr::SyntaxErrorNew(Box::new(Expr::String("".to_string())))),
+                                _ => Ok(Expr::ErrorNew(None)),
+                            };
                         } else {
-                            return Ok(Expr::ErrorNew(Some(Box::new(args.into_iter().next().unwrap()))));
+                            let msg = args.into_iter().next().unwrap();
+                            return match class_name.as_str() {
+                                "TypeError" => Ok(Expr::TypeErrorNew(Box::new(msg))),
+                                "RangeError" => Ok(Expr::RangeErrorNew(Box::new(msg))),
+                                "ReferenceError" => Ok(Expr::ReferenceErrorNew(Box::new(msg))),
+                                "SyntaxError" => Ok(Expr::SyntaxErrorNew(Box::new(msg))),
+                                _ => Ok(Expr::ErrorNew(Some(Box::new(msg)))),
+                            };
                         }
                     }
 

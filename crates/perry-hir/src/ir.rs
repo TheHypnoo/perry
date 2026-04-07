@@ -1317,6 +1317,18 @@ pub enum Expr {
     // Error operations
     ErrorNew(Option<Box<Expr>>),          // new Error() or new Error(message) -> Error object
     ErrorMessage(Box<Expr>),              // error.message -> string
+    /// new Error(message, { cause })
+    ErrorNewWithCause { message: Box<Expr>, cause: Box<Expr> },
+    /// new TypeError(message)
+    TypeErrorNew(Box<Expr>),
+    /// new RangeError(message)
+    RangeErrorNew(Box<Expr>),
+    /// new ReferenceError(message)
+    ReferenceErrorNew(Box<Expr>),
+    /// new SyntaxError(message)
+    SyntaxErrorNew(Box<Expr>),
+    /// new AggregateError(errors, message)
+    AggregateErrorNew { errors: Box<Expr>, message: Box<Expr> },
 
     // URL operations
     /// new URL(url) or new URL(url, base) -> URL object (stored as pointer)

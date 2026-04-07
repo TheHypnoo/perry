@@ -2406,6 +2406,32 @@ impl WasmModuleEmitter {
                 let e = self.emit_js_expr(err, locals);
                 format!("fromJsValue(toJsValue({}).message)", e)
             }
+            Expr::ErrorNewWithCause { message, cause } => {
+                let m_js = self.emit_js_expr(message, locals);
+                let c_js = self.emit_js_expr(cause, locals);
+                format!("fromJsValue(new Error(getString({}), {{ cause: toJsValue({}) }}))", m_js, c_js)
+            }
+            Expr::TypeErrorNew(m) => {
+                let m_js = self.emit_js_expr(m, locals);
+                format!("fromJsValue(new TypeError(getString({})))", m_js)
+            }
+            Expr::RangeErrorNew(m) => {
+                let m_js = self.emit_js_expr(m, locals);
+                format!("fromJsValue(new RangeError(getString({})))", m_js)
+            }
+            Expr::ReferenceErrorNew(m) => {
+                let m_js = self.emit_js_expr(m, locals);
+                format!("fromJsValue(new ReferenceError(getString({})))", m_js)
+            }
+            Expr::SyntaxErrorNew(m) => {
+                let m_js = self.emit_js_expr(m, locals);
+                format!("fromJsValue(new SyntaxError(getString({})))", m_js)
+            }
+            Expr::AggregateErrorNew { errors, message } => {
+                let e_js = self.emit_js_expr(errors, locals);
+                let m_js = self.emit_js_expr(message, locals);
+                format!("fromJsValue(new AggregateError(toJsValue({}), getString({})))", e_js, m_js)
+            }
             Expr::JsonParse(val) => {
                 let v = self.emit_js_expr(val, locals);
                 format!("fromJsValue(JSON.parse(getString({})))", v)
@@ -2962,6 +2988,17 @@ impl WasmModuleEmitter {
                 if let Some(m) = msg { self.collect_strings_in_expr(m); }
             }
             Expr::ErrorMessage(e) => { self.collect_strings_in_expr(e); }
+            Expr::ErrorNewWithCause { message, cause } => {
+                self.collect_strings_in_expr(message);
+                self.collect_strings_in_expr(cause);
+            }
+            Expr::TypeErrorNew(m) | Expr::RangeErrorNew(m) | Expr::ReferenceErrorNew(m) | Expr::SyntaxErrorNew(m) => {
+                self.collect_strings_in_expr(m);
+            }
+            Expr::AggregateErrorNew { errors, message } => {
+                self.collect_strings_in_expr(errors);
+                self.collect_strings_in_expr(message);
+            }
             Expr::JsonParse(e) | Expr::JsonStringify(e) => { self.collect_strings_in_expr(e); }
             Expr::NumberCoerce(e) | Expr::IsNaN(e) | Expr::IsUndefinedOrBareNan(e) | Expr::IsFinite(e) | Expr::BigIntCoerce(e) => {
                 self.collect_strings_in_expr(e);
@@ -6232,6 +6269,24 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_frame_begin(func, 1);
                 self.emit_store_arg(func, 0, err);
                 self.emit_memcall(func, "error_message", 1);
+            }
+            Expr::ErrorNewWithCause { message, cause: _ } => {
+                // WASM stub: ignore cause for now, falls back to plain Error
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, message);
+                self.emit_memcall(func, "error_new", 1);
+            }
+            Expr::TypeErrorNew(msg) | Expr::RangeErrorNew(msg) | Expr::ReferenceErrorNew(msg) | Expr::SyntaxErrorNew(msg) => {
+                // WASM stub: alias to error_new
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, msg);
+                self.emit_memcall(func, "error_new", 1);
+            }
+            Expr::AggregateErrorNew { errors: _, message } => {
+                // WASM stub: alias to error_new (drops errors array)
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, message);
+                self.emit_memcall(func, "error_new", 1);
             }
 
             // --- RegExp ---

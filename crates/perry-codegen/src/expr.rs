@@ -2902,6 +2902,91 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(nanbox_ref, &[result_ptr]);
             Ok(builder.inst_results(call)[0])
         }
+        Expr::ErrorNewWithCause { message, cause } => {
+            // new Error(message, { cause }) -> ErrorHeader pointer
+            let msg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, message, this_ctx)?;
+            let msg_f64 = ensure_f64(builder, msg_val);
+            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+            let str_call = builder.ins().call(get_str_ptr_ref, &[msg_f64]);
+            let msg_ptr = builder.inst_results(str_call)[0];
+
+            let cause_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cause, this_ctx)?;
+            // The runtime expects cause as f64 NaN-boxed value. If it's I64, NaN-box as pointer.
+            let cause_f64 = if builder.func.dfg.value_type(cause_val) == types::I64 {
+                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nb = builder.ins().call(nanbox_ref, &[cause_val]);
+                builder.inst_results(nb)[0]
+            } else {
+                cause_val
+            };
+
+            let func = extern_funcs.get("js_error_new_with_cause")
+                .ok_or_else(|| anyhow!("js_error_new_with_cause not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[msg_ptr, cause_f64]);
+            let error_ptr = builder.inst_results(call)[0];
+            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+            let call = builder.ins().call(nanbox_ref, &[error_ptr]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::TypeErrorNew(msg_expr) | Expr::RangeErrorNew(msg_expr) | Expr::ReferenceErrorNew(msg_expr) | Expr::SyntaxErrorNew(msg_expr) => {
+            let func_name = match expr {
+                Expr::TypeErrorNew(_) => "js_typeerror_new",
+                Expr::RangeErrorNew(_) => "js_rangeerror_new",
+                Expr::ReferenceErrorNew(_) => "js_referenceerror_new",
+                Expr::SyntaxErrorNew(_) => "js_syntaxerror_new",
+                _ => unreachable!(),
+            };
+            let msg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, msg_expr, this_ctx)?;
+            let msg_f64 = ensure_f64(builder, msg_val);
+            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+            let str_call = builder.ins().call(get_str_ptr_ref, &[msg_f64]);
+            let msg_ptr = builder.inst_results(str_call)[0];
+
+            let func = extern_funcs.get(func_name)
+                .ok_or_else(|| anyhow!("{} not declared", func_name))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[msg_ptr]);
+            let error_ptr = builder.inst_results(call)[0];
+            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+            let call = builder.ins().call(nanbox_ref, &[error_ptr]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::AggregateErrorNew { errors, message } => {
+            // Compile the errors array
+            let errors_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, errors, this_ctx)?;
+            let errors_ptr = ensure_i64(builder, errors_val);
+
+            // Compile the message
+            let msg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, message, this_ctx)?;
+            let msg_f64 = ensure_f64(builder, msg_val);
+            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+            let str_call = builder.ins().call(get_str_ptr_ref, &[msg_f64]);
+            let msg_ptr = builder.inst_results(str_call)[0];
+
+            let func = extern_funcs.get("js_aggregateerror_new")
+                .ok_or_else(|| anyhow!("js_aggregateerror_new not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[errors_ptr, msg_ptr]);
+            let error_ptr = builder.inst_results(call)[0];
+            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+            let call = builder.ins().call(nanbox_ref, &[error_ptr]);
+            Ok(builder.inst_results(call)[0])
+        }
         // URL operations
         Expr::UrlNew { url, base } => {
             // Compile the URL string argument
@@ -16292,6 +16377,80 @@ pub(crate) fn compile_expr(
                         Err(anyhow!("Unsupported native parent class: {}::{}", native_module, native_class))
                     }
                 } else if let Some(parent_name) = &ctx.class_meta.parent_class {
+                    // Special case: parent is built-in Error / TypeError / RangeError / etc.
+                    // We don't have a real Error constructor compiled, so emulate by setting
+                    // `this.message = arg0`, `this.name = "<ParentName>"` via dynamic field set.
+                    const ERROR_PARENT_NAMES: &[&str] = &[
+                        "Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "AggregateError",
+                    ];
+                    if ERROR_PARENT_NAMES.contains(&parent_name.as_str()) {
+                        // Compile the message argument (first arg)
+                        let msg_val = if let Some(first) = args.first() {
+                            compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, first, this_ctx)?
+                        } else {
+                            // No message: use empty string
+                            let s = b"";
+                            let data_id = module.declare_anonymous_data(false, false)
+                                .map_err(|e| anyhow!("failed to declare anonymous data: {}", e))?;
+                            let mut desc = cranelift_module::DataDescription::new();
+                            desc.define(s.to_vec().into_boxed_slice());
+                            module.define_data(data_id, &desc)
+                                .map_err(|e| anyhow!("failed to define data: {}", e))?;
+                            let gv = module.declare_data_in_func(data_id, builder.func);
+                            let str_ptr = builder.ins().global_value(types::I64, gv);
+                            let str_len = builder.ins().iconst(types::I32, 0);
+                            let from_bytes_func = extern_funcs.get("js_string_from_bytes")
+                                .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
+                            let from_bytes_ref = module.declare_func_in_func(*from_bytes_func, builder.func);
+                            let call = builder.ins().call(from_bytes_ref, &[str_ptr, str_len]);
+                            let s_ptr = builder.inst_results(call)[0];
+                            inline_nanbox_string(builder, s_ptr)
+                        };
+                        let msg_f64 = ensure_f64(builder, msg_val);
+
+                        // Get the `this` pointer (already i64)
+                        let this_ptr = builder.use_var(ctx.this_var);
+
+                        // Build a "message" key string and set it
+                        let key_str = |bytes: &[u8], builder: &mut FunctionBuilder, module: &mut dyn Module| -> Result<Value> {
+                            let data_id = module.declare_anonymous_data(false, false)
+                                .map_err(|e| anyhow!("failed to declare anonymous data: {}", e))?;
+                            let mut desc = cranelift_module::DataDescription::new();
+                            desc.define(bytes.to_vec().into_boxed_slice());
+                            module.define_data(data_id, &desc)
+                                .map_err(|e| anyhow!("failed to define data: {}", e))?;
+                            let gv = module.declare_data_in_func(data_id, builder.func);
+                            let str_ptr = builder.ins().global_value(types::I64, gv);
+                            let str_len = builder.ins().iconst(types::I32, bytes.len() as i64);
+                            let from_bytes_func = extern_funcs.get("js_string_from_bytes")
+                                .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
+                            let from_bytes_ref = module.declare_func_in_func(*from_bytes_func, builder.func);
+                            let call = builder.ins().call(from_bytes_ref, &[str_ptr, str_len]);
+                            Ok(builder.inst_results(call)[0])
+                        };
+
+                        let set_func = extern_funcs.get("js_object_set_field_by_name")
+                            .ok_or_else(|| anyhow!("js_object_set_field_by_name not declared"))?;
+                        let set_ref = module.declare_func_in_func(*set_func, builder.func);
+
+                        // this.message = msg
+                        let msg_key = key_str(b"message", builder, module)?;
+                        builder.ins().call(set_ref, &[this_ptr, msg_key, msg_f64]);
+
+                        // this.name = "<ParentName>"
+                        let name_str_ptr = key_str(parent_name.as_bytes(), builder, module)?;
+                        let name_nanboxed = inline_nanbox_string(builder, name_str_ptr);
+                        let name_key = key_str(b"name", builder, module)?;
+                        builder.ins().call(set_ref, &[this_ptr, name_key, name_nanboxed]);
+
+                        // this.stack = "<ParentName>: <message>" (simplified)
+                        // We just set it to the message string for now so .stack.includes(message) works
+                        let stack_key = key_str(b"stack", builder, module)?;
+                        builder.ins().call(set_ref, &[this_ptr, stack_key, msg_f64]);
+
+                        return Ok(builder.ins().f64const(0.0));
+                    }
+
                     // Regular class inheritance
                     if let Some(parent_meta) = classes.get(parent_name) {
                         // Found the parent class in our compiled classes
@@ -24424,6 +24583,11 @@ pub(crate) fn compile_expr(
                     "Date" => 0xFFFF0003_i64,  // Special ID for Date
                     "Uint8Array" => 0xFFFF0004_i64, // Special ID for Uint8Array
                     "Buffer" => 0xFFFF0004_i64, // Buffer uses same ID as Uint8Array (similar types)
+                    "TypeError" => 0xFFFF0010_i64,
+                    "RangeError" => 0xFFFF0011_i64,
+                    "ReferenceError" => 0xFFFF0012_i64,
+                    "SyntaxError" => 0xFFFF0013_i64,
+                    "AggregateError" => 0xFFFF0014_i64,
                     _ => {
                         // Unknown class - return false at runtime
                         return Ok(builder.ins().f64const(0.0));
