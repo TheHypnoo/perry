@@ -156,6 +156,11 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     // Exit type parameter scope
     ctx.exit_type_param_scope();
 
+    // Track generator functions so for-of can use iterator protocol
+    if fn_decl.function.is_generator {
+        ctx.generator_func_names.insert(name.clone());
+    }
+
     Ok(Function {
         id: func_id,
         name,

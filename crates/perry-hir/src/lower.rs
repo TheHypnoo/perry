@@ -138,6 +138,10 @@ pub struct LoweringContext {
     pub(crate) weakmap_locals: HashSet<String>,
     /// Local names whose value is a `WeakSet` instance.
     pub(crate) weakset_locals: HashSet<String>,
+    /// Names of functions declared with `function*` — used to detect generator
+    /// calls in `for...of` so the iterator protocol loop is emitted instead of
+    /// the array-index loop.
+    pub(crate) generator_func_names: HashSet<String>,
 }
 
 impl LoweringContext {
@@ -195,6 +199,7 @@ impl LoweringContext {
             finreg_locals: HashSet::new(),
             weakmap_locals: HashSet::new(),
             weakset_locals: HashSet::new(),
+            generator_func_names: HashSet::new(),
         }
     }
 
@@ -3102,6 +3107,108 @@ fn lower_stmt(
             module.init.push(Stmt::Switch { discriminant, cases });
         }
         ast::Stmt::ForOf(for_of_stmt) => {
+            // --- Iterator protocol path for generators ---
+            // Detect: for (const x of genFunc(...)) where genFunc is function*
+            let is_generator_call = if let ast::Expr::Call(call) = &*for_of_stmt.right {
+                if let ast::Callee::Expr(callee_expr) = &call.callee {
+                    if let ast::Expr::Ident(ident) = &**callee_expr {
+                        ctx.generator_func_names.contains(ident.sym.as_ref())
+                    } else { false }
+                } else { false }
+            } else { false };
+
+            if is_generator_call {
+                // Lower to iterator protocol:
+                //   let __iter = genFunc(...);
+                //   let __result = __iter.next();
+                //   while (!__result.done) { const x = __result.value; body; __result = __iter.next(); }
+                let for_scope_mark = ctx.push_block_scope();
+                let iter_expr = lower_expr(ctx, &for_of_stmt.right)?;
+                let iter_id = ctx.fresh_local();
+                ctx.locals.push((format!("__iter_{}", iter_id), iter_id, Type::Any));
+                module.init.push(Stmt::Let {
+                    id: iter_id,
+                    name: format!("__iter_{}", iter_id),
+                    ty: Type::Any,
+                    mutable: false,
+                    init: Some(iter_expr),
+                });
+
+                let result_id = ctx.fresh_local();
+                ctx.locals.push((format!("__result_{}", result_id), result_id, Type::Any));
+                // __result = __iter.next()
+                let next_call = Expr::Call {
+                    callee: Box::new(Expr::PropertyGet {
+                        object: Box::new(Expr::LocalGet(iter_id)),
+                        property: "next".to_string(),
+                    }),
+                    args: vec![],
+                    type_args: vec![],
+                };
+                module.init.push(Stmt::Let {
+                    id: result_id,
+                    name: format!("__result_{}", result_id),
+                    ty: Type::Any,
+                    mutable: true,
+                    init: Some(next_call.clone()),
+                });
+
+                // Extract the loop variable binding
+                let item_name = if let ast::ForHead::VarDecl(var_decl) = &for_of_stmt.left {
+                    if let Some(decl) = var_decl.decls.first() {
+                        if let ast::Pat::Ident(ident) = &decl.name {
+                            ident.id.sym.to_string()
+                        } else { format!("__gen_item") }
+                    } else { format!("__gen_item") }
+                } else { format!("__gen_item") };
+                let item_id = ctx.define_local(item_name.clone(), Type::Any);
+
+                // Lower loop body
+                let mut body_stmts = Vec::new();
+                // const x = __result.value
+                body_stmts.push(Stmt::Let {
+                    id: item_id,
+                    name: item_name,
+                    ty: Type::Any,
+                    mutable: false,
+                    init: Some(Expr::PropertyGet {
+                        object: Box::new(Expr::LocalGet(result_id)),
+                        property: "value".to_string(),
+                    }),
+                });
+                // Lower user body statements. lower_stmt appends to module.init,
+                // so we snapshot and drain to capture the body stmts.
+                let init_before = module.init.len();
+                if let ast::Stmt::Block(block) = &*for_of_stmt.body {
+                    for s in &block.stmts {
+                        lower_stmt(ctx, module, s)?;
+                    }
+                }
+                let mut user_body: Vec<Stmt> = module.init.drain(init_before..).collect();
+                body_stmts.append(&mut user_body);
+                // __result = __iter.next()
+                body_stmts.push(Stmt::Expr(Expr::LocalSet(
+                    result_id,
+                    Box::new(next_call),
+                )));
+
+                // while (!__result.done) { body }
+                module.init.push(Stmt::While {
+                    condition: Expr::Unary {
+                        op: UnaryOp::Not,
+                        operand: Box::new(Expr::PropertyGet {
+                            object: Box::new(Expr::LocalGet(result_id)),
+                            property: "done".to_string(),
+                        }),
+                    },
+                    body: body_stmts,
+                });
+
+                ctx.pop_block_scope(for_scope_mark);
+                return Ok(());
+            }
+
+            // --- Standard array-based for-of path ---
             // Desugar for-of to a regular for loop:
             // for (const x of arr) { body }
             // becomes:
