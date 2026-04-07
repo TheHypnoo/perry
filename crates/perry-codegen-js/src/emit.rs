@@ -2326,6 +2326,48 @@ impl JsEmitter {
             Expr::PerformanceNow => {
                 self.output.push_str("performance.now()");
             }
+            Expr::TextEncoderNew => { self.output.push_str("new TextEncoder()"); }
+            Expr::TextDecoderNew => { self.output.push_str("new TextDecoder()"); }
+            Expr::TextEncoderEncode(inner) => {
+                self.output.push_str("new TextEncoder().encode(");
+                self.emit_expr(inner);
+                self.output.push(')');
+            }
+            Expr::TextDecoderDecode(inner) => {
+                self.output.push_str("new TextDecoder().decode(");
+                self.emit_expr(inner);
+                self.output.push(')');
+            }
+            Expr::EncodeURI(inner) => {
+                self.output.push_str("encodeURI(");
+                self.emit_expr(inner);
+                self.output.push(')');
+            }
+            Expr::DecodeURI(inner) => {
+                self.output.push_str("decodeURI(");
+                self.emit_expr(inner);
+                self.output.push(')');
+            }
+            Expr::EncodeURIComponent(inner) => {
+                self.output.push_str("encodeURIComponent(");
+                self.emit_expr(inner);
+                self.output.push(')');
+            }
+            Expr::DecodeURIComponent(inner) => {
+                self.output.push_str("decodeURIComponent(");
+                self.emit_expr(inner);
+                self.output.push(')');
+            }
+            Expr::StructuredClone(inner) => {
+                self.output.push_str("structuredClone(");
+                self.emit_expr(inner);
+                self.output.push(')');
+            }
+            Expr::QueueMicrotask(inner) => {
+                self.output.push_str("queueMicrotask(");
+                self.emit_expr(inner);
+                self.output.push(')');
+            }
             Expr::Atob(inner) => {
                 self.output.push_str("atob(");
                 self.emit_expr(inner);

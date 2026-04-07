@@ -13264,7 +13264,12 @@ pub(crate) fn compile_expr(
                         let result_type = builder.func.dfg.value_type(result);
                         if result_type == types::I64 {
                             // HTTP server/request handle functions need NaN-boxing with POINTER_TAG
-                            if func_name == "js_http_server_create" || func_name == "js_http_server_accept_v2" {
+                            // Timer functions return opaque IDs that need POINTER_TAG so
+                            // typeof returns "object" and clearTimeout/clearInterval can recover the ID
+                            if func_name == "js_http_server_create" || func_name == "js_http_server_accept_v2"
+                                || func_name == "js_set_timeout_callback" || func_name == "setTimeout"
+                                || func_name == "setInterval"
+                            {
                                 let nanbox_func = extern_funcs.get("js_nanbox_pointer")
                                     .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
                                 let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
@@ -25819,6 +25824,106 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[]);
             Ok(builder.inst_results(call)[0])
         }
+        // TextEncoder/TextDecoder
+        Expr::TextEncoderNew => {
+            // TextEncoder is stateless; return a dummy non-null pointer NaN-boxed with POINTER_TAG
+            let one = builder.ins().iconst(types::I64, 1i64);
+            Ok(inline_nanbox_pointer(builder, one))
+        }
+        Expr::TextDecoderNew => {
+            // TextDecoder is stateless; return a dummy non-null pointer NaN-boxed with POINTER_TAG
+            let one = builder.ins().iconst(types::I64, 2i64);
+            Ok(inline_nanbox_pointer(builder, one))
+        }
+        Expr::TextEncoderEncode(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                inline_nanbox_string(builder, val)
+            } else { val };
+            let func = extern_funcs.get("js_text_encoder_encode").ok_or_else(|| anyhow!("js_text_encoder_encode not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            let buf_ptr = builder.inst_results(call)[0]; // i64 buffer pointer
+            // NaN-box with POINTER_TAG (buffers are pointers like arrays)
+            Ok(inline_nanbox_pointer(builder, buf_ptr))
+        }
+        Expr::TextDecoderDecode(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_i64 = ensure_i64(builder, val);
+            let func = extern_funcs.get("js_text_decoder_decode").ok_or_else(|| anyhow!("js_text_decoder_decode not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_i64]);
+            let str_ptr = builder.inst_results(call)[0]; // i64 string pointer
+            Ok(inline_nanbox_string(builder, str_ptr))
+        }
+
+        // URI encoding/decoding
+        Expr::EncodeURI(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                inline_nanbox_string(builder, val)
+            } else { val };
+            let func = extern_funcs.get("js_encode_uri").ok_or_else(|| anyhow!("js_encode_uri not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            let str_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, str_ptr))
+        }
+        Expr::DecodeURI(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                inline_nanbox_string(builder, val)
+            } else { val };
+            let func = extern_funcs.get("js_decode_uri").ok_or_else(|| anyhow!("js_decode_uri not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            let str_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, str_ptr))
+        }
+        Expr::EncodeURIComponent(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                inline_nanbox_string(builder, val)
+            } else { val };
+            let func = extern_funcs.get("js_encode_uri_component").ok_or_else(|| anyhow!("js_encode_uri_component not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            let str_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, str_ptr))
+        }
+        Expr::DecodeURIComponent(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                inline_nanbox_string(builder, val)
+            } else { val };
+            let func = extern_funcs.get("js_decode_uri_component").ok_or_else(|| anyhow!("js_decode_uri_component not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            let str_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, str_ptr))
+        }
+
+        // structuredClone
+        Expr::StructuredClone(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_structured_clone").ok_or_else(|| anyhow!("js_structured_clone not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+
+        // queueMicrotask
+        Expr::QueueMicrotask(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_i64 = ensure_i64(builder, val);
+            let func = extern_funcs.get("js_queue_microtask").ok_or_else(|| anyhow!("js_queue_microtask not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            builder.ins().call(func_ref, &[val_i64]);
+            // Returns undefined
+            Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64)))
+        }
+
         Expr::Atob(inner) => {
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
             let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {

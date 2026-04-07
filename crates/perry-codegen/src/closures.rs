@@ -258,6 +258,12 @@ fn collect_referenced_locals_expr(expr: &Expr, out: &mut std::collections::HashS
             collect_referenced_locals_expr(registry, out);
             collect_referenced_locals_expr(token, out);
         }
+        Expr::TextEncoderEncode(inner) | Expr::TextDecoderDecode(inner)
+        | Expr::EncodeURI(inner) | Expr::DecodeURI(inner)
+        | Expr::EncodeURIComponent(inner) | Expr::DecodeURIComponent(inner)
+        | Expr::StructuredClone(inner) | Expr::QueueMicrotask(inner) => {
+            collect_referenced_locals_expr(inner, out);
+        }
         // Leaf nodes with no LocalId references
         _ => {}
     }
@@ -863,6 +869,20 @@ impl crate::codegen::Compiler {
                 for a in args { self.collect_closures_from_expr(a, closures, enclosing_class); }
             }
             Expr::PerformanceNow => {}
+            Expr::TextEncoderNew | Expr::TextDecoderNew => {}
+            Expr::TextEncoderEncode(inner) | Expr::TextDecoderDecode(inner) => {
+                self.collect_closures_from_expr(inner, closures, enclosing_class);
+            }
+            Expr::EncodeURI(inner) | Expr::DecodeURI(inner) |
+            Expr::EncodeURIComponent(inner) | Expr::DecodeURIComponent(inner) => {
+                self.collect_closures_from_expr(inner, closures, enclosing_class);
+            }
+            Expr::StructuredClone(inner) => {
+                self.collect_closures_from_expr(inner, closures, enclosing_class);
+            }
+            Expr::QueueMicrotask(inner) => {
+                self.collect_closures_from_expr(inner, closures, enclosing_class);
+            }
             Expr::Atob(inner) | Expr::Btoa(inner) => {
                 self.collect_closures_from_expr(inner, closures, enclosing_class);
             }

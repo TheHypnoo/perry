@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.73
+**Current Version:** 0.4.78
 
 ## Workflow Requirements
 
@@ -140,8 +140,8 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 ## Recent Changes
 
-### v0.4.73
-- feat: `String.prototype.normalize` / `localeCompare` / `isWellFormed` / `toWellFormed` — adds Unicode normalization (NFC/NFD/NFKC/NFKD via `unicode-normalization` crate), locale-aware comparison (two-pass case-insensitive-then-case-distinguishing matching V8's default ICU collation where lowercase < uppercase), and ES2024 well-formed UTF-16 check/repair (lone surrogates detected and replaced with U+FFFD). New runtime functions `js_string_normalize`/`js_string_locale_compare`/`js_string_is_well_formed`/`js_string_to_well_formed`; dispatched in both the LocalGet and generic-expression string-method paths of `expr.rs`; outer method guard updated to allow them into the dispatch. `typeof ""` static type analysis now returns `"function"` for known string-method properties so ES feature-detection patterns (`typeof "".isWellFormed === "function"`) work.
+### v0.4.78
+- feat: `TextEncoder`/`TextDecoder`, `encodeURI`/`decodeURI`/`encodeURIComponent`/`decodeURIComponent`, `structuredClone`, `queueMicrotask` -- new HIR variants and runtime functions for encoding APIs; `new TextEncoder().encode(str)` returns a Buffer (Uint8Array), `new TextDecoder().decode(buf)` returns a string, `.encoding` property returns `"utf-8"`. URI encoding follows RFC 2396 (encodeURI preserves reserved chars, encodeURIComponent encodes them). Timer IDs from `setTimeout`/`setInterval` now NaN-boxed with POINTER_TAG so `typeof` returns `"object"` and `clearTimeout`/`clearInterval` correctly recover the ID (previously small integer IDs were zeroed by `ensure_i64`'s small-value guard). `test_gap_encoding_timers.ts` down from 54 to 4 diff lines vs Node (remaining diff is pre-existing `charCodeAt` UTF-8 byte-level issue).
 
 ### v0.4.68
 - feat: `console.time` / `timeEnd` / `timeLog` / `count` / `countReset` / `group` / `groupEnd` / `groupCollapsed` / `assert` / `dir` / `clear` — new runtime functions in `builtins.rs` backed by two thread-locals (`CONSOLE_TIMERS: HashMap<String, Instant>` and `CONSOLE_COUNTERS: HashMap<String, u64>`). Codegen dispatch added at the property-method site in `expr.rs` next to the existing `console.log` branch. Group methods print the label without indentation tracking yet (a follow-up could add the indent counter once ALL `js_console_log*` paths are taught to read it). `console.dir` is treated as an alias for `console.log` of the first argument. `console.clear` writes the ANSI clear sequence.

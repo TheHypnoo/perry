@@ -1091,6 +1091,31 @@ pub enum Expr {
     /// btoa(string) -> string
     Btoa(Box<Expr>),
 
+    // TextEncoder / TextDecoder
+    /// new TextEncoder() -> opaque handle (stateless, always utf-8)
+    TextEncoderNew,
+    /// encoder.encode(string) -> Buffer (Uint8Array of UTF-8 bytes)
+    TextEncoderEncode(Box<Expr>),
+    /// new TextDecoder() or new TextDecoder("utf-8") -> opaque handle
+    TextDecoderNew,
+    /// decoder.decode(buffer) -> string (UTF-8 decode)
+    TextDecoderDecode(Box<Expr>),
+
+    // URI encoding / decoding
+    /// encodeURI(string) -> string
+    EncodeURI(Box<Expr>),
+    /// decodeURI(string) -> string
+    DecodeURI(Box<Expr>),
+    /// encodeURIComponent(string) -> string
+    EncodeURIComponent(Box<Expr>),
+    /// decodeURIComponent(string) -> string
+    DecodeURIComponent(Box<Expr>),
+
+    /// structuredClone(value) -> deep-cloned value
+    StructuredClone(Box<Expr>),
+    /// queueMicrotask(callback) -> void
+    QueueMicrotask(Box<Expr>),
+
     // Crypto operations
     CryptoRandomBytes(Box<Expr>),        // crypto.randomBytes(size) -> string (hex)
     CryptoRandomUUID,                    // crypto.randomUUID() -> string

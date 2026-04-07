@@ -7731,6 +7731,50 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_performance_now"), func_id);
         }
 
+        // js_text_encoder_encode(value: f64) -> i64  (returns buffer pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed string
+            sig.returns.push(AbiParam::new(types::I64)); // buffer pointer
+            let func_id = self.module.declare_function("js_text_encoder_encode", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_text_encoder_encode"), func_id);
+        }
+
+        // js_text_decoder_decode(buf_ptr: i64) -> i64  (returns string pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // buffer pointer
+            sig.returns.push(AbiParam::new(types::I64)); // string pointer
+            let func_id = self.module.declare_function("js_text_decoder_decode", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_text_decoder_decode"), func_id);
+        }
+
+        // URI encoding/decoding: (f64) -> i64
+        for name in &["js_encode_uri", "js_decode_uri", "js_encode_uri_component", "js_decode_uri_component"] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed(name), func_id);
+        }
+
+        // js_structured_clone(value: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_structured_clone", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_structured_clone"), func_id);
+        }
+
+        // js_queue_microtask(callback: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // closure pointer
+            let func_id = self.module.declare_function("js_queue_microtask", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_queue_microtask"), func_id);
+        }
+
         // js_atob/js_btoa(value: f64) -> i64
         for name in &["js_atob", "js_btoa"] {
             let mut sig = self.module.make_signature();

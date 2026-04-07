@@ -951,6 +951,10 @@ pub(crate) fn lower_var_decl_with_destructuring(
                                 };
                             } else if class_name == "URLSearchParams" {
                                 ty = Type::Named("URLSearchParams".to_string());
+                            } else if class_name == "TextEncoder" {
+                                ty = Type::Named("TextEncoder".to_string());
+                            } else if class_name == "TextDecoder" {
+                                ty = Type::Named("TextDecoder".to_string());
                             } else if class_name == "Uint8Array" || class_name == "Buffer" {
                                 ty = Type::Named("Uint8Array".to_string());
                             } else if ctx.classes_index.contains_key(class_name) {

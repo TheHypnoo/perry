@@ -1370,3 +1370,200 @@ pub extern "C" fn js_console_assert(cond: f64, msg_ptr: *const StringHeader) {
 pub extern "C" fn js_console_clear() {
     print!("\x1b[2J\x1b[H");
 }
+
+// ============================================================
+// TextEncoder / TextDecoder
+// ============================================================
+
+/// TextEncoder.encode(string) -> Buffer (Uint8Array of UTF-8 bytes)
+/// Takes a NaN-boxed string value and returns a raw buffer pointer.
+#[no_mangle]
+pub extern "C" fn js_text_encoder_encode(value: f64) -> i64 {
+    use crate::buffer::js_buffer_from_string;
+    let str_ptr = crate::value::js_get_string_pointer_unified(value);
+    let buf = js_buffer_from_string(str_ptr as *const StringHeader, 0); // 0 = UTF-8
+    buf as i64
+}
+
+/// TextDecoder.decode(buffer_ptr) -> string pointer (i64)
+/// Takes a raw buffer/Uint8Array pointer (i64) and returns a StringHeader pointer.
+#[no_mangle]
+pub extern "C" fn js_text_decoder_decode(buf_ptr: i64) -> i64 {
+    use crate::buffer::{BufferHeader, js_buffer_to_string};
+    if buf_ptr == 0 || (buf_ptr as usize) < 0x1000 {
+        return js_string_from_bytes(std::ptr::null(), 0) as i64;
+    }
+    let ptr = buf_ptr as *const BufferHeader;
+    let str_ptr = js_buffer_to_string(ptr, 0); // 0 = UTF-8
+    str_ptr as i64
+}
+
+// ============================================================
+// encodeURI / decodeURI / encodeURIComponent / decodeURIComponent
+// ============================================================
+
+/// Characters that encodeURI does NOT encode (RFC 2396 unreserved + reserved)
+const URI_UNESCAPED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()";
+const URI_RESERVED: &[u8] = b";/?:@&=+$,#";
+
+/// Characters that encodeURIComponent does NOT encode (RFC 2396 unreserved only)
+const URI_COMPONENT_UNESCAPED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()";
+
+fn percent_encode(input: &str, safe_chars: &[u8]) -> String {
+    let mut result = String::with_capacity(input.len() * 3);
+    for byte in input.as_bytes() {
+        if safe_chars.contains(byte) {
+            result.push(*byte as char);
+        } else {
+            result.push('%');
+            result.push_str(&format!("{:02X}", byte));
+        }
+    }
+    result
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = hex_digit(bytes[i + 1]);
+            let lo = hex_digit(bytes[i + 2]);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                result.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn extract_str_from_nanbox(value: f64) -> String {
+    let str_ptr = crate::value::js_get_string_pointer_unified(value);
+    if (str_ptr as usize) < 0x1000 {
+        return String::new();
+    }
+    unsafe {
+        let header = str_ptr as *const StringHeader;
+        let len = (*header).length as usize;
+        let data = (header as *const u8).add(std::mem::size_of::<StringHeader>());
+        let bytes = std::slice::from_raw_parts(data, len);
+        std::str::from_utf8(bytes).unwrap_or("").to_string()
+    }
+}
+
+/// encodeURI(string) -> string
+#[no_mangle]
+pub extern "C" fn js_encode_uri(value: f64) -> i64 {
+    let input = extract_str_from_nanbox(value);
+    let mut safe = Vec::with_capacity(URI_UNESCAPED.len() + URI_RESERVED.len());
+    safe.extend_from_slice(URI_UNESCAPED);
+    safe.extend_from_slice(URI_RESERVED);
+    let encoded = percent_encode(&input, &safe);
+    let ptr = js_string_from_bytes(encoded.as_ptr(), encoded.len() as u32);
+    ptr as i64
+}
+
+/// decodeURI(string) -> string
+#[no_mangle]
+pub extern "C" fn js_decode_uri(value: f64) -> i64 {
+    let input = extract_str_from_nanbox(value);
+    let decoded = percent_decode(&input);
+    let ptr = js_string_from_bytes(decoded.as_ptr(), decoded.len() as u32);
+    ptr as i64
+}
+
+/// encodeURIComponent(string) -> string
+#[no_mangle]
+pub extern "C" fn js_encode_uri_component(value: f64) -> i64 {
+    let input = extract_str_from_nanbox(value);
+    let encoded = percent_encode(&input, URI_COMPONENT_UNESCAPED);
+    let ptr = js_string_from_bytes(encoded.as_ptr(), encoded.len() as u32);
+    ptr as i64
+}
+
+/// decodeURIComponent(string) -> string
+#[no_mangle]
+pub extern "C" fn js_decode_uri_component(value: f64) -> i64 {
+    let input = extract_str_from_nanbox(value);
+    let decoded = percent_decode(&input);
+    let ptr = js_string_from_bytes(decoded.as_ptr(), decoded.len() as u32);
+    ptr as i64
+}
+
+// ============================================================
+// structuredClone
+// ============================================================
+
+/// structuredClone(value) -> deep-cloned value
+/// Handles numbers (pass-through), strings (copy), arrays/objects (shallow for now)
+#[no_mangle]
+pub extern "C" fn js_structured_clone(value: f64) -> f64 {
+    let bits = value.to_bits();
+    // Pass through primitives (undefined, null, true, false)
+    if bits == 0x7FFC_0000_0000_0001 || bits == 0x7FFC_0000_0000_0002
+        || bits == 0x7FFC_0000_0000_0003 || bits == 0x7FFC_0000_0000_0004 {
+        return value;
+    }
+    // Regular f64 numbers pass through
+    let tag = (bits >> 48) as u16;
+    if tag < 0x7FF8 {
+        return value;
+    }
+
+    match tag {
+        0x7FFF => {
+            // STRING_TAG — copy the string
+            let str_ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const StringHeader;
+            if (str_ptr as usize) < 0x1000 {
+                return value;
+            }
+            unsafe {
+                let len = (*str_ptr).length as usize;
+                let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                let new_str = js_string_from_bytes(data, len as u32);
+                let new_bits = 0x7FFF_0000_0000_0000u64 | (new_str as u64 & 0x0000_FFFF_FFFF_FFFF);
+                f64::from_bits(new_bits)
+            }
+        }
+        0x7FFE => {
+            // INT32_TAG — pass through
+            value
+        }
+        0x7FFD => {
+            // POINTER_TAG — could be array or object
+            // For simplicity, pass through (deep clone would require
+            // inspecting GcHeader to determine array vs object, then recursing)
+            value
+        }
+        _ => value,
+    }
+}
+
+// ============================================================
+// queueMicrotask
+// ============================================================
+
+/// queueMicrotask(callback) — calls the closure immediately (simplified)
+/// In a full implementation this would schedule on the microtask queue,
+/// but Perry's current event loop processes microtasks synchronously.
+#[no_mangle]
+pub extern "C" fn js_queue_microtask(callback: i64) {
+    use crate::closure::js_closure_call0;
+    unsafe {
+        js_closure_call0(callback as *const crate::closure::ClosureHeader);
+    }
+}
