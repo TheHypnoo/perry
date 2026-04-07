@@ -1544,10 +1544,44 @@ pub extern "C" fn js_structured_clone(value: f64) -> f64 {
             value
         }
         0x7FFD => {
-            // POINTER_TAG — could be array or object
-            // For simplicity, pass through (deep clone would require
-            // inspecting GcHeader to determine array vs object, then recursing)
-            value
+            // POINTER_TAG — could be array or object. Deep clone recursively.
+            let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const u8;
+            if (ptr as usize) < 0x10000 { return value; }
+            unsafe {
+                // GcHeader is stored BEFORE the user pointer (at ptr - GC_HEADER_SIZE)
+                let gc_header_ptr = (ptr as *const u8).sub(crate::gc::GC_HEADER_SIZE);
+                let gc_type = *gc_header_ptr;
+                if gc_type == crate::gc::GC_TYPE_ARRAY {
+                    // Clone array using existing clone, then recursively clone elements
+                    let arr = ptr as *const crate::array::ArrayHeader;
+                    let new_arr = crate::array::js_array_clone(arr);
+                    let len = (*new_arr).length;
+                    let elements = (new_arr as *mut u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *mut f64;
+                    for i in 0..len as usize {
+                        let elem = *elements.add(i);
+                        *elements.add(i) = js_structured_clone(elem);
+                    }
+                    let new_bits = 0x7FFD_0000_0000_0000u64 | (new_arr as u64 & 0x0000_FFFF_FFFF_FFFF);
+                    f64::from_bits(new_bits)
+                } else if gc_type == crate::gc::GC_TYPE_OBJECT {
+                    // Clone object using clone_with_extra (0 extra fields, no static keys)
+                    let cloned_obj = crate::object::js_object_clone_with_extra(value, 0, std::ptr::null(), 0);
+                    if !cloned_obj.is_null() && (cloned_obj as usize) > 0x10000 {
+                        let field_count = (*cloned_obj).field_count;
+                        let fields = (cloned_obj as *mut u8).add(std::mem::size_of::<crate::object::ObjectHeader>()) as *mut f64;
+                        for i in 0..field_count as usize {
+                            let field = *fields.add(i);
+                            *fields.add(i) = js_structured_clone(field);
+                        }
+                    }
+                    // NaN-box with POINTER_TAG
+                    let new_bits = 0x7FFD_0000_0000_0000u64 | (cloned_obj as u64 & 0x0000_FFFF_FFFF_FFFF);
+                    f64::from_bits(new_bits)
+                } else {
+                    // Unknown pointer type — pass through
+                    value
+                }
+            }
         }
         _ => value,
     }

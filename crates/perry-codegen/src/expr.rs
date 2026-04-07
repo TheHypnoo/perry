@@ -26079,7 +26079,14 @@ pub(crate) fn compile_expr(
         // structuredClone
         Expr::StructuredClone(inner) => {
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
-            let val_f64 = ensure_f64(builder, val);
+            // Ensure the value is properly NaN-boxed so the runtime can identify its type.
+            // I64 pointers (arrays/objects stored as raw I64) need POINTER_TAG boxing.
+            let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                // NaN-box with POINTER_TAG so structuredClone can tell it's a pointer
+                inline_nanbox_pointer(builder, val)
+            } else {
+                val
+            };
             let func = extern_funcs.get("js_structured_clone").ok_or_else(|| anyhow!("js_structured_clone not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
             let call = builder.ins().call(func_ref, &[val_f64]);
