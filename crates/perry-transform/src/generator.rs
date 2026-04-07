@@ -354,7 +354,7 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
 
     let next_closure = Expr::Closure {
         func_id: next_func_id_val,
-        params: vec![perry_hir::Param { id: next_param_id, name: "__val".to_string(), ty: Type::Any, is_rest: false }],
+        params: vec![perry_hir::Param { id: next_param_id, name: "__val".to_string(), ty: Type::Any, is_rest: false, default: None }],
         return_type: Type::Any,
         body: next_body,
         captures: captures.clone(),
@@ -369,7 +369,7 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
     let return_func_id_val = { let id = *next_func_id; *next_func_id += 1; id };
     let return_closure = Expr::Closure {
         func_id: return_func_id_val,
-        params: vec![perry_hir::Param { id: return_param_id, name: "__ret_val".to_string(), ty: Type::Any, is_rest: false }],
+        params: vec![perry_hir::Param { id: return_param_id, name: "__ret_val".to_string(), ty: Type::Any, is_rest: false, default: None }],
         return_type: Type::Any,
         body: vec![
             Stmt::Expr(Expr::LocalSet(done_id, Box::new(Expr::Bool(true)))),
@@ -387,7 +387,7 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
     let throw_func_id_val = { let id = *next_func_id; *next_func_id += 1; id };
     let throw_closure = Expr::Closure {
         func_id: throw_func_id_val,
-        params: vec![perry_hir::Param { id: throw_param_id, name: "__throw_val".to_string(), ty: Type::Any, is_rest: false }],
+        params: vec![perry_hir::Param { id: throw_param_id, name: "__throw_val".to_string(), ty: Type::Any, is_rest: false, default: None }],
         return_type: Type::Any,
         body: vec![
             Stmt::Expr(Expr::LocalSet(done_id, Box::new(Expr::Bool(true)))),

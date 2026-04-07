@@ -7945,6 +7945,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         let cb = args.into_iter().next()
                             .ok_or_else(|| anyhow!("FinalizationRegistry constructor requires a callback argument"))?;
                         return Ok(Expr::FinalizationRegistryNew(Box::new(cb)));
+                    }
                     // Handle TextEncoder constructor
                     if class_name == "TextEncoder" {
                         return Ok(Expr::TextEncoderNew);
