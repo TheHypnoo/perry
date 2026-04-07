@@ -7893,13 +7893,20 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 .any(|elem| elem.spread.is_some());
 
             if has_spread {
-                // Use ArraySpread for arrays with spread elements
+                // Use ArraySpread for arrays with spread elements.
+                // If a spread source is a generator call, wrap it in IteratorToArray
+                // so the codegen gets a real array to iterate.
                 let elements = array.elems.iter()
                     .filter_map(|elem| elem.as_ref())
                     .map(|elem| {
                         let expr = lower_expr(ctx, &elem.expr)?;
                         if elem.spread.is_some() {
-                            Ok(ArrayElement::Spread(expr))
+                            // Wrap generator calls in IteratorToArray
+                            if is_generator_call_expr(ctx, &expr) {
+                                Ok(ArrayElement::Spread(Expr::IteratorToArray(Box::new(expr))))
+                            } else {
+                                Ok(ArrayElement::Spread(expr))
+                            }
                         } else {
                             Ok(ArrayElement::Expr(expr))
                         }
