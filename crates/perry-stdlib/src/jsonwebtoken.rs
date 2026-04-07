@@ -42,12 +42,14 @@ const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
 const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
 /// Shared signing logic — parse payload, apply expiry, encode with given algorithm/key.
-/// Returns a NaN-boxed string i64, or 0 on error.
+/// `kid_ptr` is optional (null = no `kid` header field). Returns a NaN-boxed string i64,
+/// or 0 on error.
 unsafe fn sign_common(
     payload_ptr: *const StringHeader,
     expires_in_secs: f64,
     algorithm: Algorithm,
     key: &EncodingKey,
+    kid_ptr: *const StringHeader,
 ) -> i64 {
     let payload_json = match string_from_header(payload_ptr) {
         Some(p) => p,
@@ -78,7 +80,15 @@ unsafe fn sign_common(
         }
     }
 
-    let header = Header::new(algorithm);
+    let mut header = Header::new(algorithm);
+    if !kid_ptr.is_null() {
+        if let Some(kid) = string_from_header(kid_ptr) {
+            if !kid.is_empty() {
+                header.kid = Some(kid);
+            }
+        }
+    }
+
     match encode(&header, &claims, key) {
         Ok(token) => {
             let ptr = js_string_from_bytes(token.as_ptr(), token.len() as u32);
@@ -91,28 +101,35 @@ unsafe fn sign_common(
 /// Sign a payload to create a JWT (HS256)
 /// jwt.sign(payload, secret) -> string
 /// jwt.sign(payload, secret, options) -> string
+///
+/// `kid_ptr` may be null when no `keyid` is provided in options.
 #[no_mangle]
 pub unsafe extern "C" fn js_jwt_sign(
     payload_ptr: *const StringHeader,
     secret_ptr: *const StringHeader,
     expires_in_secs: f64,
+    kid_ptr: *const StringHeader,
 ) -> i64 {
     let secret = match string_from_header(secret_ptr) {
         Some(s) => s,
         None => return 0,
     };
     let key = EncodingKey::from_secret(secret.as_bytes());
-    sign_common(payload_ptr, expires_in_secs, Algorithm::HS256, &key)
+    sign_common(payload_ptr, expires_in_secs, Algorithm::HS256, &key, kid_ptr)
 }
 
 /// Sign a payload to create a JWT (ES256)
-/// `pem_ptr` must contain a PKCS#8 / SEC1 PEM-encoded EC private key (P-256 curve).
-/// jwt.sign(payload, ecPrivateKeyPem, { algorithm: 'ES256' }) -> string
+/// `pem_ptr` must contain a PKCS#8 PEM-encoded EC private key (P-256 curve).
+/// jwt.sign(payload, ecPrivateKeyPem, { algorithm: 'ES256', keyid: '...' }) -> string
+///
+/// Used by APNs (Apple Push Notification service) provider tokens — APNs requires
+/// `kid` in the JWT header to identify which `.p8` key was used to sign.
 #[no_mangle]
 pub unsafe extern "C" fn js_jwt_sign_es256(
     payload_ptr: *const StringHeader,
     pem_ptr: *const StringHeader,
     expires_in_secs: f64,
+    kid_ptr: *const StringHeader,
 ) -> i64 {
     let pem = match string_from_header(pem_ptr) {
         Some(p) => p,
@@ -125,12 +142,12 @@ pub unsafe extern "C" fn js_jwt_sign_es256(
             return 0;
         }
     };
-    sign_common(payload_ptr, expires_in_secs, Algorithm::ES256, &key)
+    sign_common(payload_ptr, expires_in_secs, Algorithm::ES256, &key, kid_ptr)
 }
 
 /// Sign a payload to create a JWT (RS256)
-/// `pem_ptr` must contain a PKCS#1 / PKCS#8 PEM-encoded RSA private key.
-/// jwt.sign(payload, rsaPrivateKeyPem, { algorithm: 'RS256' }) -> string
+/// `pem_ptr` must contain a PKCS#8 PEM-encoded RSA private key.
+/// jwt.sign(payload, rsaPrivateKeyPem, { algorithm: 'RS256', keyid: '...' }) -> string
 ///
 /// Used by FCM (Firebase Cloud Messaging) OAuth assertions.
 #[no_mangle]
@@ -138,6 +155,7 @@ pub unsafe extern "C" fn js_jwt_sign_rs256(
     payload_ptr: *const StringHeader,
     pem_ptr: *const StringHeader,
     expires_in_secs: f64,
+    kid_ptr: *const StringHeader,
 ) -> i64 {
     let pem = match string_from_header(pem_ptr) {
         Some(p) => p,
@@ -150,7 +168,7 @@ pub unsafe extern "C" fn js_jwt_sign_rs256(
             return 0;
         }
     };
-    sign_common(payload_ptr, expires_in_secs, Algorithm::RS256, &key)
+    sign_common(payload_ptr, expires_in_secs, Algorithm::RS256, &key, kid_ptr)
 }
 
 /// Verify and decode a JWT

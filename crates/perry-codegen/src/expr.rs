@@ -23656,21 +23656,25 @@ pub(crate) fn compile_expr(
 
                     Ok(closure_ptr)
                 } else {
-                    // Class without constructor — return a non-null marker object
+                    // Class without constructor — return a non-null marker object.
+                    // js_object_alloc_fast takes (class_id: i32, field_count: i32).
                     let alloc_func = extern_funcs.get("js_object_alloc_fast")
                         .ok_or_else(|| anyhow!("js_object_alloc_fast not declared"))?;
                     let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
-                    let zero = builder.ins().iconst(types::I32, 0);
-                    let call = builder.ins().call(alloc_ref, &[zero]);
+                    let class_id = builder.ins().iconst(types::I32, 0);
+                    let field_count = builder.ins().iconst(types::I32, 0);
+                    let call = builder.ins().call(alloc_ref, &[class_id, field_count]);
                     Ok(builder.inst_results(call)[0])
                 }
             } else {
-                // Unknown class — return a non-null marker (empty object)
+                // Unknown class — return a non-null marker (empty object).
+                // js_object_alloc_fast takes (class_id: i32, field_count: i32).
                 let alloc_func = extern_funcs.get("js_object_alloc_fast")
                     .ok_or_else(|| anyhow!("js_object_alloc_fast not declared"))?;
                 let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
-                let zero = builder.ins().iconst(types::I32, 0);
-                let call = builder.ins().call(alloc_ref, &[zero]);
+                let class_id = builder.ins().iconst(types::I32, 0);
+                let field_count = builder.ins().iconst(types::I32, 0);
+                let call = builder.ins().call(alloc_ref, &[class_id, field_count]);
                 Ok(builder.inst_results(call)[0])
             }
         }

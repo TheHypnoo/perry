@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.61
+**Current Version:** 0.4.62
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.62
+- feat: JWT `keyid`/`kid` header support + JSON-string payload passthrough — `js_jwt_sign` / `js_jwt_sign_es256` / `js_jwt_sign_rs256` now take an optional 4th `kid_ptr: *const StringHeader` arg threaded into `Header.kid` via `sign_common`. Codegen extracts `keyid` (alias `kid`) from a literal options object in `expr.rs` and passes the resolved StringHeader pointer (or 0). Also fixes a long-standing payload bug: when `args[0]` is `Expr::JsonStringify(_)`, `Expr::String(_)`, or a string-typed `LocalGet` (e.g. `jwt.sign(JSON.stringify({...}), pem, opts)`), the StringHeader is forwarded directly via `js_get_string_pointer_unified` instead of being re-stringified by `js_json_stringify` (which silently produced `{}` for string inputs). Verified end-to-end: a Perry-signed `{ alg: ES256, kid }` token validates in Node `jsonwebtoken.verify` against the EC public key. Unblocks APNs provider tokens.
 
 ### v0.4.61
 - feat: `--minimal-stdlib` rebuilds perry-stdlib with only the Cargo features the project's imports actually need — collects native module specifiers into a new `CompilationContext.native_module_imports` set, maps each via `commands/stdlib_features.rs` (e.g. `mysql2`→`database-mysql`, `fastify`→`http-server`, `mongodb`→`database-mongodb`, `crypto`→`crypto`, fetch usage→`http-client`), then `cargo build --release -p perry-stdlib --no-default-features --features <list>` into `target/perry-stdlib-minimal/`. Both the symbol-stub scan and the link path now share one `stdlib_lib_resolved` so they see the same archive. Falls back to the prebuilt full stdlib if cargo isn't on PATH, the Perry workspace source isn't on disk, or the rebuild fails — never breaks the user's compile. Measured 4.2 MB → 3.4 MB (19% smaller) on a fetch-only program; the stdlib archive itself drops from 191 MB to 56 MB for `http-client` only and 34 MB for no optional features.
