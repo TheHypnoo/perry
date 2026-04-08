@@ -6673,6 +6673,37 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             comparator: Box::new(args.into_iter().next().unwrap()),
                                         });
                                     }
+                                    // .slice() exists on both Array and String, so we can only safely
+                                    // lower to ArraySlice when the receiver is definitely an
+                                    // array-producing expression (matches the indexOf/includes pattern
+                                    // below). Without this, `arr.sort(cb).slice(0, 5)` falls through to
+                                    // generic dynamic dispatch which corrupts the result — the inner
+                                    // ArraySort returns a real array pointer but the outer .slice goes
+                                    // through `js_native_call_method` which can't unwrap it properly,
+                                    // producing an "object" with the right .length but Array.isArray
+                                    // returns false and JSON.stringify segfaults.
+                                    "slice" if args.len() >= 1 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        if matches!(&array_expr,
+                                            Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } |
+                                            Expr::ArraySlice { .. } | Expr::Array(_) | Expr::ArraySpread(_) |
+                                            Expr::ArrayFrom(_) | Expr::ArrayFromMapped { .. } |
+                                            Expr::ArrayFlat { .. } | Expr::StringSplit(_, _) |
+                                            Expr::ArrayToReversed { .. } | Expr::ArrayToSorted { .. } |
+                                            Expr::ArrayToSpliced { .. } | Expr::ArrayWith { .. } |
+                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_) | Expr::ObjectEntries(_)
+                                        ) {
+                                            let mut args_iter = args.into_iter();
+                                            let start = args_iter.next().unwrap();
+                                            let end = args_iter.next();
+                                            return Ok(Expr::ArraySlice {
+                                                array: Box::new(array_expr),
+                                                start: Box::new(start),
+                                                end: end.map(Box::new),
+                                            });
+                                        }
+                                        // Fall through to generic Call handling (could be a String.slice).
+                                    }
                                     // .join() is exclusively an Array method (strings don't have it),
                                     // so we can always safely lower to ArrayJoin regardless of the
                                     // receiver expression type. Previously this only matched specific
