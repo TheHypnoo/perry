@@ -1007,6 +1007,66 @@ fn collect_closures_in_expr(
                 walk(init, seen, out);
             }
         }
+        Expr::ArraySort { array, comparator } => {
+            walk(array, seen, out);
+            walk(comparator, seen, out);
+        }
+        Expr::QueueMicrotask(cb) | Expr::ProcessNextTick(cb) => {
+            walk(cb, seen, out);
+        }
+        Expr::Sequence(es) => {
+            for e in es {
+                walk(e, seen, out);
+            }
+        }
+        Expr::Delete(o) => walk(o, seen, out),
+        Expr::ObjectSpread { parts } => {
+            for (_, e) in parts {
+                walk(e, seen, out);
+            }
+        }
+        Expr::SetNewFromArray(arr) => walk(arr, seen, out),
+        Expr::StaticMethodCall { args, .. } | Expr::SuperMethodCall { args, .. } => {
+            for a in args {
+                walk(a, seen, out);
+            }
+        }
+        Expr::SuperCall(args) => {
+            for a in args {
+                walk(a, seen, out);
+            }
+        }
+        Expr::ArrayFrom(o) | Expr::Uint8ArrayFrom(o) => walk(o, seen, out),
+        Expr::ArrayFromMapped { iterable, map_fn } => {
+            walk(iterable, seen, out);
+            walk(map_fn, seen, out);
+        }
+        Expr::FsExistsSync(p) | Expr::FsReadFileBinary(p) | Expr::FsUnlinkSync(p) => walk(p, seen, out),
+        Expr::ParseInt { string, radix } => {
+            walk(string, seen, out);
+            if let Some(r) = radix {
+                walk(r, seen, out);
+            }
+        }
+        Expr::PathJoin(a, b) => {
+            walk(a, seen, out);
+            walk(b, seen, out);
+        }
+        Expr::ObjectValues(o) | Expr::ObjectEntries(o) => walk(o, seen, out),
+        Expr::RegExpTest { regex, string } | Expr::RegExpExec { regex, string } => {
+            walk(regex, seen, out);
+            walk(string, seen, out);
+        }
+        Expr::Await(o) => walk(o, seen, out),
+        Expr::ObjectRest { object, .. } => walk(object, seen, out),
+        Expr::StaticFieldSet { value, .. } => walk(value, seen, out),
+        Expr::ArraySlice { array, start, end } => {
+            walk(array, seen, out);
+            walk(start, seen, out);
+            if let Some(e) = end {
+                walk(e, seen, out);
+            }
+        }
         Expr::ArrayJoin { array, separator } => {
             walk(array, seen, out);
             if let Some(sep) = separator {

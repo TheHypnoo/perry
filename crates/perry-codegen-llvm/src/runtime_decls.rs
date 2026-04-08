@@ -196,6 +196,22 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_object_values", I64, &[I64]);
     module.declare_function("js_object_entries", I64, &[I64]);
     module.declare_function("js_path_join", I64, &[I64, I64]);
+    module.declare_function("js_path_dirname", I64, &[I64]);
+    module.declare_function("js_path_relative", I64, &[I64, I64]);
+    module.declare_function("js_object_from_entries", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_string_match", I64, &[I64, I64]);
+    module.declare_function("llvm.log.f64", DOUBLE, &[DOUBLE]);
+    module.declare_function("llvm.log2.f64", DOUBLE, &[DOUBLE]);
+    module.declare_function("llvm.log10.f64", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_path_basename", I64, &[I64]);
+    module.declare_function("js_json_parse", DOUBLE, &[I64]);
+    module.declare_function("js_date_new", DOUBLE, &[]);
+    module.declare_function("js_number_is_integer", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_object_is", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_array_find", DOUBLE, &[I64, I64]);
+    module.declare_function("js_array_findIndex", I32, &[I64, I64]);
+    module.declare_function("js_array_find_last", DOUBLE, &[I64, I64]);
+    module.declare_function("js_array_find_last_index", I32, &[I64, I64]);
 
     declare_phase_b_arrays(module);
 }
