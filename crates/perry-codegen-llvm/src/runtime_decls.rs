@@ -94,6 +94,7 @@ pub fn declare_phase_b_arrays(module: &mut LlModule) {
     module.declare_function("js_array_alloc", I64, &[I32]);
     module.declare_function("js_array_push_f64", I64, &[I64, DOUBLE]);
     module.declare_function("js_array_get_f64", DOUBLE, &[I64, I32]);
+    module.declare_function("js_array_set_f64", VOID, &[I64, I32, DOUBLE]);
     module.declare_function("js_array_length", I32, &[I64]);
 
     declare_phase_b_objects(module);

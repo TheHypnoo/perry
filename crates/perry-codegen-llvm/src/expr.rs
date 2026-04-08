@@ -245,6 +245,50 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(blk.sitofp(I32, &len_i32, DOUBLE))
         }
 
+        // `arr[i] = v` — typed-Number array element write.
+        Expr::IndexSet { object, index, value } => {
+            if !is_array_expr(ctx, object) {
+                bail!(
+                    "perry-codegen-llvm Phase B.5: IndexSet receiver must be a known array (got {})",
+                    variant_name(object)
+                );
+            }
+            let arr_box = lower_expr(ctx, object)?;
+            let idx_double = lower_expr(ctx, index)?;
+            let val_double = lower_expr(ctx, value)?;
+            let blk = ctx.block();
+            let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+            let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+            let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
+            blk.call_void(
+                "js_array_set_f64",
+                &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
+            );
+            // Assignment expressions evaluate to the assigned value.
+            Ok(val_double)
+        }
+
+        // `obj.field = v` — generic object field write.
+        Expr::PropertySet { object, property, value } => {
+            let obj_box = lower_expr(ctx, object)?;
+            let val_double = lower_expr(ctx, value)?;
+            // Intern the field name in the StringPool (same one the
+            // matching getter uses, so they share the global string).
+            let key_idx = ctx.strings.intern(property);
+            let key_handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
+            let blk = ctx.block();
+            let obj_bits = blk.bitcast_double_to_i64(&obj_box);
+            let obj_handle = blk.and(I64, &obj_bits, POINTER_MASK_I64);
+            let key_box = blk.load(DOUBLE, &key_handle_global);
+            let key_bits = blk.bitcast_double_to_i64(&key_box);
+            let key_raw = blk.and(I64, &key_bits, POINTER_MASK_I64);
+            blk.call_void(
+                "js_object_set_field_by_name",
+                &[(I64, &obj_handle), (I64, &key_raw), (DOUBLE, &val_double)],
+            );
+            Ok(val_double)
+        }
+
         // `obj.field` — generic object field read. We get the key string
         // handle from the StringPool (interned, so the same key across
         // multiple sites shares one allocation), unbox both the object
