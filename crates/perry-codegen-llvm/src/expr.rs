@@ -85,6 +85,11 @@ pub(crate) struct FnCtx<'a> {
     /// find the parent class's constructor to inline. Same depth as
     /// `this_stack` (one entry per nested `new`).
     pub class_stack: Vec<String>,
+    /// Method registry: `(class_name, method_name) → LLVM function name`.
+    /// Built by `compile_module` from `hir.classes[*].methods`. Used by
+    /// `lower_call` to dispatch `obj.method(args)` to the right
+    /// `perry_method_<class>_<name>` function.
+    pub methods: &'a std::collections::HashMap<(String, String), String>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -689,18 +694,33 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
         return Ok(ctx.block().call(DOUBLE, &fname, &arg_slices));
     }
 
-    // String/array method dispatch (Phase B.12).
-    // For PropertyGet receivers that are statically known to be strings or
-    // arrays, route to the appropriate runtime function. This is the
-    // generic version of the special-case `arr.length` / `str.length`
-    // arms — those handle the inline-load fast path; the general method
-    // dispatch handles everything else.
+    // String/array method dispatch (Phase B.12) and class method
+    // dispatch (Phase C.2). For PropertyGet receivers, dispatch based
+    // on the receiver's static type.
     if let Expr::PropertyGet { object, property } = callee {
         if is_string_expr(ctx, object) {
             return lower_string_method(ctx, object, property, args);
         }
         if is_array_expr(ctx, object) {
             return lower_array_method(ctx, object, property, args);
+        }
+        // Class instance method call. The receiver's static type is
+        // `Type::Named(<class>)` for typed instances. We look up the
+        // method in the registry and emit a direct call to the
+        // `perry_method_<class>_<name>` function.
+        if let Some(class_name) = receiver_class_name(ctx, object) {
+            let method_key = (class_name.clone(), property.clone());
+            if let Some(fn_name) = ctx.methods.get(&method_key).cloned() {
+                let recv_box = lower_expr(ctx, object)?;
+                let mut lowered_args: Vec<String> = Vec::with_capacity(args.len() + 1);
+                lowered_args.push(recv_box);
+                for a in args {
+                    lowered_args.push(lower_expr(ctx, a)?);
+                }
+                let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+                    lowered_args.iter().map(|s| (DOUBLE, s.as_str())).collect();
+                return Ok(ctx.block().call(DOUBLE, &fn_name, &arg_slices));
+            }
         }
     }
 
@@ -1264,6 +1284,23 @@ fn lower_logical(
     Ok(ctx
         .block()
         .phi(DOUBLE, &[(&l, &l_block_label), (&r, &r_block_label)]))
+}
+
+/// If the expression is a known instance of a Named class type, return
+/// the class name. Used by the class method dispatch in lower_call to
+/// pick the right `perry_method_<class>_<name>` function.
+fn receiver_class_name(ctx: &FnCtx<'_>, e: &Expr) -> Option<String> {
+    match e {
+        Expr::LocalGet(id) => match ctx.local_types.get(id)? {
+            HirType::Named(name) => Some(name.clone()),
+            _ => None,
+        },
+        // `this` inside a constructor or method body — the class name is
+        // at the top of class_stack (for inlined constructors) or comes
+        // from the enclosing method's owning class.
+        Expr::This => ctx.class_stack.last().cloned(),
+        _ => None,
+    }
 }
 
 /// Statically determine whether an expression is an array. Used for

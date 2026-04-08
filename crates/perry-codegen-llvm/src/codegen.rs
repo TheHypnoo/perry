@@ -82,20 +82,13 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             hir.imports.len()
         ));
     }
-    // Phase C.1: classes are supported (data classes + simple
-    // constructors). Inheritance lands in Phase C.3. Methods are
-    // ALLOWED to exist on classes — Perry's HIR lowering inlines
-    // many simple methods at use sites, so the codegen may never
-    // see a method *call*. If a real method dispatch shows up, the
-    // expression-level codegen errors at that specific call site.
-    for c in &hir.classes {
-        if c.extends.is_some() || c.extends_name.is_some() {
-            return Err(anyhow!(
-                "perry-codegen-llvm Phase C.1: class '{}' uses inheritance (Phase C.3)",
-                c.name
-            ));
-        }
-    }
+    // Phase C.2: classes (and inheritance!) are supported. Perry's HIR
+    // lowering aggressively pre-resolves both methods and super calls
+    // into inline statements at the constructor/method body, so the
+    // LLVM codegen mostly sees a flat object-allocation + field-set
+    // pattern. We let everything through and let the expression-level
+    // codegen error at any specific construct it doesn't know how to
+    // handle.
 
     // Module-wide string literal pool. Owned by the codegen so that
     // `compile_function` and `compile_main` can take split borrows of
@@ -111,6 +104,23 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         .map(|c| (c.name.clone(), c))
         .collect();
 
+    // Method registry: (class_name, method_name) → LLVM function name.
+    // Built from `class.methods` so the dispatch in `lower_call` knows
+    // which mangled function name to call for `obj.method(args)`.
+    let method_names: HashMap<(String, String), String> = hir
+        .classes
+        .iter()
+        .flat_map(|c| {
+            c.methods
+                .iter()
+                .map(move |m| {
+                    let key = (c.name.clone(), m.name.clone());
+                    let val = format!("perry_method_{}_{}", sanitize(&c.name), sanitize(&m.name));
+                    (key, val)
+                })
+        })
+        .collect();
+
     // Resolve user function names up-front so body lowering can emit
     // forward/recursive calls without worrying about emission order.
     let mut func_names: HashMap<u32, String> = HashMap::new();
@@ -120,13 +130,23 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 
     // Lower each user function into the module.
     for f in &hir.functions {
-        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table)
+        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names)
             .with_context(|| format!("lowering function '{}'", f.name))?;
+    }
+
+    // Lower each class method as `perry_method_<class>_<name>(this_box,
+    // arg0, arg1, ...) -> double`. Methods are emitted as standalone
+    // LLVM functions; the dispatch in `lower_call` calls them directly.
+    for class in &hir.classes {
+        for method in &class.methods {
+            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names)
+                .with_context(|| format!("lowering method '{}::{}'", class.name, method.name))?;
+        }
     }
 
     // Emit `int main()` that bootstraps GC, runs the string-pool init,
     // then runs init statements.
-    compile_main(&mut llmod, hir, &func_names, &mut strings, &class_table)
+    compile_main(&mut llmod, hir, &func_names, &mut strings, &class_table, &method_names)
         .with_context(|| format!("lowering main of module '{}'", hir.name))?;
 
     // After all user code is lowered, the string pool's contents are final.
@@ -153,6 +173,7 @@ fn compile_function(
     func_names: &HashMap<u32, String>,
     strings: &mut StringPool,
     classes: &HashMap<String, &perry_hir::Class>,
+    methods: &HashMap<(String, String), String>,
 ) -> Result<()> {
     let llvm_name = func_names
         .get(&f.id)
@@ -203,6 +224,8 @@ fn compile_function(
         loop_targets: Vec::new(),
         classes,
         this_stack: Vec::new(),
+        class_stack: Vec::new(),
+        methods,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -210,6 +233,85 @@ fn compile_function(
     // Defensive: a well-typed numeric function always returns via an
     // explicit `return`, but we emit `ret double 0.0` as a fallback so
     // the LLVM verifier doesn't reject a missing terminator.
+    if !ctx.block().is_terminated() {
+        ctx.block().ret(DOUBLE, "0.0");
+    }
+    Ok(())
+}
+
+/// Compile a class instance method as a top-level LLVM function with the
+/// signature `perry_method_<class>_<name>(this_box: double, args: double…)
+/// -> double`. The first parameter (`this`) is stored in a slot whose
+/// pointer is pushed onto `this_stack`, then `class_stack` is set so
+/// inner `Expr::This` and `super` work correctly.
+fn compile_method(
+    llmod: &mut LlModule,
+    class: &perry_hir::Class,
+    method: &Function,
+    func_names: &HashMap<u32, String>,
+    strings: &mut StringPool,
+    classes: &HashMap<String, &perry_hir::Class>,
+    methods: &HashMap<(String, String), String>,
+) -> Result<()> {
+    let llvm_name = methods
+        .get(&(class.name.clone(), method.name.clone()))
+        .cloned()
+        .ok_or_else(|| {
+            anyhow!(
+                "method '{}::{}' missing from registry",
+                class.name,
+                method.name
+            )
+        })?;
+
+    // Build the param list: (this, arg0, arg1, ...). All are doubles.
+    let mut params: Vec<(LlvmType, String)> = Vec::with_capacity(method.params.len() + 1);
+    params.push((DOUBLE, "%this_arg".to_string()));
+    for p in &method.params {
+        params.push((DOUBLE, format!("%arg{}", p.id)));
+    }
+
+    let lf = llmod.define_function(&llvm_name, DOUBLE, params);
+    let _ = lf.create_block("entry");
+
+    // Allocate slots for `this` and each parameter; pre-populate with
+    // the incoming values.
+    let (this_slot, locals): (String, HashMap<u32, String>) = {
+        let blk = lf.block_mut(0).unwrap();
+        let this_slot = blk.alloca(DOUBLE);
+        blk.store(DOUBLE, "%this_arg", &this_slot);
+        let mut map = HashMap::new();
+        for p in &method.params {
+            let slot = blk.alloca(DOUBLE);
+            blk.store(DOUBLE, &format!("%arg{}", p.id), &slot);
+            map.insert(p.id, slot);
+        }
+        (this_slot, map)
+    };
+
+    let local_types: HashMap<u32, perry_types::Type> = method
+        .params
+        .iter()
+        .map(|p| (p.id, p.ty.clone()))
+        .collect();
+
+    let mut ctx = FnCtx {
+        func: lf,
+        locals,
+        local_types,
+        current_block: 0,
+        func_names,
+        strings,
+        loop_targets: Vec::new(),
+        classes,
+        this_stack: vec![this_slot],
+        class_stack: vec![class.name.clone()],
+        methods,
+    };
+
+    stmt::lower_stmts(&mut ctx, &method.body)
+        .with_context(|| format!("lowering body of method '{}::{}'", class.name, method.name))?;
+
     if !ctx.block().is_terminated() {
         ctx.block().ret(DOUBLE, "0.0");
     }
@@ -229,6 +331,7 @@ fn compile_main(
     func_names: &HashMap<u32, String>,
     strings: &mut StringPool,
     classes: &HashMap<String, &perry_hir::Class>,
+    methods: &HashMap<(String, String), String>,
 ) -> Result<()> {
     let main = llmod.define_function("main", I32, vec![]);
     let _ = main.create_block("entry");
@@ -252,6 +355,8 @@ fn compile_main(
         loop_targets: Vec::new(),
         classes,
         this_stack: Vec::new(),
+        class_stack: Vec::new(),
+        methods,
     };
     stmt::lower_stmts(&mut ctx, &hir.init)
         .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
@@ -324,11 +429,15 @@ fn emit_string_pool(llmod: &mut LlModule, strings: &StringPool) {
 /// `main`, `js_console_log_*`, or the C stdlib. Non-alphanumeric characters
 /// are replaced with underscores because LLVM symbol names are restrictive.
 fn llvm_fn_name(hir_name: &str) -> String {
-    let sanitized: String = hir_name
-        .chars()
+    format!("perry_fn_{}", sanitize(hir_name))
+}
+
+/// Sanitize a name for use in an LLVM symbol — replace anything that isn't
+/// `[A-Za-z0-9_]` with an underscore.
+fn sanitize(name: &str) -> String {
+    name.chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
-        .collect();
-    format!("perry_fn_{}", sanitized)
+        .collect()
 }
 
 /// Host default triple.
