@@ -2910,9 +2910,26 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
         // `Type::Named(<class>)` for typed instances. We look up the
         // method in the registry and emit a direct call to the
         // `perry_method_<class>_<name>` function.
+        //
+        // For inherited methods, walk the parent chain — `dog.speak()`
+        // where `class Dog extends Animal` and only Animal defines
+        // `speak` should dispatch to `perry_method_<modprefix>__Animal__speak`.
         if let Some(class_name) = receiver_class_name(ctx, object) {
-            let method_key = (class_name.clone(), property.clone());
-            if let Some(fn_name) = ctx.methods.get(&method_key).cloned() {
+            // Try direct lookup, then walk parent chain.
+            let mut resolved_fn: Option<String> = None;
+            let mut current_class = Some(class_name.clone());
+            while let Some(cur) = current_class {
+                let key = (cur.clone(), property.clone());
+                if let Some(fname) = ctx.methods.get(&key).cloned() {
+                    resolved_fn = Some(fname);
+                    break;
+                }
+                current_class = ctx
+                    .classes
+                    .get(&cur)
+                    .and_then(|c| c.extends_name.clone());
+            }
+            if let Some(fn_name) = resolved_fn {
                 let recv_box = lower_expr(ctx, object)?;
                 let mut lowered_args: Vec<String> = Vec::with_capacity(args.len() + 1);
                 lowered_args.push(recv_box);
