@@ -612,10 +612,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::Compare { op, left, right } => {
             // Boolean equality fast path: NaN-tagged TAG_TRUE/FALSE
             // bits don't compare correctly with fcmp. For
-            // ===/!== where both sides are boolean, compare the
-            // raw i64 bits via icmp.
-            let both_bool = is_bool_expr(ctx, left) && is_bool_expr(ctx, right);
-            if both_bool && matches!(op, CompareOp::Eq | CompareOp::LooseEq | CompareOp::Ne | CompareOp::LooseNe) {
+            // ===/!== where EITHER side is statically boolean, compare
+            // the raw i64 bits via icmp. icmp on bits also works for
+            // any other NaN-tagged value (string ptr, object ptr) when
+            // the bool literal is on one side — TAG_TRUE bits never
+            // match a string/pointer, so the result is correctly false.
+            let either_bool = is_bool_expr(ctx, left) || is_bool_expr(ctx, right);
+            if either_bool && matches!(op, CompareOp::Eq | CompareOp::LooseEq | CompareOp::Ne | CompareOp::LooseNe) {
                 let l = lower_expr(ctx, left)?;
                 let r = lower_expr(ctx, right)?;
                 let blk = ctx.block();
@@ -2952,8 +2955,25 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let err_handle = blk.call(I64, "js_error_new_with_message", &[(I64, &msg_handle)]);
             Ok(nanbox_pointer_inline(blk, &err_handle))
         }
-        Expr::EnvGet(_name) => Ok(double_literal(0.0)),
-        Expr::EnvGetDynamic(_e) => Ok(double_literal(0.0)),
+        Expr::EnvGet(name) => {
+            // process.env.HOME -> js_getenv("HOME") -> string handle
+            let key_idx = ctx.strings.intern(name);
+            let key_handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
+            let blk = ctx.block();
+            let key_box = blk.load(DOUBLE, &key_handle_global);
+            let key_handle = unbox_to_i64(blk, &key_box);
+            let result = blk.call(I64, "js_getenv", &[(I64, &key_handle)]);
+            // Returns null pointer if env var doesn't exist; nanbox as
+            // string (or null) and let downstream handle it.
+            Ok(nanbox_string_inline(blk, &result))
+        }
+        Expr::EnvGetDynamic(name_expr) => {
+            let key_box = lower_expr(ctx, name_expr)?;
+            let blk = ctx.block();
+            let key_handle = unbox_to_i64(blk, &key_box);
+            let result = blk.call(I64, "js_getenv", &[(I64, &key_handle)]);
+            Ok(nanbox_string_inline(blk, &result))
+        }
         Expr::DateToISOString(_d) => Ok(double_literal(0.0)),
         Expr::DateParse(_s) => Ok(double_literal(0.0)),
         Expr::ProcessVersions => Ok(double_literal(0.0)),
@@ -4057,6 +4077,15 @@ fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
         Expr::String(_) => true,
         Expr::LocalGet(id) => matches!(ctx.local_types.get(id), Some(HirType::String)),
+        // Enum string members lower to string literals at the use
+        // site, so a comparison like `c === Color.Red` should fire
+        // the string equality fast path.
+        Expr::EnumMember { enum_name, member_name } => {
+            matches!(
+                ctx.enums.get(&(enum_name.clone(), member_name.clone())),
+                Some(perry_hir::EnumValue::String(_))
+            )
+        }
         Expr::Binary { op: BinaryOp::Add, left, right } => {
             is_string_expr(ctx, left) || is_string_expr(ctx, right)
         }
@@ -4072,14 +4101,27 @@ fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         | Expr::PathExtname(_)
         | Expr::PathResolve(_)
         | Expr::PathNormalize(_) => true,
-        // `obj.toString()` always returns a string. Recognize the
-        // call shape so chained concat detects it.
-        Expr::Call { callee, args, .. }
-            if args.is_empty()
-                && matches!(
-                    callee.as_ref(),
-                    Expr::PropertyGet { property, .. } if property == "toString"
-                ) =>
+        // `obj.toString()` always returns a string. Same for the
+        // string-returning method family (trim, trimStart, trimEnd,
+        // toLowerCase, toUpperCase, slice, substring, charAt, repeat,
+        // replace, replaceAll, split's first elem, etc. — limited to
+        // unary methods on a string receiver). Recognize these so
+        // chained calls like `s.trimStart().trimEnd()` detect the
+        // inner result as a string.
+        Expr::Call { callee, .. }
+            if matches!(
+                callee.as_ref(),
+                Expr::PropertyGet { property, object } if matches!(
+                    property.as_str(),
+                    "toString" | "toLowerCase" | "toUpperCase" | "trim"
+                        | "trimStart" | "trimEnd" | "slice" | "substring"
+                        | "substr" | "charAt" | "repeat" | "replace"
+                        | "replaceAll" | "padStart" | "padEnd" | "concat"
+                ) && (
+                    is_string_expr(ctx, object)
+                        || matches!(property.as_str(), "toString")
+                )
+            ) =>
         {
             true
         }
@@ -4954,6 +4996,11 @@ fn receiver_class_name(ctx: &FnCtx<'_>, e: &Expr) -> Option<String> {
         // `new ClassName(...)` — the receiver class is the constructed class.
         // Lets `(new Config()).toString()` find Config's user toString.
         Expr::New { class_name, .. } => Some(class_name.clone()),
+        // `ClassName.staticMethod(...)` chains often return an instance
+        // of `ClassName` (factory pattern: `Color.red()`). Without type
+        // info on the static method's return, assume it's the same class
+        // so chained `.toString()` finds the user's toString.
+        Expr::StaticMethodCall { class_name, .. } => Some(class_name.clone()),
         // `this` inside a constructor or method body — the class name is
         // at the top of class_stack (for inlined constructors) or comes
         // from the enclosing method's owning class.

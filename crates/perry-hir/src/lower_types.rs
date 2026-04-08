@@ -523,8 +523,17 @@ pub(crate) fn extract_ts_type_with_ctx(ts_type: &ast::TsType, ctx: Option<&Lower
         // Import type: import("module").Type
         TsImportType(_) => Type::Any,
 
-        // Type operator: keyof T, readonly T, unique symbol
-        TsTypeOperator(_) => Type::Any,
+        // Type operator: keyof T, readonly T, unique symbol.
+        // For `readonly T` we just return the inner type (the readonly
+        // modifier is purely a type-system concept; runtime treatment is
+        // identical to T). keyof and unique symbol stay as Any.
+        TsTypeOperator(op) => {
+            use swc_ecma_ast::TsTypeOperatorOp;
+            match op.op {
+                TsTypeOperatorOp::ReadOnly => extract_ts_type_with_ctx(&op.type_ann, ctx),
+                _ => Type::Any,
+            }
+        }
 
         // Type literal: { a: T, b: U }
         TsTypeLit(lit) => {

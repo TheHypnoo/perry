@@ -516,8 +516,18 @@ fn lower_switch(
 
         if let Some(test_expr) = case.test.as_ref() {
             let cv = lower_expr(ctx, test_expr)?;
-            let cmp = ctx.block().fcmp("oeq", &dv, &cv);
-            ctx.block().cond_br(&cmp, &body_label, &next_label);
+            // fcmp on NaN-tagged string/pointer values is always
+            // false (NaN comparisons are unordered). For switch on
+            // strings or any value that might be NaN-tagged, compare
+            // the i64 bit patterns instead. This works for numbers
+            // too — equal doubles have equal bits except for ±0
+            // which the JS spec treats as equal anyway and Number(0)
+            // === Number(-0) is true.
+            let blk = ctx.block();
+            let dv_bits = blk.bitcast_double_to_i64(&dv);
+            let cv_bits = blk.bitcast_double_to_i64(&cv);
+            let cmp = blk.icmp_eq(crate::types::I64, &dv_bits, &cv_bits);
+            blk.cond_br(&cmp, &body_label, &next_label);
         } else {
             // Default case test block: unconditional jump to its body.
             ctx.block().br(&body_label);
