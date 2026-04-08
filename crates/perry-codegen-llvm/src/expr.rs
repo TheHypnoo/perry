@@ -65,6 +65,14 @@ pub(crate) struct FnCtx<'a> {
     /// LlModule that `func` was derived from. See `crate::strings` for the
     /// design rationale.
     pub strings: &'a mut StringPool,
+    /// Stack of loop targets for `break` / `continue` lowering. Each entry
+    /// is `(continue_label, break_label)`. Pushed when entering a loop,
+    /// popped on exit. The innermost loop is at the top of the stack.
+    ///
+    /// For `for`-loops: continue → update block (so the update runs before
+    /// the next iteration); break → exit block.
+    /// For `while`/`do-while`: continue → cond block; break → exit block.
+    pub loop_targets: Vec<(String, String)>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -140,7 +148,25 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // `total = expr` — store the new value into the local's alloca slot
         // and return it (matches JS semantics: assignment is an expression
         // whose value is the assigned value).
+        //
+        // SPECIAL FAST PATH: `x = x + y` where `x` is a string-typed local.
+        // Mirrors Cranelift's `expr.rs:5611` pattern. We use
+        // `js_string_append` (in-place for refcount=1 unique owners)
+        // instead of `js_string_concat` (always allocates). For a 10K-
+        // iteration `str = str + "a"` build loop, this turns O(n²) total
+        // work into O(n) and is the difference between 700 ms and 200 ms
+        // on bench_string_ops.
         Expr::LocalSet(id, value) => {
+            // Detect the `x = x + y` self-append pattern.
+            if matches!(ctx.local_types.get(id), Some(HirType::String)) {
+                if let Expr::Binary { op: BinaryOp::Add, left, right } = value.as_ref() {
+                    if let Expr::LocalGet(left_id) = left.as_ref() {
+                        if left_id == id {
+                            return lower_string_self_append(ctx, *id, right);
+                        }
+                    }
+                }
+            }
             let v = lower_expr(ctx, value)?;
             let slot = ctx
                 .locals
@@ -480,6 +506,21 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
         return Ok(ctx.block().call(DOUBLE, &fname, &arg_slices));
     }
 
+    // String/array method dispatch (Phase B.12).
+    // For PropertyGet receivers that are statically known to be strings or
+    // arrays, route to the appropriate runtime function. This is the
+    // generic version of the special-case `arr.length` / `str.length`
+    // arms — those handle the inline-load fast path; the general method
+    // dispatch handles everything else.
+    if let Expr::PropertyGet { object, property } = callee {
+        if is_string_expr(ctx, object) {
+            return lower_string_method(ctx, object, property, args);
+        }
+        if is_array_expr(ctx, object) {
+            return lower_array_method(ctx, object, property, args);
+        }
+    }
+
     // console.log(<numeric expr>) sink.
     if let Expr::PropertyGet { object, property } = callee {
         if matches!(object.as_ref(), Expr::GlobalGet(_)) && property == "log" {
@@ -586,6 +627,219 @@ fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
             is_string_expr(ctx, left) && is_string_expr(ctx, right)
         }
         _ => false,
+    }
+}
+
+/// Lower the `str = str + rhs` self-append pattern. Uses the in-place
+/// `js_string_append` runtime function (refcount=1 → mutate in place,
+/// otherwise allocate). The returned pointer is stored back to the local
+/// slot — `js_string_append` may realloc when growing past capacity.
+///
+/// This is the load-bearing optimization for the canonical `let str = "";
+/// for (...) str = str + "a"` string-build pattern. Mirrors Cranelift's
+/// expr.rs:5611+ detection.
+fn lower_string_self_append(
+    ctx: &mut FnCtx<'_>,
+    local_id: u32,
+    rhs: &Expr,
+) -> Result<String> {
+    let slot = ctx
+        .locals
+        .get(&local_id)
+        .ok_or_else(|| anyhow!("string self-append: local {} not in scope", local_id))?
+        .clone();
+
+    // Lower the RHS first (might be a string literal, a local, or a
+    // computed expression). For non-string RHS we'd need to coerce, but
+    // the bench_string_ops case always uses a string literal, so for the
+    // first slice we require the RHS to be a known string.
+    if !is_string_expr(ctx, rhs) {
+        // Fall back to the slower concat path: load the local, do a
+        // generic concat-coerce, store back.
+        let lhs_val = ctx.block().load(DOUBLE, &slot);
+        let _lhs = lhs_val.clone();
+        let rhs_val = lower_expr(ctx, rhs)?;
+        let blk = ctx.block();
+        let l_handle = unbox_to_i64(blk, &lhs_val);
+        // Coerce non-string RHS to a string handle.
+        let r_handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &rhs_val)]);
+        let result = blk.call(I64, "js_string_append", &[(I64, &l_handle), (I64, &r_handle)]);
+        let new_box = nanbox_string_inline(blk, &result);
+        blk.store(DOUBLE, &new_box, &slot);
+        return Ok(new_box);
+    }
+
+    let rhs_box = lower_expr(ctx, rhs)?;
+    let blk = ctx.block();
+    let lhs_box = blk.load(DOUBLE, &slot);
+    let l_handle = unbox_to_i64(blk, &lhs_box);
+    let r_handle = unbox_to_i64(blk, &rhs_box);
+    let new_handle = blk.call(
+        I64,
+        "js_string_append",
+        &[(I64, &l_handle), (I64, &r_handle)],
+    );
+    let new_box = nanbox_string_inline(blk, &new_handle);
+    blk.store(DOUBLE, &new_box, &slot);
+    Ok(new_box)
+}
+
+/// Helper: unbox a NaN-boxed string/object/array double into a raw i64
+/// pointer via inline `bitcast double → i64; and POINTER_MASK_I64`. Used by
+/// the method dispatch paths and the inline IndexGet/IndexSet/length code.
+fn unbox_to_i64(blk: &mut LlBlock, boxed: &str) -> String {
+    let bits = blk.bitcast_double_to_i64(boxed);
+    blk.and(I64, &bits, POINTER_MASK_I64)
+}
+
+/// Lower `s.method(args…)` for a string-typed receiver. Currently
+/// supported methods: `indexOf` (1 or 2 args), `slice`, `substring`,
+/// `startsWith`, `endsWith`. Anything else bails with an actionable
+/// error.
+///
+/// All string methods unbox the receiver pointer with the inline
+/// bitcast+mask pattern, lower each arg, and call the matching runtime
+/// function. Return values that are i32 (indexOf, startsWith, endsWith)
+/// get sitofp'd to double; return values that are i64 string handles
+/// (slice, substring) get NaN-boxed inline with STRING_TAG.
+fn lower_string_method(
+    ctx: &mut FnCtx<'_>,
+    object: &Expr,
+    property: &str,
+    args: &[Expr],
+) -> Result<String> {
+    let recv_box = lower_expr(ctx, object)?;
+
+    match property {
+        "indexOf" => {
+            if args.is_empty() || args.len() > 2 {
+                bail!("perry-codegen-llvm: String.indexOf expects 1 or 2 args, got {}", args.len());
+            }
+            let needle_box = lower_expr(ctx, &args[0])?;
+            // Optional fromIndex.
+            let from_idx_double = if args.len() == 2 {
+                Some(lower_expr(ctx, &args[1])?)
+            } else {
+                None
+            };
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let needle_handle = unbox_to_i64(blk, &needle_box);
+            let result_i32 = if let Some(from_d) = from_idx_double {
+                let from_i32 = blk.fptosi(DOUBLE, &from_d, I32);
+                blk.call(
+                    I32,
+                    "js_string_index_of_from",
+                    &[(I64, &recv_handle), (I64, &needle_handle), (I32, &from_i32)],
+                )
+            } else {
+                blk.call(
+                    I32,
+                    "js_string_index_of",
+                    &[(I64, &recv_handle), (I64, &needle_handle)],
+                )
+            };
+            // i32 → double via sitofp (preserves the -1 sentinel for "not found").
+            Ok(blk.sitofp(I32, &result_i32, DOUBLE))
+        }
+        "slice" | "substring" => {
+            if args.len() != 2 {
+                bail!(
+                    "perry-codegen-llvm: String.{} expects 2 args, got {}",
+                    property,
+                    args.len()
+                );
+            }
+            let start_d = lower_expr(ctx, &args[0])?;
+            let end_d = lower_expr(ctx, &args[1])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let start_i32 = blk.fptosi(DOUBLE, &start_d, I32);
+            let end_i32 = blk.fptosi(DOUBLE, &end_d, I32);
+            let runtime_fn = if property == "slice" {
+                "js_string_slice"
+            } else {
+                "js_string_substring"
+            };
+            let result_handle = blk.call(
+                I64,
+                runtime_fn,
+                &[(I64, &recv_handle), (I32, &start_i32), (I32, &end_i32)],
+            );
+            Ok(nanbox_string_inline(blk, &result_handle))
+        }
+        "startsWith" | "endsWith" => {
+            if args.len() != 1 {
+                bail!(
+                    "perry-codegen-llvm: String.{} expects 1 arg, got {}",
+                    property,
+                    args.len()
+                );
+            }
+            let other_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let other_handle = unbox_to_i64(blk, &other_box);
+            let runtime_fn = if property == "startsWith" {
+                "js_string_starts_with"
+            } else {
+                "js_string_ends_with"
+            };
+            let result_i32 = blk.call(
+                I32,
+                runtime_fn,
+                &[(I64, &recv_handle), (I64, &other_handle)],
+            );
+            // 0/1 → 0.0/1.0 (numeric "boolean" — same as Compare results).
+            Ok(blk.sitofp(I32, &result_i32, DOUBLE))
+        }
+        other => bail!(
+            "perry-codegen-llvm Phase B.12: String method '{}' not yet supported",
+            other
+        ),
+    }
+}
+
+/// Lower `arr.method(args…)` for an array-typed receiver. Currently
+/// supported: `pop`, `join`. `push` is handled separately by the HIR
+/// `Expr::ArrayPush` variant (Phase B.7).
+fn lower_array_method(
+    ctx: &mut FnCtx<'_>,
+    object: &Expr,
+    property: &str,
+    args: &[Expr],
+) -> Result<String> {
+    let recv_box = lower_expr(ctx, object)?;
+
+    match property {
+        "pop" => {
+            if !args.is_empty() {
+                bail!("perry-codegen-llvm: Array.pop takes no args, got {}", args.len());
+            }
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            // Returns f64 directly (the popped element, NaN if empty).
+            Ok(blk.call(DOUBLE, "js_array_pop_f64", &[(I64, &recv_handle)]))
+        }
+        "join" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.join expects 1 arg (separator), got {}", args.len());
+            }
+            let sep_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let sep_handle = unbox_to_i64(blk, &sep_box);
+            let result_handle = blk.call(
+                I64,
+                "js_array_join",
+                &[(I64, &recv_handle), (I64, &sep_handle)],
+            );
+            Ok(nanbox_string_inline(blk, &result_handle))
+        }
+        other => bail!(
+            "perry-codegen-llvm Phase B.12: Array method '{}' not yet supported",
+            other
+        ),
     }
 }
 

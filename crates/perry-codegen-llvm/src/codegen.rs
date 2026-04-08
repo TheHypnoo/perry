@@ -184,6 +184,7 @@ fn compile_function(
         current_block: 0,
         func_names,
         strings,
+        loop_targets: Vec::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -229,6 +230,7 @@ fn compile_main(
         current_block: 0,
         func_names,
         strings,
+        loop_targets: Vec::new(),
     };
     stmt::lower_stmts(&mut ctx, &hir.init)
         .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;

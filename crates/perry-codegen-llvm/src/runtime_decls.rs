@@ -78,6 +78,28 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // Cranelift uses (`crates/perry-runtime/src/value.rs:813`).
     module.declare_function("js_jsvalue_to_string", I64, &[DOUBLE]);
 
+    // In-place append for the `x = x + y` pattern. When `x` has
+    // refcount=1 (unique owner), the runtime mutates in-place and
+    // returns the same pointer; otherwise it allocates a new string.
+    // Either way the caller must use the returned pointer.
+    // (`crates/perry-runtime/src/string.rs:88`)
+    module.declare_function("js_string_append", I64, &[I64, I64]);
+
+    // String methods (Phase B.12).
+    // All take/return raw i64 string handles. Length args are i32.
+    // - js_string_index_of(haystack, needle) -> i32
+    // - js_string_index_of_from(haystack, needle, from) -> i32
+    // - js_string_slice(s, start, end) -> *mut StringHeader (i64)
+    // - js_string_substring(s, start, end) -> *mut StringHeader (i64)
+    // - js_string_starts_with(s, prefix) -> i32 (boolean as 0/1)
+    // - js_string_ends_with(s, suffix) -> i32
+    module.declare_function("js_string_index_of", I32, &[I64, I64]);
+    module.declare_function("js_string_index_of_from", I32, &[I64, I64, I32]);
+    module.declare_function("js_string_slice", I64, &[I64, I32, I32]);
+    module.declare_function("js_string_substring", I64, &[I64, I32, I32]);
+    module.declare_function("js_string_starts_with", I32, &[I64, I64]);
+    module.declare_function("js_string_ends_with", I32, &[I64, I64]);
+
     declare_phase_b_arrays(module);
 }
 
@@ -103,6 +125,12 @@ pub fn declare_phase_b_arrays(module: &mut LlModule) {
     // caller must write back to the local slot.
     module.declare_function("js_array_set_f64_extend", I64, &[I64, I32, DOUBLE]);
     module.declare_function("js_array_length", I32, &[I64]);
+
+    // Array methods (Phase B.12).
+    // - js_array_pop_f64(arr) -> f64    (last element, NaN if empty)
+    // - js_array_join(arr, sep) -> *mut StringHeader (i64)
+    module.declare_function("js_array_pop_f64", DOUBLE, &[I64]);
+    module.declare_function("js_array_join", I64, &[I64, I64]);
 
     declare_phase_b_objects(module);
 }

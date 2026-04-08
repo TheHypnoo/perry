@@ -81,8 +81,34 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
         // `do { body } while (cond)` — body runs at least once, then cond.
         Stmt::DoWhile { body, condition } => lower_do_while(ctx, body, condition),
 
+        // `break;` — branch to the innermost loop's exit block. The
+        // current block becomes terminated; subsequent statements in
+        // the same scope are dead code and `lower_stmts` skips them.
+        Stmt::Break => {
+            let break_label = ctx
+                .loop_targets
+                .last()
+                .map(|(_c, b)| b.clone())
+                .ok_or_else(|| anyhow!("break statement outside any loop"))?;
+            ctx.block().br(&break_label);
+            Ok(())
+        }
+
+        // `continue;` — branch to the innermost loop's continue target
+        // (which is the update block for `for`, the cond block for
+        // `while`/`do-while`).
+        Stmt::Continue => {
+            let cont_label = ctx
+                .loop_targets
+                .last()
+                .map(|(c, _b)| c.clone())
+                .ok_or_else(|| anyhow!("continue statement outside any loop"))?;
+            ctx.block().br(&cont_label);
+            Ok(())
+        }
+
         other => bail!(
-            "perry-codegen-llvm Phase B.8: Stmt {} not yet supported",
+            "perry-codegen-llvm Phase B.12: Stmt {} not yet supported",
             stmt_variant_name(other)
         ),
     }
@@ -145,10 +171,14 @@ fn lower_for(
         let i1 = lower_truthy(ctx, &cv, cond_expr);
         ctx.block().cond_br(&i1, &body_label, &exit_label);
     } else {
-        // `for (;;)` — unconditional jump into the body. Without break
-        // support this is an infinite loop, but the verifier accepts it.
+        // `for (;;)` — unconditional jump into the body. May be an
+        // infinite loop unless the body contains a `break`.
         ctx.block().br(&body_label);
     }
+
+    // Push break/continue targets so nested `break`/`continue` know where
+    // to jump. For for-loops, continue runs the update step.
+    ctx.loop_targets.push((update_label.clone(), exit_label.clone()));
 
     // Body block.
     ctx.current_block = body_idx;
@@ -165,6 +195,8 @@ fn lower_for(
     if !ctx.block().is_terminated() {
         ctx.block().br(&cond_label);
     }
+
+    ctx.loop_targets.pop();
 
     // Exit block — subsequent statements continue here.
     ctx.current_block = exit_idx;
@@ -204,11 +236,16 @@ fn lower_while(ctx: &mut FnCtx<'_>, condition: &perry_hir::Expr, body: &[Stmt]) 
     let i1 = lower_truthy(ctx, &cv, condition);
     ctx.block().cond_br(&i1, &body_label, &exit_label);
 
+    // For while-loops, continue jumps back to the cond block.
+    ctx.loop_targets.push((cond_label.clone(), exit_label.clone()));
+
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
     if !ctx.block().is_terminated() {
         ctx.block().br(&cond_label);
     }
+
+    ctx.loop_targets.pop();
 
     ctx.current_block = exit_idx;
     Ok(())
@@ -231,6 +268,10 @@ fn lower_do_while(
 
     ctx.block().br(&body_label);
 
+    // Push break/continue targets BEFORE compiling the body so nested
+    // break/continue see them.
+    ctx.loop_targets.push((cond_label.clone(), exit_label.clone()));
+
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
     if !ctx.block().is_terminated() {
@@ -241,6 +282,8 @@ fn lower_do_while(
     let cv = lower_expr(ctx, condition)?;
     let i1 = lower_truthy(ctx, &cv, condition);
     ctx.block().cond_br(&i1, &body_label, &exit_label);
+
+    ctx.loop_targets.pop();
 
     ctx.current_block = exit_idx;
     Ok(())
