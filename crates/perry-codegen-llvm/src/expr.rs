@@ -1967,9 +1967,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_number_is_integer", &[(DOUBLE, &v)]))
         }
 
-        // -------- Map.clear stub --------
+        // -------- Map.clear --------
         Expr::MapClear(map) => {
-            let _ = lower_expr(ctx, map)?;
+            let m_box = lower_expr(ctx, map)?;
+            let blk = ctx.block();
+            let m_handle = unbox_to_i64(blk, &m_box);
+            blk.call_void("js_map_clear", &[(I64, &m_handle)]);
             Ok(double_literal(0.0))
         }
 
