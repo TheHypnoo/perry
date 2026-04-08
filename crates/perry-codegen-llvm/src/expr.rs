@@ -2682,22 +2682,14 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             lower_expr(ctx, array)
         }
         Expr::ArrayAt { array, index } => {
-            // arr.at(i) — negative index counts from the end. We
-            // approximate by routing to IndexGet (no negative-index
-            // adjustment, but JS spec for non-negative indices is
-            // identical).
+            // arr.at(i) — negative index counts from the end. The
+            // runtime handles the negative-index adjustment +
+            // bounds clamp.
             let arr_box = lower_expr(ctx, array)?;
             let idx_d = lower_expr(ctx, index)?;
             let blk = ctx.block();
-            let arr_bits = blk.bitcast_double_to_i64(&arr_box);
-            let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
-            let idx_i32 = blk.fptosi(DOUBLE, &idx_d, I32);
-            let idx_i64 = blk.zext(I32, &idx_i32, I64);
-            let byte_offset = blk.shl(I64, &idx_i64, "3");
-            let with_header = blk.add(I64, &byte_offset, "8");
-            let element_addr = blk.add(I64, &arr_handle, &with_header);
-            let element_ptr = blk.inttoptr(I64, &element_addr);
-            Ok(blk.load(DOUBLE, &element_ptr))
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            Ok(blk.call(DOUBLE, "js_array_at", &[(I64, &arr_handle), (DOUBLE, &idx_d)]))
         }
         Expr::DateSetUtcMinutes { date, value }
         | Expr::DateSetUtcSeconds { date, value }
@@ -3261,6 +3253,21 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
     // dispatch (Phase C.2). For PropertyGet receivers, dispatch based
     // on the receiver's static type.
     if let Expr::PropertyGet { object, property } = callee {
+        // Number.prototype.toFixed(decimals) — call js_number_to_fixed.
+        // Receiver is any number-typed value; we don't gate on
+        // is_numeric_expr because tests often call it on Any locals.
+        if property == "toFixed"
+            && args.len() == 1
+            && !is_string_expr(ctx, object)
+            && !is_array_expr(ctx, object)
+        {
+            let v = lower_expr(ctx, object)?;
+            let dec = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let handle =
+                blk.call(I64, "js_number_to_fixed", &[(DOUBLE, &v), (DOUBLE, &dec)]);
+            return Ok(nanbox_string_inline(blk, &handle));
+        }
         // Universal `.toString()` — works for any JS value via the
         // runtime's js_jsvalue_to_string dispatch (numbers print as
         // their decimal form, strings as themselves, objects as
@@ -4341,17 +4348,20 @@ fn lower_string_method(
                     args.len()
                 );
             }
-            // String-only fast path (no regex / no callback). The
-            // runtime function takes (haystack, needle, replacement)
-            // and a 4th hidden arg in the regex form; the string form
-            // is plain 3-arg. Both are i64 string handles.
+            // First arg is either a string or a regex literal — pick
+            // the right runtime function. The regex form takes a
+            // RegExpHeader pointer; the string form takes a string
+            // handle. Both replacements are string handles.
+            let needle_is_regex = matches!(&args[0], Expr::RegExp { .. });
             let needle_box = lower_expr(ctx, &args[0])?;
             let repl_box = lower_expr(ctx, &args[1])?;
             let blk = ctx.block();
             let recv_handle = unbox_to_i64(blk, &recv_box);
             let needle_handle = unbox_to_i64(blk, &needle_box);
             let repl_handle = unbox_to_i64(blk, &repl_box);
-            let runtime_fn = if property == "replaceAll" {
+            let runtime_fn = if needle_is_regex {
+                "js_string_replace_regex"
+            } else if property == "replaceAll" {
                 "js_string_replace_all_string"
             } else {
                 "js_string_replace_string"
