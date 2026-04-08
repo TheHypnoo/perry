@@ -34,6 +34,15 @@ fn nanbox_pointer_inline(blk: &mut LlBlock, ptr_i64: &str) -> String {
     blk.bitcast_i64_to_double(&tagged)
 }
 
+/// Public re-export of `nanbox_pointer_inline` for use from
+/// `stmt.rs`'s async-return wrapping path. Same body as the private
+/// version above; we expose it rather than making the private one
+/// `pub(crate)` directly so the rest of the file's call sites stay
+/// using the short name.
+pub(crate) fn nanbox_pointer_inline_pub(blk: &mut LlBlock, ptr_i64: &str) -> String {
+    nanbox_pointer_inline(blk, ptr_i64)
+}
+
 /// Inline NaN-box of a raw string handle with `STRING_TAG`. Same rationale
 /// as `nanbox_pointer_inline` — string handles from `js_string_from_bytes`
 /// / `js_string_concat` are always non-null heap pointers, so the runtime
@@ -116,6 +125,10 @@ pub(crate) struct FnCtx<'a> {
     /// `compile_module` from `hir.enums`. Used by `Expr::EnumMember`
     /// to lower enum references to constants.
     pub enums: &'a std::collections::HashMap<(String, String), perry_hir::EnumValue>,
+    /// Whether the enclosing function is `async`. When true, every
+    /// `Stmt::Return(value)` wraps `value` in `js_promise_resolved`
+    /// before returning, so callers can `await` the result.
+    pub is_async_fn: bool,
 }
 
 impl<'a> FnCtx<'a> {
@@ -168,6 +181,15 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         | Expr::ObjectKeys(_) => Some(HirType::Array(Box::new(HirType::Any))),
         Expr::String(_) | Expr::ArrayJoin { .. } | Expr::StringCoerce(_) => {
             Some(HirType::String)
+        }
+        // Compare results are now NaN-boxed booleans (TAG_TRUE/FALSE).
+        // Type-refining the local as Boolean lets is_numeric_expr
+        // skip the fast path (which would emit fcmp/sitofp on a NaN
+        // bit pattern, giving wrong results) and routes printing
+        // through js_console_log_dynamic which dispatches on the
+        // NaN tag to print "true"/"false" instead of "1"/"0".
+        Expr::Compare { .. } | Expr::Bool(_) | Expr::Logical { .. } => {
+            Some(HirType::Boolean)
         }
         Expr::IndexGet { object, .. } => {
             // arr[i] where arr is Array<T> → element type T.
@@ -498,12 +520,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 UnaryOp::Neg => Ok(blk.fneg(&v)),
                 UnaryOp::Pos => Ok(v), // unary + is a no-op for numbers
                 UnaryOp::Not => {
-                    // !x: truthiness inverted. Use lower_truthy then xor with 1.
+                    // !x: truthiness inverted, then NaN-box as a JS
+                    // boolean (TAG_TRUE / TAG_FALSE) so console.log
+                    // prints "true" / "false" instead of 1 / 0.
                     let bit = lower_truthy(ctx, &v, operand);
                     let blk = ctx.block();
                     let inv = blk.xor(crate::types::I1, &bit, "true");
-                    let as_i64 = blk.zext(crate::types::I1, &inv, I64);
-                    Ok(blk.sitofp(I64, &as_i64, DOUBLE))
+                    let tagged_i64 = blk.select(
+                        crate::types::I1,
+                        &inv,
+                        I64,
+                        crate::nanbox::TAG_TRUE_I64,
+                        crate::nanbox::TAG_FALSE_I64,
+                    );
+                    Ok(blk.bitcast_i64_to_double(&tagged_i64))
                 }
                 UnaryOp::BitNot => {
                     // ~x: bitwise NOT after fptosi to i32, then sitofp back.
@@ -520,6 +550,34 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // round-trips through numeric contexts as 1.0 and "false" as 0.0,
         // which is what Perry's runtime expects from typed boolean returns.
         Expr::Compare { op, left, right } => {
+            // String equality fast path: fcmp doesn't work on
+            // NaN-tagged string pointers (NaN comparisons are
+            // unordered → always false). When both operands are
+            // statically strings, dispatch through js_string_equals.
+            let both_strings = is_string_expr(ctx, left) && is_string_expr(ctx, right);
+            if both_strings && matches!(op, CompareOp::Eq | CompareOp::LooseEq | CompareOp::Ne | CompareOp::LooseNe) {
+                let l = lower_expr(ctx, left)?;
+                let r = lower_expr(ctx, right)?;
+                let blk = ctx.block();
+                let l_handle = unbox_to_i64(blk, &l);
+                let r_handle = unbox_to_i64(blk, &r);
+                let i32_eq = blk.call(I32, "js_string_equals", &[(I64, &l_handle), (I64, &r_handle)]);
+                let bit = blk.icmp_ne(I32, &i32_eq, "0");
+                let bit_final = if matches!(op, CompareOp::Ne | CompareOp::LooseNe) {
+                    blk.xor(crate::types::I1, &bit, "true")
+                } else {
+                    bit
+                };
+                let tagged_i64 = blk.select(
+                    crate::types::I1,
+                    &bit_final,
+                    crate::types::I64,
+                    crate::nanbox::TAG_TRUE_I64,
+                    crate::nanbox::TAG_FALSE_I64,
+                );
+                return Ok(blk.bitcast_i64_to_double(&tagged_i64));
+            }
+
             let l = lower_expr(ctx, left)?;
             let r = lower_expr(ctx, right)?;
             let pred = match op {
@@ -535,8 +593,6 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // Result is a NaN-boxed boolean (TAG_TRUE / TAG_FALSE) so
             // downstream `console.log(x === y)` prints "true"/"false"
             // via the runtime's NaN-tag dispatch instead of "1"/"0".
-            // We compute via select on the i1 — picking between two
-            // pre-baked i64 constants — then bitcast to double.
             let tag_true_i64 = crate::nanbox::TAG_TRUE_I64;
             let tag_false_i64 = crate::nanbox::TAG_FALSE_I64;
             let tagged_i64 = blk.select(crate::types::I1, &bit, crate::types::I64, tag_true_i64, tag_false_i64);
@@ -2401,14 +2457,98 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
 
-        // -------- await stub (Phase E proper landing) --------
-        // Real async needs the runtime's microtask queue + a state-
-        // machine transform of the enclosing function. For now, an
-        // `await expr` lowers as just the expression — semantically
-        // wrong (it doesn't suspend), but for many tests the awaited
-        // value is already resolved (e.g. await Promise.resolve(42))
-        // so the immediate result is correct.
-        Expr::Await(operand) => lower_expr(ctx, operand),
+        // -------- Phase E: await with busy-wait loop --------
+        //
+        // Mirrors Cranelift's expr.rs:19436. The structure:
+        //
+        //   <current>:
+        //     %promise = unbox(<inner>)
+        //     br check
+        //   check:
+        //     %state = call js_promise_state(%promise)  ; 0=pending,1=fulfilled,2=rejected
+        //     %is_pending = icmp eq %state, 0
+        //     br i1 %is_pending, wait, settled
+        //   wait:
+        //     call js_promise_run_microtasks()
+        //     call js_stdlib_process_pending()
+        //     call js_sleep_ms(1.0)
+        //     br check
+        //   settled:
+        //     %state2 = call js_promise_state(%promise)
+        //     %is_rejected = icmp eq %state2, 2
+        //     br i1 %is_rejected, reject, done
+        //   reject:
+        //     %reason = call js_promise_reason(%promise)
+        //     call js_throw(%reason)  ; void; never returns
+        //     unreachable
+        //   done:
+        //     %value = call js_promise_value(%promise)
+        //
+        // Returns %value as a NaN-boxed double.
+        Expr::Await(operand) => {
+            let promise_box = lower_expr(ctx, operand)?;
+            let promise_handle = unbox_to_i64(ctx.block(), &promise_box);
+
+            // Pre-create blocks. We don't pass the promise as a block
+            // param because LLVM SSA tracks it via the entry name —
+            // unlike Cranelift's brif which needs explicit param flow.
+            let check_idx = ctx.new_block("await.check");
+            let wait_idx = ctx.new_block("await.wait");
+            let settled_idx = ctx.new_block("await.settled");
+            let reject_idx = ctx.new_block("await.reject");
+            let done_idx = ctx.new_block("await.done");
+
+            let check_label = ctx.block_label(check_idx);
+            let wait_label = ctx.block_label(wait_idx);
+            let settled_label = ctx.block_label(settled_idx);
+            let reject_label = ctx.block_label(reject_idx);
+            let done_label = ctx.block_label(done_idx);
+
+            // Branch into check.
+            ctx.block().br(&check_label);
+
+            // === check ===
+            ctx.current_block = check_idx;
+            let state = ctx
+                .block()
+                .call(I32, "js_promise_state", &[(I64, &promise_handle)]);
+            let is_pending = ctx.block().icmp_eq(I32, &state, "0");
+            ctx.block().cond_br(&is_pending, &wait_label, &settled_label);
+
+            // === wait ===
+            // Note: Cranelift also calls `js_stdlib_process_pending`
+            // here for mysql2/pg/etc. async resolutions, but that
+            // symbol gets dead-stripped from libperry_stdlib.a when
+            // no other caller in the runtime uses it. Until Phase J
+            // bitcode-link mode lands, drop the call. Pure-Promise
+            // tests still work because js_promise_run_microtasks is
+            // not stripped (it's called from the CLI event loop).
+            ctx.current_block = wait_idx;
+            ctx.block().call_void("js_promise_run_microtasks", &[]);
+            let one_ms = "1.0".to_string();
+            ctx.block().call_void("js_sleep_ms", &[(DOUBLE, &one_ms)]);
+            ctx.block().br(&check_label);
+
+            // === settled ===
+            ctx.current_block = settled_idx;
+            let state2 = ctx
+                .block()
+                .call(I32, "js_promise_state", &[(I64, &promise_handle)]);
+            let is_rejected = ctx.block().icmp_eq(I32, &state2, "2");
+            ctx.block().cond_br(&is_rejected, &reject_label, &done_label);
+
+            // === reject ===
+            ctx.current_block = reject_idx;
+            let reason = ctx
+                .block()
+                .call(DOUBLE, "js_promise_reason", &[(I64, &promise_handle)]);
+            ctx.block().call_void("js_throw", &[(DOUBLE, &reason)]);
+            ctx.block().unreachable();
+
+            // === done ===
+            ctx.current_block = done_idx;
+            Ok(ctx.block().call(DOUBLE, "js_promise_value", &[(I64, &promise_handle)]))
+        }
 
         // -------- StaticFieldGet/Set, NativeModuleRef stubs --------
         //
@@ -2806,6 +2946,57 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
                 ctx.block().call_void(runtime_fn, &[(DOUBLE, &v)]);
             }
             return Ok("0.0".to_string());
+        }
+    }
+
+    // -------- Promise.resolve / reject / all / race / allSettled --------
+    //
+    // The HIR doesn't have dedicated PromiseResolve/Reject variants —
+    // they appear as Call { callee: PropertyGet { GlobalGet(0), "resolve" } }.
+    // Following Cranelift's `expr.rs:9617` heuristic, we assume any
+    // GlobalGet receiver with a Promise-shaped property name is the
+    // Promise constructor. (This conflicts with `console.resolve` etc.
+    // — but those don't exist in JS.)
+    if let Expr::PropertyGet { object, property } = callee {
+        if matches!(object.as_ref(), Expr::GlobalGet(_)) {
+            match property.as_str() {
+                "resolve" => {
+                    let value = if args.is_empty() {
+                        double_literal(0.0)
+                    } else {
+                        lower_expr(ctx, &args[0])?
+                    };
+                    let blk = ctx.block();
+                    let handle = blk.call(I64, "js_promise_resolved", &[(DOUBLE, &value)]);
+                    return Ok(nanbox_pointer_inline(blk, &handle));
+                }
+                "reject" => {
+                    let reason = if args.is_empty() {
+                        double_literal(0.0)
+                    } else {
+                        lower_expr(ctx, &args[0])?
+                    };
+                    let blk = ctx.block();
+                    let handle = blk.call(I64, "js_promise_rejected", &[(DOUBLE, &reason)]);
+                    return Ok(nanbox_pointer_inline(blk, &handle));
+                }
+                "all" | "race" | "allSettled" => {
+                    if args.is_empty() {
+                        return Ok(double_literal(0.0));
+                    }
+                    let arr_box = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    let arr_handle = unbox_to_i64(blk, &arr_box);
+                    let runtime_fn = match property.as_str() {
+                        "all" => "js_promise_all",
+                        "race" => "js_promise_race",
+                        _ => "js_promise_all_settled",
+                    };
+                    let handle = blk.call(I64, runtime_fn, &[(I64, &arr_handle)]);
+                    return Ok(nanbox_pointer_inline(blk, &handle));
+                }
+                _ => {}
+            }
         }
     }
 

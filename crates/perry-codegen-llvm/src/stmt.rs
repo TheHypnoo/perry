@@ -36,14 +36,33 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
 
         Stmt::Return(Some(e)) => {
             let v = lower_expr(ctx, e)?;
-            ctx.block().ret(DOUBLE, &v);
+            // Phase E: async functions wrap their return value in
+            // js_promise_resolved so callers can await the result.
+            // If the value is already a promise (e.g. `return
+            // Promise.resolve(x)`), js_promise_resolved is a no-op
+            // wrap that the caller's await loop unwraps anyway.
+            let final_v = if ctx.is_async_fn {
+                let blk = ctx.block();
+                let handle = blk.call(crate::types::I64, "js_promise_resolved", &[(DOUBLE, &v)]);
+                crate::expr::nanbox_pointer_inline_pub(blk, &handle)
+            } else {
+                v
+            };
+            ctx.block().ret(DOUBLE, &final_v);
             Ok(())
         }
         Stmt::Return(None) => {
-            // Phase 2 functions all return double. A bare `return;` in a
-            // typed numeric function is unusual but we honor it by returning
-            // 0.0 rather than erroring.
-            ctx.block().ret(DOUBLE, "0.0");
+            // Bare `return;` returns undefined (encoded as 0.0). For
+            // async functions, wrap undefined in a resolved promise.
+            if ctx.is_async_fn {
+                let zero = "0.0".to_string();
+                let blk = ctx.block();
+                let handle = blk.call(crate::types::I64, "js_promise_resolved", &[(DOUBLE, &zero)]);
+                let boxed = crate::expr::nanbox_pointer_inline_pub(blk, &handle);
+                ctx.block().ret(DOUBLE, &boxed);
+            } else {
+                ctx.block().ret(DOUBLE, "0.0");
+            }
             Ok(())
         }
 

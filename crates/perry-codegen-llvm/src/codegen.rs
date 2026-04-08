@@ -428,15 +428,25 @@ fn compile_function(
         closure_captures: HashMap::new(),
         current_closure_ptr: None,
         enums,
+        is_async_fn: f.is_async,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
 
     // Defensive: a well-typed numeric function always returns via an
     // explicit `return`, but we emit `ret double 0.0` as a fallback so
-    // the LLVM verifier doesn't reject a missing terminator.
+    // the LLVM verifier doesn't reject a missing terminator. For
+    // async functions, the fallback also wraps in a resolved promise
+    // so callers can await the result.
     if !ctx.block().is_terminated() {
-        ctx.block().ret(DOUBLE, "0.0");
+        if f.is_async {
+            let zero = "0.0".to_string();
+            let handle = ctx.block().call(I64, "js_promise_resolved", &[(DOUBLE, &zero)]);
+            let boxed = crate::expr::nanbox_pointer_inline_pub(ctx.block(), &handle);
+            ctx.block().ret(DOUBLE, &boxed);
+        } else {
+            ctx.block().ret(DOUBLE, "0.0");
+        }
     }
     Ok(())
 }
@@ -586,6 +596,11 @@ fn compile_closure(
         closure_captures,
         current_closure_ptr: Some("%this_closure".to_string()),
         enums,
+        // Closures don't surface their is_async on the body in the
+        // same way functions do. The closure-creation site emits
+        // them as plain double-returning functions; we set false
+        // here to skip the wrap-in-promise behaviour.
+        is_async_fn: false,
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -673,6 +688,7 @@ fn compile_method(
         closure_captures: HashMap::new(),
         current_closure_ptr: None,
         enums,
+        is_async_fn: method.is_async,
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -756,6 +772,7 @@ fn compile_module_entry(
             closure_captures: HashMap::new(),
             current_closure_ptr: None,
             enums,
+            is_async_fn: false,
         };
         stmt::lower_stmts(&mut ctx, &hir.init)
             .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
@@ -794,6 +811,7 @@ fn compile_module_entry(
             closure_captures: HashMap::new(),
             current_closure_ptr: None,
             enums,
+            is_async_fn: false,
         };
         stmt::lower_stmts(&mut ctx, &hir.init)
             .with_context(|| format!("lowering init statements of non-entry module '{}'", hir.name))?;

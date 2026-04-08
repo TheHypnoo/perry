@@ -183,6 +183,7 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_string_repeat", I64, &[I64, I32]);
     module.declare_function("js_string_replace_string", I64, &[I64, I64, I64]);
     module.declare_function("js_string_replace_all_string", I64, &[I64, I64, I64]);
+    module.declare_function("js_string_equals", I32, &[I64, I64]);
     module.declare_function("js_parse_int", DOUBLE, &[I64, DOUBLE]);
     module.declare_function("js_parse_float", DOUBLE, &[I64]);
     module.declare_function("js_array_reduce", DOUBLE, &[I64, I64, I32, DOUBLE]);
@@ -217,6 +218,31 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_array_find_last_index", I32, &[I64, I64]);
     module.declare_function("js_array_some", DOUBLE, &[I64, I64]);
     module.declare_function("js_array_every", DOUBLE, &[I64, I64]);
+
+    // Phase E: async/await runtime support.
+    // Promise polling: state is 0=pending, 1=fulfilled, 2=rejected.
+    // The await busy-wait loop polls js_promise_state, calls
+    // js_promise_run_microtasks + js_sleep_ms while pending, then
+    // pulls the value via js_promise_value (or reason via
+    // js_promise_reason on rejection).
+    module.declare_function("js_promise_state", I32, &[I64]);
+    module.declare_function("js_promise_value", DOUBLE, &[I64]);
+    module.declare_function("js_promise_reason", DOUBLE, &[I64]);
+    module.declare_function("js_promise_run_microtasks", I32, &[]);
+    // js_stdlib_process_pending intentionally not declared — see
+    // the await-loop comment in expr.rs for the dead-strip rationale.
+    module.declare_function("js_sleep_ms", VOID, &[DOUBLE]);
+    module.declare_function("js_throw", VOID, &[DOUBLE]);
+    module.declare_function("js_await_any_promise", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_promise_new", I64, &[]);
+    module.declare_function("js_promise_resolve", VOID, &[I64, DOUBLE]);
+    module.declare_function("js_promise_reject", VOID, &[I64, DOUBLE]);
+    module.declare_function("js_promise_resolved", I64, &[DOUBLE]);
+    module.declare_function("js_promise_rejected", I64, &[DOUBLE]);
+    module.declare_function("js_promise_then", I64, &[I64, I64, I64]);
+    module.declare_function("js_promise_all", I64, &[I64]);
+    module.declare_function("js_promise_race", I64, &[I64]);
+    module.declare_function("js_promise_all_settled", I64, &[I64]);
     module.declare_function("js_array_unshift_f64", I64, &[I64, DOUBLE]);
     module.declare_function("js_array_entries", I64, &[I64]);
     module.declare_function("js_array_keys", I64, &[I64]);
