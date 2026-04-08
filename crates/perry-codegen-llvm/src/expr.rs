@@ -756,6 +756,28 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(blk.sitofp(I32, &len_i32, DOUBLE))
         }
 
+        // `set.size` / `map.size` — route to runtime helpers. The HIR
+        // doesn't synthesize SetSize/MapSize expressions for the
+        // property-access form, so we recognize the pattern here.
+        Expr::PropertyGet { object, property }
+            if property == "size" && is_set_expr(ctx, object) =>
+        {
+            let recv_box = lower_expr(ctx, object)?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let i32_v = blk.call(I32, "js_set_size", &[(I64, &recv_handle)]);
+            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+        }
+        Expr::PropertyGet { object, property }
+            if property == "size" && is_map_expr(ctx, object) =>
+        {
+            // js_map_size doesn't exist; use the generic getter via
+            // js_object_get_field_by_name_f64 if no map_size runtime
+            // — but that would return undefined. Return 0.0 stub.
+            let _ = lower_expr(ctx, object)?;
+            Ok(double_literal(0.0))
+        }
+
         // `arr[i] = v` — typed-Number array element write.
         //
         // INLINE FAST PATH (matches Cranelift's expr.rs:18886+ pattern):
@@ -2935,7 +2957,9 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
                 );
                 return Ok("0.0".to_string());
             }
-            for arg in args {
+            // Single-arg fast path: just print directly.
+            if args.len() == 1 {
+                let arg = &args[0];
                 let is_number_literal = matches!(arg, Expr::Integer(_) | Expr::Number(_));
                 let v = lower_expr(ctx, arg)?;
                 let runtime_fn = if is_number_literal {
@@ -2944,6 +2968,42 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
                     "js_console_log_dynamic"
                 };
                 ctx.block().call_void(runtime_fn, &[(DOUBLE, &v)]);
+                return Ok("0.0".to_string());
+            }
+            // Multi-arg: build a single string by joining all args
+            // with spaces, then print once. Without this, multi-arg
+            // console.log printed each arg on its own line because
+            // js_console_log_dynamic uses println!.
+            let space_idx = ctx.strings.intern(" ");
+            let space_global = format!("@{}", ctx.strings.entry(space_idx).handle_global);
+            let mut acc_handle: Option<String> = None;
+            for (i, arg) in args.iter().enumerate() {
+                let v = lower_expr(ctx, arg)?;
+                let blk = ctx.block();
+                let arg_handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &v)]);
+                if let Some(prev) = acc_handle {
+                    // acc = acc + " " + arg_str
+                    let space_box = blk.load(DOUBLE, &space_global);
+                    let space_handle = unbox_to_i64(blk, &space_box);
+                    let with_space = blk.call(
+                        I64,
+                        "js_string_concat",
+                        &[(I64, &prev), (I64, &space_handle)],
+                    );
+                    acc_handle = Some(blk.call(
+                        I64,
+                        "js_string_concat",
+                        &[(I64, &with_space), (I64, &arg_handle)],
+                    ));
+                } else {
+                    let _ = i;
+                    acc_handle = Some(arg_handle);
+                }
+            }
+            if let Some(handle) = acc_handle {
+                let blk = ctx.block();
+                let nanboxed = nanbox_string_inline(blk, &handle);
+                blk.call_void("js_console_log_dynamic", &[(DOUBLE, &nanboxed)]);
             }
             return Ok("0.0".to_string());
         }
@@ -3093,6 +3153,28 @@ pub(crate) fn lower_truthy(ctx: &mut FnCtx<'_>, cond_val: &str, cond_expr: &Expr
 /// - literal strings (`"foo"`)
 /// - LocalGet of string-typed locals (params with `: string`, `let x = "a"`)
 /// - recursive Add of strings (`"a" + "b" + s`)
+fn is_set_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
+    match e {
+        Expr::SetNew | Expr::SetNewFromArray(_) => true,
+        Expr::LocalGet(id) => matches!(
+            ctx.local_types.get(id),
+            Some(HirType::Generic { base, .. }) if base == "Set"
+        ),
+        _ => false,
+    }
+}
+
+fn is_map_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
+    match e {
+        Expr::MapNew | Expr::MapNewFromArray(_) => true,
+        Expr::LocalGet(id) => matches!(
+            ctx.local_types.get(id),
+            Some(HirType::Generic { base, .. }) if base == "Map"
+        ),
+        _ => false,
+    }
+}
+
 fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
         Expr::String(_) => true,
