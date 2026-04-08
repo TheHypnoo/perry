@@ -222,6 +222,12 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         Expr::String(_) | Expr::ArrayJoin { .. } | Expr::StringCoerce(_) => {
             Some(HirType::String)
         }
+        // `let l = new ClassName<...>()` — refine to Named(ClassName)
+        // so subsequent `l.method()` dispatch goes through the class
+        // method registry instead of the universal fallback. This is
+        // the difference between `l.size()` returning the real size
+        // and returning undefined for generic class instances.
+        Expr::New { class_name, .. } => Some(HirType::Named(class_name.clone())),
         // Compare results are now NaN-boxed booleans (TAG_TRUE/FALSE).
         // Type-refining the local as Boolean lets is_numeric_expr
         // skip the fast path (which would emit fcmp/sitofp on a NaN
@@ -233,9 +239,17 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         }
         Expr::IndexGet { object, .. } => {
             // arr[i] where arr is Array<T> → element type T.
+            // Handles both LocalGet(arr) and PropertyGet(this, "field")
+            // — the latter lets `this.parts[i]` get the right type
+            // when `parts: string[]`.
             if let Expr::LocalGet(arr_id) = object.as_ref() {
                 if let Some(HirType::Array(elem_ty)) = ctx.local_types.get(arr_id) {
                     return Some((**elem_ty).clone());
+                }
+            }
+            if let Some(ty) = static_type_of(ctx, object) {
+                if let HirType::Array(elem_ty) = ty {
+                    return Some(*elem_ty);
                 }
             }
             None
@@ -4083,6 +4097,12 @@ fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
         Expr::String(_) => true,
         Expr::LocalGet(id) => matches!(ctx.local_types.get(id), Some(HirType::String)),
+        // arr[i] where arr is Array<string> → element is a string.
+        // Lets `this.parts[i].length` use the string fast path inline
+        // without needing an intermediate let binding.
+        Expr::IndexGet { object, .. } => {
+            matches!(static_type_of(ctx, object), Some(HirType::Array(elem)) if matches!(*elem, HirType::String))
+        }
         // Enum string members lower to string literals at the use
         // site, so a comparison like `c === Color.Red` should fire
         // the string equality fast path.
@@ -4997,6 +5017,13 @@ fn receiver_class_name(ctx: &FnCtx<'_>, e: &Expr) -> Option<String> {
     match e {
         Expr::LocalGet(id) => match ctx.local_types.get(id)? {
             HirType::Named(name) => Some(name.clone()),
+            // Generic instantiation `Box<number>` — strip the type
+            // args and use the base class name. The codegen erases
+            // type parameters anyway, so the dispatch is identical
+            // to the non-generic Named form.
+            HirType::Generic { base, .. } if ctx.classes.contains_key(base) => {
+                Some(base.clone())
+            }
             _ => None,
         },
         // `new ClassName(...)` — the receiver class is the constructed class.
