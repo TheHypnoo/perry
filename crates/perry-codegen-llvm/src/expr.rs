@@ -876,6 +876,24 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 
         // `obj.field = v` — generic object field write.
         Expr::PropertySet { object, property, value } => {
+            // Setter dispatch: if the receiver is a known class and the
+            // property is registered as a setter, call the synthesized
+            // __set_<property> method instead of doing a raw field
+            // store. The setter takes (this, value) and returns
+            // undefined; we forward `value` as the expression result.
+            if let Some(class_name) = receiver_class_name(ctx, object) {
+                let setter_key = (class_name.clone(), format!("__set_{}", property));
+                if let Some(fn_name) = ctx.methods.get(&setter_key).cloned() {
+                    let recv_box = lower_expr(ctx, object)?;
+                    let val_double = lower_expr(ctx, value)?;
+                    let _ = ctx.block().call(
+                        DOUBLE,
+                        &fn_name,
+                        &[(DOUBLE, &recv_box), (DOUBLE, &val_double)],
+                    );
+                    return Ok(val_double);
+                }
+            }
             let obj_box = lower_expr(ctx, object)?;
             let val_double = lower_expr(ctx, value)?;
             // Intern the field name in the StringPool (same one the
@@ -911,6 +929,21 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // only catches the rare `let f = console.log` pattern.
             if matches!(object.as_ref(), Expr::GlobalGet(_)) {
                 return Ok(double_literal(0.0));
+            }
+            // Getter dispatch: if the receiver is a known class and
+            // the property is registered as a getter, call the
+            // synthesized __get_<property> method instead of doing a
+            // raw field load.
+            if let Some(class_name) = receiver_class_name(ctx, object) {
+                let getter_key = (class_name.clone(), format!("__get_{}", property));
+                if let Some(fn_name) = ctx.methods.get(&getter_key).cloned() {
+                    let recv_box = lower_expr(ctx, object)?;
+                    return Ok(ctx.block().call(
+                        DOUBLE,
+                        &fn_name,
+                        &[(DOUBLE, &recv_box)],
+                    ));
+                }
             }
             let obj_box = lower_expr(ctx, object)?;
             let key_idx = ctx.strings.intern(property);

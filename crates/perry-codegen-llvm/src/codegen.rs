@@ -211,20 +211,31 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // Built from `class.methods` so the dispatch in `lower_call` knows
     // which mangled function name to call for `obj.method(args)`. Method
     // names are also scoped by module prefix.
-    let method_names: HashMap<(String, String), String> = hir
-        .classes
-        .iter()
-        .flat_map(|c| {
-            let prefix = module_prefix.clone();
-            c.methods
-                .iter()
-                .map(move |m| {
-                    let key = (c.name.clone(), m.name.clone());
-                    let val = scoped_method_name(&prefix, &c.name, &m.name);
-                    (key, val)
-                })
-        })
-        .collect();
+    let mut method_names: HashMap<(String, String), String> = HashMap::new();
+    for c in &hir.classes {
+        for m in &c.methods {
+            method_names.insert(
+                (c.name.clone(), m.name.clone()),
+                scoped_method_name(&module_prefix, &c.name, &m.name),
+            );
+        }
+        // Getters: register under the property name with a `__get_`
+        // prefix to avoid colliding with a regular method of the same
+        // name. The dispatch site for `obj.prop` checks the getter
+        // map first, then falls back to the regular method registry.
+        for (prop, f) in &c.getters {
+            method_names.insert(
+                (c.name.clone(), format!("__get_{}", prop)),
+                scoped_method_name(&module_prefix, &c.name, &format!("__get_{}", f.name)),
+            );
+        }
+        for (prop, f) in &c.setters {
+            method_names.insert(
+                (c.name.clone(), format!("__set_{}", prop)),
+                scoped_method_name(&module_prefix, &c.name, &format!("__set_{}", f.name)),
+            );
+        }
+    }
 
     // Resolve user function names up-front so body lowering can emit
     // forward/recursive calls without worrying about emission order.
@@ -321,6 +332,21 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         for method in &class.methods {
             compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table)
                 .with_context(|| format!("lowering method '{}::{}'", class.name, method.name))?;
+        }
+        // Getters and setters are also methods, just registered under
+        // a __get_/__set_ prefix in the registry. Emit their bodies
+        // with the same prefix as the LLVM function name.
+        for (prop, getter_fn) in &class.getters {
+            let mut renamed = getter_fn.clone();
+            renamed.name = format!("__get_{}", prop);
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table)
+                .with_context(|| format!("lowering getter '{}::{}'", class.name, prop))?;
+        }
+        for (prop, setter_fn) in &class.setters {
+            let mut renamed = setter_fn.clone();
+            renamed.name = format!("__set_{}", prop);
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table)
+                .with_context(|| format!("lowering setter '{}::{}'", class.name, prop))?;
         }
     }
 
