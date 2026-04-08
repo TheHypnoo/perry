@@ -503,10 +503,16 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     blk.sitofp(I32, &v, DOUBLE)
                 }
                 BinaryOp::UShr => {
+                    // `>>>` is the JS unsigned right shift. The result
+                    // is interpreted as an unsigned 32-bit number, so
+                    // 0xFFFFFFFF prints as 4294967295, not -1. Use
+                    // uitofp instead of sitofp to preserve the
+                    // unsigned interpretation when converting back to
+                    // double.
                     let li = blk.fptosi(DOUBLE, &l, I32);
                     let ri = blk.fptosi(DOUBLE, &r, I32);
                     let v = blk.lshr(I32, &li, &ri);
-                    blk.sitofp(I32, &v, DOUBLE)
+                    blk.uitofp(I32, &v, DOUBLE)
                 }
             };
             Ok(v)
@@ -3947,6 +3953,37 @@ fn receiver_class_name(ctx: &FnCtx<'_>, e: &Expr) -> Option<String> {
         // at the top of class_stack (for inlined constructors) or comes
         // from the enclosing method's owning class.
         Expr::This => ctx.class_stack.last().cloned(),
+        // `this.field` or `obj.field` where the field's declared type
+        // is a class. Walk the class definition to find the field's
+        // type. Honors the parent inheritance chain.
+        Expr::PropertyGet { object, property } => {
+            let owner_class_name = receiver_class_name(ctx, object)?;
+            let class = ctx.classes.get(&owner_class_name)?;
+            // Look in own fields, then walk parent chain.
+            let field_ty = class
+                .fields
+                .iter()
+                .find(|f| f.name == *property)
+                .map(|f| &f.ty)
+                .or_else(|| {
+                    let mut parent = class.extends_name.as_deref();
+                    while let Some(p) = parent {
+                        if let Some(pc) = ctx.classes.get(p) {
+                            if let Some(f) = pc.fields.iter().find(|f| f.name == *property) {
+                                return Some(&f.ty);
+                            }
+                            parent = pc.extends_name.as_deref();
+                        } else {
+                            break;
+                        }
+                    }
+                    None
+                })?;
+            match field_ty {
+                HirType::Named(name) => Some(name.clone()),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
