@@ -1,87 +1,183 @@
-//! Expression codegen — Phase 1.
+//! Expression codegen — Phase 2.
 //!
-//! Scope is intentionally tiny: exactly the expressions needed to lower
-//! `console.log(42)` end-to-end. Anything else returns an explicit
-//! "unsupported" error so we never silently generate garbage.
+//! Scope: numeric expressions (literals, LocalGet, Binary add/sub/mul/div,
+//! Compare, direct FuncRef calls) plus the `console.log(<expr>)` sink. All
+//! values are raw LLVM `double` — no NaN-boxing, no strings, no objects.
+//!
+//! Anything outside the supported shape returns an explicit "unsupported"
+//! error so a user running `--backend llvm` on richer TypeScript gets a
+//! one-line explanation instead of a silent broken binary.
 
-use anyhow::{anyhow, Result};
-use perry_hir::Expr;
+use anyhow::{anyhow, bail, Result};
+use perry_hir::{BinaryOp, CompareOp, Expr};
 
 use crate::block::LlBlock;
+use crate::function::LlFunction;
 use crate::nanbox::double_literal;
+use crate::types::DOUBLE;
 
-/// Lower a numeric literal (`Integer(i64)` or `Number(f64)`) to a raw LLVM
-/// `double` value expression — returned as a string because LLVM constants
-/// live in-line in the instruction stream, they don't occupy a register.
-pub(crate) fn lower_number_literal(expr: &Expr) -> Result<String> {
+/// Per-function codegen context. Held briefly during lowering, never stored.
+pub(crate) struct FnCtx<'a> {
+    /// Function being built (blocks, params, registers).
+    pub func: &'a mut LlFunction,
+    /// Map from HIR LocalId → LLVM alloca pointer (e.g. `%r3`).
+    pub locals: std::collections::HashMap<u32, String>,
+    /// Index into `func.blocks()` pointing at the block currently receiving
+    /// instructions. Lowering fns update this when control flow splits.
+    pub current_block: usize,
+    /// HIR FuncId → LLVM function name. Resolved at the top of
+    /// `compile_module` so `FuncRef(id)` calls know what to emit.
+    pub func_names: &'a std::collections::HashMap<u32, String>,
+}
+
+impl<'a> FnCtx<'a> {
+    pub fn block(&mut self) -> &mut LlBlock {
+        self.func
+            .block_mut(self.current_block)
+            .expect("current_block index points at a valid block")
+    }
+
+    /// Create a new block and return its index, **without** switching the
+    /// current_block pointer. The caller is responsible for deciding when
+    /// to flip.
+    pub fn new_block(&mut self, name: &str) -> usize {
+        let _ = self.func.create_block(name);
+        self.func.num_blocks() - 1
+    }
+
+    /// Label of a block by index — needed when emitting a branch.
+    pub fn block_label(&self, idx: usize) -> String {
+        self.func
+            .blocks()
+            .get(idx)
+            .map(|b| b.label.clone())
+            .expect("valid block index")
+    }
+
+}
+
+/// Lower an expression to a raw LLVM `double` value. Returns the string form
+/// of the value (either a `%rN` register or a literal like `42.0`).
+pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
     match expr {
+        // -------- Literals --------
         Expr::Integer(i) => Ok(double_literal(*i as f64)),
         Expr::Number(f) => Ok(double_literal(*f)),
-        other => Err(anyhow!(
-            "perry-codegen-llvm Phase 1: expected number literal, got {}",
-            variant_name(other)
-        )),
-    }
-}
 
-/// Identify the `console.log(<number>)` call pattern and return the raw
-/// double string for the argument. Any divergence from this exact pattern
-/// yields an actionable error — the caller passes this up as the
-/// "module failed to compile" message.
-pub(crate) fn match_console_log_number(expr: &Expr) -> Result<String> {
-    let (callee, args) = match expr {
-        Expr::Call { callee, args, .. } => (callee.as_ref(), args),
-        _ => return Err(anyhow!(
-            "Phase 1 only supports a top-level Call expression; got {}",
-            variant_name(expr)
-        )),
-    };
-
-    // Callee must be PropertyGet { object: GlobalGet(_), property: "log" }.
-    // Phase 1 doesn't resolve GlobalId → "console", it just trusts that the
-    // property name `"log"` on *any* global is console.log. That's enough to
-    // distinguish our one supported pattern; later phases plumb a proper
-    // global name table.
-    let property = match callee {
-        Expr::PropertyGet { object, property } => {
-            if !matches!(object.as_ref(), Expr::GlobalGet(_)) {
-                return Err(anyhow!(
-                    "Phase 1 only supports console.log(<number>); callee.object is not a GlobalGet"
-                ));
-            }
-            property.as_str()
+        // -------- Variables --------
+        Expr::LocalGet(id) => {
+            let slot = ctx
+                .locals
+                .get(id)
+                .ok_or_else(|| anyhow!("LocalGet({}): local not in scope", id))?
+                .clone();
+            Ok(ctx.block().load(DOUBLE, &slot))
         }
-        _ => return Err(anyhow!(
-            "Phase 1 only supports console.log(<number>); callee is not a PropertyGet"
-        )),
-    };
 
-    if property != "log" {
-        return Err(anyhow!(
-            "Phase 1 only supports console.log(<number>); got console.{}",
-            property
-        ));
+        // -------- Arithmetic --------
+        Expr::Binary { op, left, right } => {
+            let l = lower_expr(ctx, left)?;
+            let r = lower_expr(ctx, right)?;
+            let blk = ctx.block();
+            let v = match op {
+                BinaryOp::Add => blk.fadd(&l, &r),
+                BinaryOp::Sub => blk.fsub(&l, &r),
+                BinaryOp::Mul => blk.fmul(&l, &r),
+                BinaryOp::Div => blk.fdiv(&l, &r),
+                BinaryOp::Mod => blk.frem(&l, &r),
+                other => bail!(
+                    "perry-codegen-llvm Phase 2: BinaryOp::{:?} not yet supported",
+                    other
+                ),
+            };
+            Ok(v)
+        }
+
+        // -------- Comparison --------
+        // LLVM `fcmp` returns `i1`. We zext to double so the value fits the
+        // standard number ABI used by the rest of the codegen — JS "true"
+        // round-trips through numeric contexts as 1.0 and "false" as 0.0,
+        // which is what Perry's runtime expects from typed boolean returns.
+        Expr::Compare { op, left, right } => {
+            let l = lower_expr(ctx, left)?;
+            let r = lower_expr(ctx, right)?;
+            let pred = match op {
+                CompareOp::Eq | CompareOp::LooseEq => "oeq",
+                CompareOp::Ne | CompareOp::LooseNe => "one",
+                CompareOp::Lt => "olt",
+                CompareOp::Le => "ole",
+                CompareOp::Gt => "ogt",
+                CompareOp::Ge => "oge",
+            };
+            let blk = ctx.block();
+            let bit = blk.fcmp(pred, &l, &r);
+            // `bit` is `i1`; zext to `i64` then sitofp to `double` so that
+            // downstream consumers see a canonical 0.0/1.0 double.
+            let as_i64 = blk.zext(crate::types::I1, &bit, crate::types::I64);
+            Ok(blk.sitofp(crate::types::I64, &as_i64, DOUBLE))
+        }
+
+        // -------- Calls --------
+        Expr::Call { callee, args, .. } => lower_call(ctx, callee, args),
+
+        // -------- Unsupported (clear error) --------
+        other => bail!(
+            "perry-codegen-llvm Phase 2: expression {} not yet supported",
+            variant_name(other)
+        ),
     }
-
-    if args.len() != 1 {
-        return Err(anyhow!(
-            "Phase 1 only supports a single numeric argument to console.log; got {}",
-            args.len()
-        ));
-    }
-
-    lower_number_literal(&args[0])
 }
 
-/// Emit the LLVM instructions for `console.log(<number>)` into `block`.
-///
-/// Uses `js_console_log_number`, which takes a raw `double` (not NaN-boxed),
-/// so we can skip the whole box/unbox dance for Phase 1.
-pub(crate) fn emit_console_log_number(block: &mut LlBlock, double_str: &str) {
-    block.call_void("js_console_log_number", &[(crate::types::DOUBLE, double_str)]);
+/// Lower a `Call` expression. Two shapes are supported:
+/// 1. `FuncRef(id)(args...)` — direct call to a user function by HIR id.
+/// 2. `console.log(expr)` where `expr` lowers to a double — emits a
+///    `js_console_log_number` call and returns `0.0` as the statement value.
+fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<String> {
+    // User function call via FuncRef.
+    if let Expr::FuncRef(fid) = callee {
+        let fname = ctx
+            .func_names
+            .get(fid)
+            .ok_or_else(|| anyhow!("FuncRef({}): function name not resolved", fid))?
+            .clone();
+
+        // Lower all arguments first.
+        let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+        for a in args {
+            lowered.push(lower_expr(ctx, a)?);
+        }
+        let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+            lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
+
+        return Ok(ctx.block().call(DOUBLE, &fname, &arg_slices));
+    }
+
+    // console.log(<numeric expr>) sink.
+    if let Expr::PropertyGet { object, property } = callee {
+        if matches!(object.as_ref(), Expr::GlobalGet(_)) && property == "log" {
+            if args.len() != 1 {
+                bail!(
+                    "perry-codegen-llvm Phase 2: console.log expects 1 numeric arg, got {}",
+                    args.len()
+                );
+            }
+            let v = lower_expr(ctx, &args[0])?;
+            ctx.block()
+                .call_void("js_console_log_number", &[(DOUBLE, &v)]);
+            // console.log returns undefined. Phase 2 has no notion of
+            // undefined, so we return 0.0 as a sentinel — it's only valid
+            // inside an Expr statement and the caller discards it.
+            return Ok("0.0".to_string());
+        }
+    }
+
+    bail!(
+        "perry-codegen-llvm Phase 2: Call callee shape not supported ({})",
+        variant_name(callee)
+    )
 }
 
-fn variant_name(e: &Expr) -> &'static str {
+pub(crate) fn variant_name(e: &Expr) -> &'static str {
     match e {
         Expr::Undefined => "Undefined",
         Expr::Null => "Null",
