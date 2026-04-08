@@ -173,6 +173,22 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
         // preceding case is valid JS.
         Stmt::Switch { discriminant, cases } => lower_switch(ctx, discriminant, cases),
 
+        // Labeled statement: just lower the body. Real labeled
+        // break/continue support requires per-label loop_targets
+        // entries; for now we share the implicit innermost target,
+        // which works for the common case where label is unused.
+        Stmt::Labeled { body, .. } => lower_stmt(ctx, body),
+        Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {
+            // Same as plain break/continue against the innermost loop.
+            let target = ctx
+                .loop_targets
+                .last()
+                .cloned()
+                .ok_or_else(|| anyhow!("labeled break/continue outside any loop"))?;
+            ctx.block().br(&target.1);
+            Ok(())
+        }
+
         // Phase G stubs: real exception handling lives in a future
         // phase. For now we lower throw as a process abort and try
         // as just the body block (no catch, no finally). This is

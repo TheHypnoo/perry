@@ -186,6 +186,8 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_array_sort_with_comparator", I64, &[I64, I64]);
     module.declare_function("js_regexp_new", I64, &[I64, I64]);
     module.declare_function("js_bigint_from_string", I64, &[PTR, I32]);
+    module.declare_function("js_instanceof", DOUBLE, &[DOUBLE, I32]);
+    module.declare_function("js_fs_unlink_sync", I32, &[DOUBLE]);
 
     declare_phase_b_arrays(module);
 }
