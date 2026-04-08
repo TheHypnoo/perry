@@ -3264,22 +3264,38 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
         // Universal `.toString()` — works for any JS value via the
         // runtime's js_jsvalue_to_string dispatch (numbers print as
         // their decimal form, strings as themselves, objects as
-        // [object Object], etc.). For (n).toString(radix) we ignore
-        // the radix and produce decimal — wrong but doesn't crash.
+        // [object Object], etc.). Only intercepts if NO class
+        // method dispatch can win (i.e. the receiver isn't a known
+        // class with its own toString) — otherwise the user's
+        // override wouldn't run.
         if property == "toString"
             && args.len() <= 1
             && !is_string_expr(ctx, object)
             && !is_array_expr(ctx, object)
         {
-            let v = lower_expr(ctx, object)?;
-            // Lower the optional radix arg for side effects, but
-            // ignore it.
-            for a in args {
-                let _ = lower_expr(ctx, a)?;
+            // Check whether the receiver class (if any) defines
+            // toString itself or via inheritance.
+            let has_user_toString = receiver_class_name(ctx, object)
+                .map(|cls| {
+                    let mut cur = Some(cls);
+                    while let Some(c) = cur {
+                        if ctx.methods.contains_key(&(c.clone(), "toString".to_string())) {
+                            return true;
+                        }
+                        cur = ctx.classes.get(&c).and_then(|cd| cd.extends_name.clone());
+                    }
+                    false
+                })
+                .unwrap_or(false);
+            if !has_user_toString {
+                let v = lower_expr(ctx, object)?;
+                for a in args {
+                    let _ = lower_expr(ctx, a)?;
+                }
+                let blk = ctx.block();
+                let handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &v)]);
+                return Ok(nanbox_string_inline(blk, &handle));
             }
-            let blk = ctx.block();
-            let handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &v)]);
-            return Ok(nanbox_string_inline(blk, &handle));
         }
         if is_string_expr(ctx, object) {
             return lower_string_method(ctx, object, property, args);
