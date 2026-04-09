@@ -7,7 +7,8 @@
 use anyhow::{anyhow, bail, Result};
 use perry_hir::Stmt;
 
-use crate::expr::{lower_expr, lower_truthy, FnCtx};
+use crate::expr::{lower_expr, FnCtx};
+use crate::lower_conditional::lower_truthy;
 use crate::types::DOUBLE;
 
 /// Lower a sequence of statements into the current block of `ctx`. If any
@@ -79,7 +80,7 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             // `let x: Object = ...` deliberately.
             let refined_ty = if matches!(ty, perry_types::Type::Any) {
                 init.as_ref()
-                    .and_then(|e| crate::expr::refine_type_from_init(ctx, e))
+                    .and_then(|e| crate::type_analysis::refine_type_from_init(ctx, e))
                     .unwrap_or_else(|| ty.clone())
             } else {
                 ty.clone()
