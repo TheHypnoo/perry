@@ -108,26 +108,38 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             // in the slot. `LocalGet` / `LocalSet` / `Update` on this
             // id all dereference through the box. See `boxed_vars` on
             // FnCtx for why this exists.
+            //
+            // CRITICAL: register the local's slot BEFORE lowering the
+            // init expression — same as the non-boxed path. Self-
+            // recursive closures (`let fib = (n) => fib(n-1)`) need
+            // to find the slot during their capture pass. Without
+            // this, the capture reads 0.0 from the soft fallback
+            // instead of the box pointer.
             if ctx.boxed_vars.contains(id) {
-                let init_val = if let Some(init_expr) = init {
-                    lower_expr(ctx, init_expr)?
-                } else {
-                    crate::nanbox::double_literal(f64::from_bits(
-                        crate::nanbox::TAG_UNDEFINED,
-                    ))
-                };
+                // Step 1: allocate box with undefined sentinel.
+                let undef = crate::nanbox::double_literal(f64::from_bits(
+                    crate::nanbox::TAG_UNDEFINED,
+                ));
                 let blk = ctx.block();
                 let box_ptr =
-                    blk.call(crate::types::I64, "js_box_alloc", &[(DOUBLE, &init_val)]);
-                // Store the box pointer as a raw i64-cast-to-double in
-                // the slot. We can't NaN-box a box pointer because
-                // reading the slot back expects the raw pointer —
-                // LocalGet/LocalSet below do a direct bitcast.
+                    blk.call(crate::types::I64, "js_box_alloc", &[(DOUBLE, &undef)]);
                 let slot = ctx.block().alloca(DOUBLE);
                 let box_as_double = ctx.block().bitcast_i64_to_double(&box_ptr);
                 ctx.block().store(DOUBLE, &box_as_double, &slot);
+                // Step 2: register BEFORE lowering init.
                 ctx.locals.insert(*id, slot);
                 ctx.local_types.insert(*id, refined_ty);
+                // Step 3: lower init and store into the box.
+                if let Some(init_expr) = init {
+                    let init_val = lower_expr(ctx, init_expr)?;
+                    // Read the box pointer back from the slot and
+                    // js_box_set the real init value.
+                    let slot_clone = ctx.locals[id].clone();
+                    let blk = ctx.block();
+                    let box_dbl = blk.load(DOUBLE, &slot_clone);
+                    let bptr = blk.bitcast_double_to_i64(&box_dbl);
+                    blk.call_void("js_box_set", &[(crate::types::I64, &bptr), (DOUBLE, &init_val)]);
+                }
                 return Ok(());
             }
             let slot = ctx.block().alloca(DOUBLE);
