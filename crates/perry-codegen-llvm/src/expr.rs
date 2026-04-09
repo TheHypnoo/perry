@@ -1028,27 +1028,21 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     &[(I64, &obj_handle), (I64, &key_handle)],
                 ));
             }
-            // Last-resort fallback: numeric index on an unknown-type
-            // receiver. Most often this is destructuring (`__item_63 =
-            // arr[i]`) where the destructured local came from a
-            // `__destruct_*: Any` whose init was IndexGet on
-            // `Array<Any>` — the HIR types lose the inner element
-            // shape. We optimistically use the inline array fast path;
-            // if the receiver actually is a non-array object, the
-            // generated load will return garbage but won't crash
-            // (the runtime preserves the GC contract).
+            // Last-resort fallback: call js_array_get_f64 which handles
+            // arrays, buffers, sets, maps polymorphically. For object
+            // field access by dynamic string key (e.g. obj[key] where
+            // key comes from a closure), route through
+            // js_object_get_field_by_name_f64 instead.
             let arr_box = lower_expr(ctx, object)?;
-            let idx_double = lower_expr(ctx, index)?;
+            let idx_box = lower_expr(ctx, index)?;
             let blk = ctx.block();
-            let arr_bits = blk.bitcast_double_to_i64(&arr_box);
-            let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
-            let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
-            let idx_i64 = blk.zext(I32, &idx_i32, I64);
-            let byte_offset = blk.shl(I64, &idx_i64, "3");
-            let with_header = blk.add(I64, &byte_offset, "8");
-            let element_addr = blk.add(I64, &arr_handle, &with_header);
-            let element_ptr = blk.inttoptr(I64, &element_addr);
-            Ok(blk.load(DOUBLE, &element_ptr))
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let idx_i32 = blk.fptosi(DOUBLE, &idx_box, I32);
+            Ok(blk.call(
+                DOUBLE,
+                "js_array_get_f64",
+                &[(I64, &arr_handle), (I32, &idx_i32)],
+            ))
         }
 
         // `arr.length` / `str.length` — INLINE. Both ArrayHeader and
@@ -1163,10 +1157,28 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 );
                 return Ok(val_double);
             }
-            // Numeric-index fallback for unknown receivers — see the
-            // matching IndexGet path for the rationale. We use
-            // `js_array_set_f64` (bounds-checked, no realloc) since
-            // there's no local to write a new pointer back to.
+            // Dynamic key fallback: try object field set via
+            // js_get_string_pointer_unified. If the index is a string
+            // at runtime, the unified function extracts the
+            // StringHeader*. If not, it returns null and the set is
+            // a no-op. This handles `result[key] = val` where key
+            // comes from a closure call typed as Any.
+            {
+                let obj_box = lower_expr(ctx, object)?;
+                let key_box = lower_expr(ctx, index)?;
+                let val_double = lower_expr(ctx, value)?;
+                let blk = ctx.block();
+                let obj_handle = unbox_to_i64(blk, &obj_box);
+                let key_handle = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &key_box)]);
+                blk.call_void(
+                    "js_object_set_field_by_name",
+                    &[(I64, &obj_handle), (I64, &key_handle), (DOUBLE, &val_double)],
+                );
+                return Ok(val_double);
+            }
+            // (Dead code below — kept as documentation of the old
+            // numeric-index array fallback.)
+            #[allow(unreachable_code)]
             let arr_box = lower_expr(ctx, object)?;
             let idx_double = lower_expr(ctx, index)?;
             let val_double = lower_expr(ctx, value)?;
