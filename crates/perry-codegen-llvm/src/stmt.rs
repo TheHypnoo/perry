@@ -82,6 +82,13 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 init.as_ref()
                     .and_then(|e| crate::type_analysis::refine_type_from_init(ctx, e))
                     .unwrap_or_else(|| ty.clone())
+            } else if matches!(ty, perry_types::Type::Array(ref elem) if matches!(**elem, perry_types::Type::Any)) {
+                // Also refine Array<Any> when the init provides more
+                // specific element type info. Object.keys() returns
+                // Array<string> but the HIR often declares Array<Any>.
+                init.as_ref()
+                    .and_then(|e| crate::type_analysis::refine_type_from_init(ctx, e))
+                    .unwrap_or_else(|| ty.clone())
             } else {
                 ty.clone()
             };

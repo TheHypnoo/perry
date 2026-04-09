@@ -32,7 +32,6 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         | Expr::ArrayFilter { .. }
         | Expr::ArrayFlat { .. }
         | Expr::ArrayFlatMap { .. }
-        | Expr::ObjectKeys(_)
         | Expr::ObjectValues(_)
         | Expr::ObjectEntries(_)
         | Expr::ArrayEntries { .. }
@@ -40,6 +39,8 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         | Expr::ArrayValues { .. }
         | Expr::StringMatch { .. }
         | Expr::StringMatchAll { .. } => Some(HirType::Array(Box::new(HirType::Any))),
+        // Object.keys() always returns string handles.
+        Expr::ObjectKeys(_) => Some(HirType::Array(Box::new(HirType::String))),
         Expr::String(_) | Expr::ArrayJoin { .. } | Expr::StringCoerce(_) => {
             Some(HirType::String)
         }
