@@ -142,10 +142,11 @@ pub extern "C" fn js_array_get_element_f64(arr: i64, index: i64) -> f64 {
 pub extern "C" fn js_array_get_f64_unchecked(arr: *const ArrayHeader, index: u32) -> f64 {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return f64::NAN; }
+    const TAG_UNDEFINED_F64: f64 = unsafe { std::mem::transmute(0x7FFC_0000_0000_0001u64) };
     unsafe {
         let length = (*arr).length;
-        if index >= length { return f64::NAN; }
-        if length > 100000 { return f64::NAN; }
+        if index >= length { return TAG_UNDEFINED_F64; }
+        if length > 100000 { return TAG_UNDEFINED_F64; }
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
         *elements_ptr.add(index as usize)
     }
@@ -166,7 +167,7 @@ pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
         let set = arr as *const crate::set::SetHeader;
         unsafe {
             let size = (*set).size;
-            if index >= size { return f64::NAN; }
+            if index >= size { return TAG_UNDEFINED_F64; }
             let elements = (*set).elements as *const f64;
             return std::ptr::read(elements.add(index as usize));
         }
@@ -176,20 +177,24 @@ pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
         let map = arr as *const crate::map::MapHeader;
         unsafe {
             let size = (*map).size;
-            if index >= size { return f64::NAN; }
+            if index >= size { return TAG_UNDEFINED_F64; }
             let entries = (*map).entries as *const f64;
             // Map entries: key at index*2, return key for simple iteration
             return std::ptr::read(entries.add(index as usize * 2));
         }
     }
+    // JS spec: out-of-bounds array access returns `undefined`, not NaN.
+    // This matters for destructuring defaults (`const [a, b, c = 30] = [1, 2]`)
+    // where the `?? fallback` must see TAG_UNDEFINED, not NaN.
+    const TAG_UNDEFINED_F64: f64 = unsafe { std::mem::transmute(0x7FFC_0000_0000_0001u64) };
     unsafe {
         let length = (*arr).length;
         if index >= length {
-            return f64::NAN; // Out of bounds returns NaN (like undefined coerced to number)
+            return TAG_UNDEFINED_F64;
         }
         // Guard: corrupted arrays with unreasonably large length
         if length > 100000 {
-            return f64::NAN;
+            return TAG_UNDEFINED_F64;
         }
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
         *elements_ptr.add(index as usize)
@@ -1795,8 +1800,8 @@ mod tests {
         assert_eq!(js_array_get_f64(arr, 1), 2.0);
         assert_eq!(js_array_get_f64(arr, 2), 3.0);
 
-        // Out of bounds
-        assert!(js_array_get_f64(arr, 5).is_nan());
+        // Out of bounds returns TAG_UNDEFINED (JS spec: arr[OOB] === undefined)
+        assert_eq!(js_array_get_f64(arr, 5).to_bits(), 0x7FFC_0000_0000_0001u64);
     }
 
     #[test]
@@ -1838,9 +1843,9 @@ mod tests {
         let arr = js_array_alloc(4);
         js_array_push_f64(arr, 1.0);
 
-        // Out of bounds should return NaN
-        assert!(js_array_get_f64_unchecked(arr, 1).is_nan());
-        assert!(js_array_get_f64_unchecked(arr, 100).is_nan());
+        // Out of bounds should return TAG_UNDEFINED (JS spec)
+        assert_eq!(js_array_get_f64_unchecked(arr, 1).to_bits(), 0x7FFC_0000_0000_0001u64);
+        assert_eq!(js_array_get_f64_unchecked(arr, 100).to_bits(), 0x7FFC_0000_0000_0001u64);
     }
 
     #[test]
@@ -1859,9 +1864,11 @@ mod tests {
                 "parity mismatch at index {}: checked={}, unchecked={}", i, checked, unchecked);
         }
 
-        // Out of bounds parity
-        assert!(js_array_get_f64(arr, 100).is_nan());
-        assert!(js_array_get_f64_unchecked(arr, 100).is_nan());
+        // Out of bounds parity — both return TAG_UNDEFINED
+        let oob_checked = js_array_get_f64(arr, 100);
+        let oob_unchecked = js_array_get_f64_unchecked(arr, 100);
+        assert_eq!(oob_checked.to_bits(), 0x7FFC_0000_0000_0001u64);
+        assert_eq!(oob_unchecked.to_bits(), 0x7FFC_0000_0000_0001u64);
     }
 
     #[test]

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.91
+**Current Version:** 0.4.92
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.92 (llvm-backend)
+- fix: `js_array_get_f64`/`_unchecked` OOB now returns `TAG_UNDEFINED` instead of `NaN`. Fixes destructuring defaults like `const [a, b, c = 30] = [1, 2]` where `?? fallback` needs to see `undefined`.
+- fix: `keyof T` type operator now lowers to `Type::String` instead of `Type::Any` in `lower_types.rs`.
 
 ### v0.4.91 (llvm-backend)
 - fix: labeled `break outer;` / `continue outer;` now target the correct enclosing loop instead of always the innermost. Added `label_targets` + `pending_label` to FnCtx; `Stmt::Labeled` sets pending label, loop lowering (`for`/`while`/`do-while`) consumes it and registers in the map, `LabeledBreak`/`LabeledContinue` look up by name.

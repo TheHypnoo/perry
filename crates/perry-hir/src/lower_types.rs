@@ -531,6 +531,7 @@ pub(crate) fn extract_ts_type_with_ctx(ts_type: &ast::TsType, ctx: Option<&Lower
             use swc_ecma_ast::TsTypeOperatorOp;
             match op.op {
                 TsTypeOperatorOp::ReadOnly => extract_ts_type_with_ctx(&op.type_ann, ctx),
+                TsTypeOperatorOp::KeyOf => Type::String,
                 _ => Type::Any,
             }
         }
