@@ -845,7 +845,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let r = lower_expr(ctx, right)?;
             let pred = match op {
                 CompareOp::Eq => "oeq",
-                CompareOp::Ne => "one",
+                // !== uses `une` (unordered or not equal), NOT `one`.
+                // `one` is "ordered and not equal" which returns false
+                // when either operand is NaN. JS !== on NaN must return
+                // true: NaN !== NaN → !(NaN === NaN) → !false → true.
+                CompareOp::Ne => "une",
                 CompareOp::Lt => "olt",
                 CompareOp::Le => "ole",
                 CompareOp::Gt => "ogt",
@@ -2608,10 +2612,14 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             ))
         }
         Expr::NumberIsNaN(operand) => {
+            // Number.isNaN is strict: only returns true for actual
+            // NaN values, NOT for NaN-tagged strings/pointers/bools.
+            // The inline fcmp("uno",x,x) would return true for any
+            // NaN-tagged value. Use the runtime which checks
+            // is_number() first.
             let v = lower_expr(ctx, operand)?;
-            // fcmp uno x, x — true iff x is NaN. Result must be a
-            // NaN-tagged TAG_TRUE/FALSE so `console.log(Number.isNaN
-            // (x))` prints "true"/"false" not "1"/"0".
+            return Ok(ctx.block().call(DOUBLE, "js_number_is_nan", &[(DOUBLE, &v)]));
+            // Dead code — kept as documentation of the inline pattern:
             let blk = ctx.block();
             let bit = blk.fcmp("uno", &v, &v);
             let tagged = blk.select(

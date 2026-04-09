@@ -158,6 +158,7 @@ pub fn bitcode_link_pipeline(
     user_ll_files: &[PathBuf],
     runtime_bc: &Path,
     stdlib_bc: Option<&Path>,
+    extra_bc: &[PathBuf],
     target_triple: Option<&str>,
 ) -> Result<PathBuf> {
     let llvm_as = find_llvm_tool("llvm-as")
@@ -212,6 +213,9 @@ pub fn bitcode_link_pipeline(
         cmd.arg(runtime_bc);
         if let Some(stdlib) = stdlib_bc {
             cmd.arg("--override").arg(stdlib);
+        }
+        for bc in extra_bc {
+            cmd.arg(bc);
         }
         cmd.arg("-o").arg(&linked_bc);
         log::debug!("perry-codegen-llvm bitcode-link: {:?}", cmd);

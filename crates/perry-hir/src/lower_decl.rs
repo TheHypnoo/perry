@@ -1329,6 +1329,14 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                 // inside the body resolve to FuncRef(func_id).
                 ctx.register_func(func_name.clone(), func_id);
 
+                // Define the local for the function name BEFORE lowering the body,
+                // so self-recursive references inside the body resolve to
+                // LocalGet(local_id) rather than FuncRef(func_id). This ensures
+                // the LLVM backend's boxed-var analysis sees the same LocalId at
+                // both the declaration and self-reference sites.
+                let local_id = ctx.lookup_local(&func_name)
+                    .unwrap_or_else(|| ctx.define_local(func_name.clone(), Type::Any));
+
                 let scope_mark = ctx.enter_scope();
 
                 // Track outer locals for capture detection
@@ -1409,11 +1417,6 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                     .filter(|id| assigned_set.contains(id) || ctx.var_hoisted_ids.contains(id))
                     .copied()
                     .collect();
-
-                // Define local variable and assign closure via Stmt::Let.
-                // Use existing local if already pre-registered (function hoisting).
-                let local_id = ctx.lookup_local(&func_name)
-                    .unwrap_or_else(|| ctx.define_local(func_name.clone(), Type::Any));
 
                 let closure = Expr::Closure {
                     func_id,

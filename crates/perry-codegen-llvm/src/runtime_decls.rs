@@ -285,6 +285,7 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_number_to_exponential", I64, &[DOUBLE, DOUBLE]);
     module.declare_function("js_date_new", DOUBLE, &[]);
     module.declare_function("js_number_is_integer", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_number_is_nan", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_is", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_array_find", DOUBLE, &[I64, I64]);
     module.declare_function("js_array_findIndex", I32, &[I64, I64]);

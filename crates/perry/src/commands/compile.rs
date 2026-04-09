@@ -4758,6 +4758,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 &ll_files,
                 runtime_bc,
                 stdlib_bc,
+                &optimized_libs.extra_bc,
                 target.as_deref(),
             ) {
                 Ok(linked_obj) => {
