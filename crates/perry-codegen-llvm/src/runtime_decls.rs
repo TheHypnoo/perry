@@ -294,6 +294,23 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // the await-loop comment in expr.rs for the dead-strip rationale.
     module.declare_function("js_sleep_ms", VOID, &[DOUBLE]);
     module.declare_function("js_throw", VOID, &[DOUBLE]);
+
+    // Exception handling (Phase G): setjmp/longjmp-based try/catch.
+    // js_try_push() returns a ptr to a jmp_buf.
+    // setjmp(ptr) returns i32 (0 on first call, non-0 after longjmp).
+    // js_try_end() pops the try depth (no return value).
+    // js_get_exception() returns the thrown NaN-boxed value.
+    // js_clear_exception() resets the exception state.
+    // js_has_exception() returns i32 (1 if exception is active, 0 otherwise).
+    // js_enter_finally() / js_leave_finally() bracket finally blocks.
+    module.declare_function("js_try_push", PTR, &[]);
+    module.declare_function("setjmp", I32, &[PTR]);
+    module.declare_function("js_try_end", VOID, &[]);
+    module.declare_function("js_get_exception", DOUBLE, &[]);
+    module.declare_function("js_clear_exception", VOID, &[]);
+    module.declare_function("js_has_exception", I32, &[]);
+    module.declare_function("js_enter_finally", VOID, &[]);
+    module.declare_function("js_leave_finally", VOID, &[]);
     module.declare_function("js_await_any_promise", DOUBLE, &[DOUBLE]);
     module.declare_function("js_promise_new", I64, &[]);
     module.declare_function("js_promise_resolve", VOID, &[I64, DOUBLE]);

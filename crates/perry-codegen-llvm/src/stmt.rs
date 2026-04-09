@@ -235,58 +235,50 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             Ok(())
         }
 
-        // Phase G stubs: real exception handling lives in a future
-        // phase. For now we lower throw as a no-op (lower the value
-        // for side effects) and try as just the body block (no
-        // catch, no finally). This is wrong but unblocks
-        // compilation AND runtime — programs that have a try/catch
-        // but never actually throw at runtime now run, and programs
-        // that DO throw silently continue executing (bad, but
-        // doesn't crash with SIGTRAP).
+        // Phase G: real setjmp/longjmp-based exception handling.
+        //
+        // `throw expr` evaluates the expression, calls js_throw(value)
+        // which longjmps to the most recent try block, and emits an
+        // LLVM `unreachable` terminator (js_throw never returns).
         Stmt::Throw(expr) => {
-            // Without real EH, throwing outside a try-catch is a no-op
-            // — we evaluate the expression for side effects and continue.
-            // Inside a try with a catch, the Try lowering handles
-            // the throw inline.
-            let _ = lower_expr(ctx, expr)?;
+            let val = lower_expr(ctx, expr)?;
+            ctx.block().call_void("js_throw", &[(DOUBLE, &val)]);
+            ctx.block().unreachable();
             Ok(())
         }
+
+        // Phase G: try/catch/finally via setjmp/longjmp.
+        //
+        // CFG shape:
+        //   <current block>:
+        //     %jmpbuf = call ptr @js_try_push()
+        //     %sjr    = call i32 @setjmp(ptr %jmpbuf)
+        //     %is_exc = icmp ne i32 %sjr, 0
+        //     br i1 %is_exc, label %catch_entry, label %try_body
+        //
+        //   try_body:
+        //     <lower try body stmts>
+        //     call void @js_try_end()
+        //     br label %finally_or_merge
+        //
+        //   catch_entry:
+        //     call void @js_try_end()        ; pop try depth before catch body
+        //     %exc = call double @js_get_exception()
+        //     call void @js_clear_exception()
+        //     <bind catch param to %exc if present>
+        //     <lower catch body stmts>
+        //     br label %finally_or_merge
+        //
+        //   finally_or_merge:
+        //     <lower finally stmts if present>
+        //     <continue>
+        //
+        // Local variable safety: all locals are alloca-backed (stack slots),
+        // not SSA registers, so they survive longjmp without explicit
+        // save/restore. This is the key advantage of the alloca+mem2reg
+        // strategy used by our LLVM backend.
         Stmt::Try { body, catch, finally } => {
-            // Without longjmp-based EH, we approximate try/catch by
-            // statically detecting whether the try body contains a
-            // top-level throw statement. If it does:
-            //   1. Lower every stmt before the throw normally
-            //   2. Bind the catch param (if any) to the thrown value
-            //   3. Lower the catch body
-            // If no throw is present, just lower body straight-line.
-            // This handles the common test pattern `try { throw X }
-            // catch (e) { ... }` correctly. Conditional throws inside
-            // if/while still fall through (the catch never fires).
-            let throw_idx = body.iter().position(|s| matches!(s, Stmt::Throw(_)));
-            if let (Some(idx), Some(catch_clause)) = (throw_idx, catch) {
-                // Lower stmts before the throw.
-                lower_stmts(ctx, &body[..idx])?;
-                // Lower the throw expression to get the value.
-                let throw_value = if let Stmt::Throw(expr) = &body[idx] {
-                    crate::expr::lower_expr(ctx, expr)?
-                } else {
-                    "0.0".to_string()
-                };
-                // Bind catch param.
-                if let Some((id, _name)) = &catch_clause.param {
-                    let slot = ctx.block().alloca(DOUBLE);
-                    ctx.locals.insert(*id, slot.clone());
-                    ctx.block().store(DOUBLE, &throw_value, &slot);
-                }
-                // Lower catch body.
-                lower_stmts(ctx, &catch_clause.body)?;
-            } else {
-                lower_stmts(ctx, body)?;
-            }
-            if let Some(f) = finally {
-                lower_stmts(ctx, f)?;
-            }
-            Ok(())
+            lower_try(ctx, body, catch.as_ref(), finally.as_deref())
         }
 
         other => bail!(
@@ -294,6 +286,73 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             stmt_variant_name(other)
         ),
     }
+}
+
+/// Try/catch/finally via setjmp/longjmp.
+///
+/// The CFG pattern:
+///   1. Call js_try_push() to get a jmp_buf pointer
+///   2. Call setjmp(jmpbuf) — returns 0 on first call, non-0 after longjmp
+///   3. Branch: 0 → try_body, non-0 → catch_entry
+///   4. try_body runs, calls js_try_end(), branches to finally
+///   5. catch_entry calls js_try_end(), reads exception, runs catch, branches to finally
+///   6. finally runs (if present), then falls through to merge
+fn lower_try(
+    ctx: &mut FnCtx<'_>,
+    body: &[perry_hir::Stmt],
+    catch: Option<&perry_hir::CatchClause>,
+    finally: Option<&[perry_hir::Stmt]>,
+) -> Result<()> {
+    use crate::types::{I32, PTR};
+
+    // Allocate blocks.
+    let try_body_idx = ctx.new_block("try.body");
+    let catch_idx = ctx.new_block("try.catch");
+    let finally_idx = ctx.new_block("try.finally");
+
+    let try_body_label = ctx.block_label(try_body_idx);
+    let catch_label = ctx.block_label(catch_idx);
+    let finally_label = ctx.block_label(finally_idx);
+
+    // --- current block: setjmp dispatch ---
+    let blk = ctx.block();
+    let jmpbuf = blk.call(PTR, "js_try_push", &[]);
+    let sjr = blk.call(I32, "setjmp", &[(PTR, &jmpbuf)]);
+    let is_exc = blk.icmp_ne(I32, &sjr, "0");
+    blk.cond_br(&is_exc, &catch_label, &try_body_label);
+
+    // --- try body ---
+    ctx.current_block = try_body_idx;
+    lower_stmts(ctx, body)?;
+    if !ctx.block().is_terminated() {
+        ctx.block().call_void("js_try_end", &[]);
+        ctx.block().br(&finally_label);
+    }
+
+    // --- catch ---
+    ctx.current_block = catch_idx;
+    ctx.block().call_void("js_try_end", &[]);
+    if let Some(clause) = catch {
+        let exc = ctx.block().call(DOUBLE, "js_get_exception", &[]);
+        ctx.block().call_void("js_clear_exception", &[]);
+        // Bind the catch param (if any) to the exception value.
+        if let Some((id, _name)) = &clause.param {
+            let slot = ctx.block().alloca(DOUBLE);
+            ctx.locals.insert(*id, slot.clone());
+            ctx.block().store(DOUBLE, &exc, &slot);
+        }
+        lower_stmts(ctx, &clause.body)?;
+    }
+    if !ctx.block().is_terminated() {
+        ctx.block().br(&finally_label);
+    }
+
+    // --- finally / merge ---
+    ctx.current_block = finally_idx;
+    if let Some(f) = finally {
+        lower_stmts(ctx, f)?;
+    }
+    Ok(())
 }
 
 /// For-loop lowering: classic init / cond / body / update / exit CFG.
