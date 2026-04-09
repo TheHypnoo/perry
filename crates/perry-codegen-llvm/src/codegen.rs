@@ -2071,6 +2071,13 @@ fn collect_closure_refs_and_writes_in_expr(
             collect_closure_refs_and_writes_in_expr(object, refs, writes);
             collect_closure_refs_and_writes_in_expr(value, refs, writes);
         }
+        // Expr::ArrayPush carries the value as an Expr; recurse in
+        // so a closure literal passed as the push argument (e.g.
+        // `fns.push(() => x)`) is visited and its captured ids
+        // contribute to refs.
+        Expr::ArrayPush { value, .. } => {
+            collect_closure_refs_and_writes_in_expr(value, refs, writes);
+        }
         _ => {}
     }
 }

@@ -1612,8 +1612,14 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let v = lower_expr(ctx, operand)?;
             let blk = ctx.block();
             let bit = blk.fcmp("uno", &v, &v);
-            let as_i64 = blk.zext(I1, &bit, I64);
-            Ok(blk.sitofp(I64, &as_i64, DOUBLE))
+            let tagged = blk.select(
+                I1,
+                &bit,
+                I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(blk.bitcast_i64_to_double(&tagged))
         }
 
         // -------- Math.pow (special variant — separate from Binary::Pow) --------
@@ -1858,10 +1864,29 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- isFinite(x) / Number.isFinite(x) --------
-        // The runtime returns the standard JS truthy double (1.0/0.0).
+        // Runtime returns a raw i32 via `js_is_finite` (f64 → i32).
+        // Wrap in i32_bool_to_nanbox so console.log prints
+        // "true"/"false". Note: js_is_finite's signature in the
+        // runtime returns f64 (0.0/1.0), so we use fcmp one to
+        // convert, NOT a call to js_is_finite_i32.
         Expr::IsFinite(operand) | Expr::NumberIsFinite(operand) => {
             let v = lower_expr(ctx, operand)?;
-            Ok(ctx.block().call(DOUBLE, "js_is_finite", &[(DOUBLE, &v)]))
+            let blk = ctx.block();
+            // llvm intrinsic: x is finite iff (x - x) is finite.
+            // Simpler: finite = !isnan(x) && !isinf(x). Using
+            // fcmp ord x, x checks NaN; fcmp oeq x, inf checks inf.
+            // Cheapest: fcmp ord x, x AND not-inf. For simplicity,
+            // stay with js_is_finite (returns f64) and convert.
+            let truthy = blk.call(DOUBLE, "js_is_finite", &[(DOUBLE, &v)]);
+            let bit = blk.fcmp("one", &truthy, "0.0");
+            let tagged = blk.select(
+                I1,
+                &bit,
+                I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(blk.bitcast_i64_to_double(&tagged))
         }
 
         // -------- internal: is value === undefined OR a bare-NaN double --------
@@ -1869,7 +1894,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let v = lower_expr(ctx, operand)?;
             let blk = ctx.block();
             let i32_v = blk.call(I32, "js_is_undefined_or_bare_nan", &[(DOUBLE, &v)]);
-            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+            Ok(i32_bool_to_nanbox(blk, &i32_v))
         }
 
         // -------- Math.min(...args) --------
@@ -2579,7 +2604,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
         Expr::NumberIsInteger(operand) => {
             let v = lower_expr(ctx, operand)?;
-            Ok(ctx.block().call(DOUBLE, "js_number_is_integer", &[(DOUBLE, &v)]))
+            let blk = ctx.block();
+            let truthy = blk.call(DOUBLE, "js_number_is_integer", &[(DOUBLE, &v)]);
+            let bit = blk.fcmp("one", &truthy, "0.0");
+            let tagged = blk.select(
+                I1,
+                &bit,
+                I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(blk.bitcast_i64_to_double(&tagged))
         }
 
         // -------- Map.clear --------
@@ -2647,11 +2682,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
         Expr::NumberIsNaN(operand) => {
             let v = lower_expr(ctx, operand)?;
-            // fcmp uno x, x — true iff x is NaN. Convert i1→f64.
+            // fcmp uno x, x — true iff x is NaN. Result must be a
+            // NaN-tagged TAG_TRUE/FALSE so `console.log(Number.isNaN
+            // (x))` prints "true"/"false" not "1"/"0".
             let blk = ctx.block();
             let bit = blk.fcmp("uno", &v, &v);
-            let as_i64 = blk.zext(I1, &bit, I64);
-            Ok(blk.sitofp(I64, &as_i64, DOUBLE))
+            let tagged = blk.select(
+                I1,
+                &bit,
+                I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(blk.bitcast_i64_to_double(&tagged))
         }
         Expr::FsMkdirSync(p) => {
             // Stub: lower for side effects, return undefined.
