@@ -957,12 +957,41 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let arr_bits = blk.bitcast_double_to_i64(&arr_box);
                 let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
                 let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
+                // Bounds check: load length (u32 at offset 0),
+                // compare index. OOB returns TAG_UNDEFINED (JS spec).
+                let len_ptr = blk.inttoptr(I64, &arr_handle);
+                let len_i32 = blk.load(I32, &len_ptr);
+                let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
+                let ok_idx = ctx.new_block("arr.ok");
+                let oob_idx = ctx.new_block("arr.oob");
+                let merge_idx = ctx.new_block("arr.merge");
+                let ok_label = ctx.block_label(ok_idx);
+                let oob_label = ctx.block_label(oob_idx);
+                let merge_label = ctx.block_label(merge_idx);
+                ctx.block().cond_br(&in_bounds, &ok_label, &oob_label);
+                // In-bounds: inline element load.
+                ctx.current_block = ok_idx;
+                let blk = ctx.block();
                 let idx_i64 = blk.zext(I32, &idx_i32, I64);
                 let byte_offset = blk.shl(I64, &idx_i64, "3");
                 let with_header = blk.add(I64, &byte_offset, "8");
                 let element_addr = blk.add(I64, &arr_handle, &with_header);
                 let element_ptr = blk.inttoptr(I64, &element_addr);
-                return Ok(blk.load(DOUBLE, &element_ptr));
+                let val = blk.load(DOUBLE, &element_ptr);
+                let ok_end_label = ctx.block().label.clone();
+                ctx.block().br(&merge_label);
+                // OOB: return TAG_UNDEFINED.
+                ctx.current_block = oob_idx;
+                let undef_bits = crate::nanbox::i64_literal(crate::nanbox::TAG_UNDEFINED);
+                let undef_val = ctx.block().bitcast_i64_to_double(&undef_bits);
+                let oob_end_label = ctx.block().label.clone();
+                ctx.block().br(&merge_label);
+                // Merge with phi.
+                ctx.current_block = merge_idx;
+                return Ok(ctx.block().phi(
+                    DOUBLE,
+                    &[(&val, &ok_end_label), (&undef_val, &oob_end_label)],
+                ));
             }
             // Generic dynamic object access: stringify the index (no-op
             // for already-string keys, format for numeric keys) and
