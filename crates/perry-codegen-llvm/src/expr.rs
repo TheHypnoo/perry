@@ -1325,6 +1325,38 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             );
             let new_box = nanbox_pointer_inline(blk, &new_handle);
             // Write back to whichever storage backs the local.
+            // Boxed var takes priority: write through the box so
+            // every closure sharing the box sees the new pointer.
+            if ctx.boxed_vars.contains(array_id) {
+                // Captured-through-closure boxed var.
+                if let Some(&capture_idx) = ctx.closure_captures.get(array_id) {
+                    let closure_ptr = ctx
+                        .current_closure_ptr
+                        .clone()
+                        .ok_or_else(|| anyhow!("ArrayPush boxed captured but no current_closure_ptr"))?;
+                    let idx_str = capture_idx.to_string();
+                    let blk = ctx.block();
+                    let cap_dbl = blk.call(
+                        DOUBLE,
+                        "js_closure_get_capture_f64",
+                        &[(I64, &closure_ptr), (I32, &idx_str)],
+                    );
+                    let box_ptr = blk.bitcast_double_to_i64(&cap_dbl);
+                    blk.call_void(
+                        "js_box_set",
+                        &[(I64, &box_ptr), (DOUBLE, &new_box)],
+                    );
+                } else if let Some(slot) = ctx.locals.get(array_id).cloned() {
+                    let blk = ctx.block();
+                    let box_dbl = blk.load(DOUBLE, &slot);
+                    let box_ptr = blk.bitcast_double_to_i64(&box_dbl);
+                    blk.call_void(
+                        "js_box_set",
+                        &[(I64, &box_ptr), (DOUBLE, &new_box)],
+                    );
+                }
+                return Ok(new_box);
+            }
             if let Some(&capture_idx) = ctx.closure_captures.get(array_id) {
                 let closure_ptr = ctx
                     .current_closure_ptr

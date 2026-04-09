@@ -308,6 +308,39 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     }
     module_boxed_vars.extend(collect_boxed_vars(&hir.init));
 
+    // Module-wide LocalId → Type map. Used by closure bodies to
+    // learn the types of captured vars from the enclosing scope.
+    // HIR LocalIds are globally unique within the module, so a
+    // single flat map works.
+    let mut module_local_types: HashMap<u32, perry_types::Type> = HashMap::new();
+    collect_let_types_in_stmts(&hir.init, &mut module_local_types);
+    for f in &hir.functions {
+        for p in &f.params {
+            module_local_types.insert(p.id, p.ty.clone());
+        }
+        collect_let_types_in_stmts(&f.body, &mut module_local_types);
+    }
+    for c in &hir.classes {
+        for m in &c.methods {
+            for p in &m.params {
+                module_local_types.insert(p.id, p.ty.clone());
+            }
+            collect_let_types_in_stmts(&m.body, &mut module_local_types);
+        }
+        if let Some(ctor) = &c.constructor {
+            for p in &ctor.params {
+                module_local_types.insert(p.id, p.ty.clone());
+            }
+            collect_let_types_in_stmts(&ctor.body, &mut module_local_types);
+        }
+        for sm in &c.static_methods {
+            for p in &sm.params {
+                module_local_types.insert(p.id, p.ty.clone());
+            }
+            collect_let_types_in_stmts(&sm.body, &mut module_local_types);
+        }
+    }
+
     // Pre-declare each imported function as an extern. Cross-module
     // calls in lower_call need a `declare` line at the top of the IR
     // for the symbol to be referenceable; without this, clang errors
@@ -387,6 +420,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             &func_signatures,
             &module_prefix,
             &module_boxed_vars,
+            &module_local_types,
         )
         .with_context(|| format!("lowering closure func_id={}", func_id))?;
     }
@@ -652,6 +686,7 @@ fn compile_closure(
     func_signatures: &HashMap<u32, (usize, bool)>,
     module_prefix: &str,
     module_boxed_vars: &std::collections::HashSet<u32>,
+    module_local_types: &HashMap<u32, perry_types::Type>,
 ) -> Result<()> {
     // Destructure the closure expression. We trust that the caller
     // passes only `Expr::Closure` here (from `collect_closures_*`).
@@ -693,10 +728,18 @@ fn compile_closure(
         map
     };
 
-    let local_types: HashMap<u32, perry_types::Type> = params
+    // Start with the closure's own params as local_types, then
+    // merge in the module-wide map so captured-from-outer ids have
+    // their types available inside the body. Without this, closures
+    // that capture an array `items` and do `items.length` miss the
+    // typed fast path and return undefined.
+    let mut local_types: HashMap<u32, perry_types::Type> = params
         .iter()
         .map(|p| (p.id, p.ty.clone()))
         .collect();
+    for (id, ty) in module_local_types.iter() {
+        local_types.entry(*id).or_insert_with(|| ty.clone());
+    }
 
     // Build the capture map: each captured LocalId gets the index it
     // occupies in the closure's capture array. Identical logic to the
@@ -1955,6 +1998,13 @@ fn collect_closure_refs_and_writes_in_expr(
     writes: &mut std::collections::HashSet<u32>,
 ) {
     use perry_hir::Expr;
+    // Note: this walker only RECURSES into closures (see the
+    // Expr::Closure case below). For top-level (non-closure) stmts,
+    // we do not add writes/refs here — the `collect_outer_writes_*`
+    // walker handles that path. Keeping those concerns separate
+    // prevents the `arr.push(x)` at top level from being treated
+    // as a "closure capture write" and triggering false-positive
+    // boxing of a non-captured variable.
     match expr {
         Expr::Closure { body, .. } => {
             // Collect every LocalGet/LocalSet/Update ref inside the
@@ -2105,6 +2155,28 @@ fn collect_outer_writes_in_expr(
     out: &mut std::collections::HashSet<u32>,
 ) {
     use perry_hir::Expr;
+    // Same mutating-method detection as the closure walker.
+    if let Expr::Call { callee, .. } = expr {
+        if let Expr::PropertyGet { object, property } = callee.as_ref() {
+            if let Expr::LocalGet(id) = object.as_ref() {
+                // Array-specific mutating methods only. "add"/"set"/
+                // "delete"/"clear" collide with user-defined custom
+                // methods (e.g. `a.add(x)` on a plain object literal
+                // isn't necessarily a Set), so we keep them out of
+                // this list to avoid false-positive box promotion.
+                if matches!(
+                    property.as_str(),
+                    "push" | "pop" | "shift" | "unshift" | "splice"
+                        | "sort" | "reverse" | "fill" | "copyWithin"
+                ) {
+                    out.insert(*id);
+                }
+            }
+        }
+    }
+    if let Expr::ArrayPush { array_id, .. } = expr {
+        out.insert(*array_id);
+    }
     match expr {
         // STOP recursing into closures — those are "inside"; we only
         // collect outer-scope writes here.
@@ -2249,6 +2321,28 @@ fn collect_write_ids_in_expr(
     out: &mut std::collections::HashSet<u32>,
 ) {
     use perry_hir::Expr;
+    // Mutating method calls count as writes on the receiver.
+    if let Expr::Call { callee, .. } = expr {
+        if let Expr::PropertyGet { object, property } = callee.as_ref() {
+            if let Expr::LocalGet(id) = object.as_ref() {
+                // Array-specific mutating methods only. "add"/"set"/
+                // "delete"/"clear" collide with user-defined custom
+                // methods (e.g. `a.add(x)` on a plain object literal
+                // isn't necessarily a Set), so we keep them out of
+                // this list to avoid false-positive box promotion.
+                if matches!(
+                    property.as_str(),
+                    "push" | "pop" | "shift" | "unshift" | "splice"
+                        | "sort" | "reverse" | "fill" | "copyWithin"
+                ) {
+                    out.insert(*id);
+                }
+            }
+        }
+    }
+    if let Expr::ArrayPush { array_id, .. } = expr {
+        out.insert(*array_id);
+    }
     match expr {
         Expr::LocalSet(id, v) => {
             out.insert(*id);
@@ -2308,6 +2402,157 @@ fn collect_write_ids_in_expr(
             collect_write_ids_in_expr(value, out);
         }
         _ => {}
+    }
+}
+
+/// Walk statements and collect every `Stmt::Let`'s (id, type) pair
+/// into the given map. Used to build a module-wide LocalId → Type
+/// map so closure bodies can learn captured-var types without
+/// having a handle on the enclosing function's context.
+fn collect_let_types_in_stmts(
+    stmts: &[perry_hir::Stmt],
+    out: &mut HashMap<u32, perry_types::Type>,
+) {
+    use perry_hir::{Expr, Stmt};
+    for s in stmts {
+        match s {
+            Stmt::Let { id, ty, init, .. } => {
+                // Refine Any-typed lets from the init if possible,
+                // so closures inherit the right type.
+                let refined_ty = if matches!(ty, perry_types::Type::Any) {
+                    init.as_ref()
+                        .and_then(refine_type_from_init_simple)
+                        .unwrap_or_else(|| ty.clone())
+                } else {
+                    ty.clone()
+                };
+                out.insert(*id, refined_ty);
+            }
+            Stmt::If { then_branch, else_branch, .. } => {
+                collect_let_types_in_stmts(then_branch, out);
+                if let Some(eb) = else_branch {
+                    collect_let_types_in_stmts(eb, out);
+                }
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(init_stmt) = init {
+                    collect_let_types_in_stmts(std::slice::from_ref(init_stmt.as_ref()), out);
+                }
+                collect_let_types_in_stmts(body, out);
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                collect_let_types_in_stmts(body, out);
+            }
+            Stmt::Try { body, catch, finally } => {
+                collect_let_types_in_stmts(body, out);
+                if let Some(c) = catch {
+                    collect_let_types_in_stmts(&c.body, out);
+                }
+                if let Some(f) = finally {
+                    collect_let_types_in_stmts(f, out);
+                }
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    collect_let_types_in_stmts(&case.body, out);
+                }
+            }
+            _ => {}
+        }
+        // Walk closure bodies nested in the statements so their
+        // inner lets are also registered.
+        if let Stmt::Expr(e)
+        | Stmt::Return(Some(e))
+        | Stmt::Let { init: Some(e), .. } = s
+        {
+            collect_closure_let_types_in_expr(e, out);
+        }
+    }
+}
+
+fn collect_closure_let_types_in_expr(
+    expr: &perry_hir::Expr,
+    out: &mut HashMap<u32, perry_types::Type>,
+) {
+    use perry_hir::Expr;
+    match expr {
+        Expr::Closure { params, body, .. } => {
+            for p in params {
+                out.insert(p.id, p.ty.clone());
+            }
+            collect_let_types_in_stmts(body, out);
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            collect_closure_let_types_in_expr(left, out);
+            collect_closure_let_types_in_expr(right, out);
+        }
+        Expr::Unary { operand, .. } => collect_closure_let_types_in_expr(operand, out),
+        Expr::Call { callee, args, .. } => {
+            collect_closure_let_types_in_expr(callee, out);
+            for a in args {
+                collect_closure_let_types_in_expr(a, out);
+            }
+        }
+        Expr::New { args, .. } => {
+            for a in args {
+                collect_closure_let_types_in_expr(a, out);
+            }
+        }
+        Expr::Array(items) => {
+            for i in items {
+                collect_closure_let_types_in_expr(i, out);
+            }
+        }
+        Expr::Object(props) => {
+            for (_, v) in props {
+                collect_closure_let_types_in_expr(v, out);
+            }
+        }
+        Expr::LocalSet(_, v) => collect_closure_let_types_in_expr(v, out),
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            collect_closure_let_types_in_expr(condition, out);
+            collect_closure_let_types_in_expr(then_expr, out);
+            collect_closure_let_types_in_expr(else_expr, out);
+        }
+        Expr::IndexGet { object, index } => {
+            collect_closure_let_types_in_expr(object, out);
+            collect_closure_let_types_in_expr(index, out);
+        }
+        Expr::PropertyGet { object, .. } => {
+            collect_closure_let_types_in_expr(object, out);
+        }
+        _ => {}
+    }
+}
+
+/// Mirror of `expr::refine_type_from_init` but without a FnCtx —
+/// used at module-level type collection time before any FnCtx
+/// exists. Conservative: only refines a small set of expression
+/// shapes where the type is obvious from the AST alone.
+fn refine_type_from_init_simple(init: &perry_hir::Expr) -> Option<perry_types::Type> {
+    use perry_hir::Expr;
+    use perry_types::Type;
+    match init {
+        Expr::Array(_) | Expr::ArraySpread(_) => Some(Type::Array(Box::new(Type::Any))),
+        Expr::ArraySlice { .. }
+        | Expr::ArrayMap { .. }
+        | Expr::ArrayFilter { .. }
+        | Expr::ArrayFlat { .. }
+        | Expr::ArrayFlatMap { .. }
+        | Expr::ObjectKeys(_)
+        | Expr::ObjectValues(_)
+        | Expr::ObjectEntries(_)
+        | Expr::ArrayEntries { .. }
+        | Expr::ArrayKeys { .. }
+        | Expr::ArrayValues { .. }
+        | Expr::StringMatch { .. }
+        | Expr::StringMatchAll { .. } => Some(Type::Array(Box::new(Type::Any))),
+        Expr::String(_) | Expr::ArrayJoin { .. } | Expr::StringCoerce(_) => Some(Type::String),
+        Expr::Bool(_) => Some(Type::Boolean),
+        Expr::New { class_name, .. } => Some(Type::Named(class_name.clone())),
+        _ => None,
     }
 }
 
