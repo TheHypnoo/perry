@@ -269,7 +269,17 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_path_basename", I64, &[I64]);
     module.declare_function("js_path_extname", I64, &[I64]);
     module.declare_function("js_path_parse", I64, &[I64]);
-    module.declare_function("js_json_parse", DOUBLE, &[I64]);
+    // JSON.parse returns JSValue (u64) via integer register on ARM64,
+    // not f64. Use I64 return + bitcast to avoid ABI mismatch crash.
+    module.declare_function("js_json_parse", I64, &[I64]);
+    // Date string formatters
+    module.declare_function("js_date_to_date_string", I64, &[DOUBLE]);
+    module.declare_function("js_date_to_time_string", I64, &[DOUBLE]);
+    module.declare_function("js_date_to_locale_date_string", I64, &[DOUBLE]);
+    module.declare_function("js_date_to_locale_time_string", I64, &[DOUBLE]);
+    module.declare_function("js_date_to_json", I64, &[DOUBLE]);
+    // RegExp exec
+    module.declare_function("js_regexp_exec", I64, &[I64, I64]);
     module.declare_function("js_number_to_precision", I64, &[DOUBLE, DOUBLE]);
     module.declare_function("js_number_to_exponential", I64, &[DOUBLE, DOUBLE]);
     module.declare_function("js_date_new", DOUBLE, &[]);

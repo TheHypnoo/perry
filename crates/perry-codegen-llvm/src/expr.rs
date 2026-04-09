@@ -2233,9 +2233,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(i32_bool_to_nanbox(blk, &i32_v))
         }
         Expr::RegExpExec { regex, string } => {
-            let _ = lower_expr(ctx, regex)?;
-            let _ = lower_expr(ctx, string)?;
-            Ok(double_literal(0.0))
+            let regex_box = lower_expr(ctx, regex)?;
+            let str_box = lower_expr(ctx, string)?;
+            let blk = ctx.block();
+            let regex_handle = unbox_to_i64(blk, &regex_box);
+            let str_handle =
+                blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &str_box)]);
+            let result = blk.call(
+                I64,
+                "js_regexp_exec",
+                &[(I64, &regex_handle), (I64, &str_handle)],
+            );
+            // Returns ArrayHeader* or null. NaN-box as pointer.
+            Ok(nanbox_pointer_inline(blk, &result))
         }
 
         // -------- GlobalGet stub --------
@@ -2418,18 +2428,21 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- JSON.parse --------
+        // js_json_parse returns JSValue (u64 / i64) not f64.
+        // Bitcast from i64 to double to stay in the NaN-boxed f64 ABI.
         Expr::JsonParse(text) => {
             let s_box = lower_expr(ctx, text)?;
             let blk = ctx.block();
             let s_handle = unbox_to_i64(blk, &s_box);
-            Ok(blk.call(DOUBLE, "js_json_parse", &[(I64, &s_handle)]))
+            let result_i64 = blk.call(I64, "js_json_parse", &[(I64, &s_handle)]);
+            Ok(blk.bitcast_i64_to_double(&result_i64))
         }
         Expr::JsonParseReviver { text, .. } | Expr::JsonParseWithReviver(text, _) => {
-            // Reviver ignored for now.
             let s_box = lower_expr(ctx, text)?;
             let blk = ctx.block();
             let s_handle = unbox_to_i64(blk, &s_box);
-            Ok(blk.call(DOUBLE, "js_json_parse", &[(I64, &s_handle)]))
+            let result_i64 = blk.call(I64, "js_json_parse", &[(I64, &s_handle)]);
+            Ok(blk.bitcast_i64_to_double(&result_i64))
         }
 
         // -------- new Date() --------
@@ -2974,12 +2987,37 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::EncodeURI(o)
         | Expr::DecodeURI(o)
         | Expr::EncodeURIComponent(o)
-        | Expr::DecodeURIComponent(o)
-        | Expr::DateToDateString(o)
-        | Expr::DateToTimeString(o)
-        | Expr::DateToLocaleDateString(o)
-        | Expr::DateToLocaleTimeString(o)
-        | Expr::DateToJSON(o) => lower_expr(ctx, o),
+        | Expr::DecodeURIComponent(o) => lower_expr(ctx, o),
+        Expr::DateToDateString(o) => {
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_date_to_date_string", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
+        Expr::DateToTimeString(o) => {
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_date_to_time_string", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
+        Expr::DateToLocaleDateString(o) => {
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_date_to_locale_date_string", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
+        Expr::DateToLocaleTimeString(o) => {
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_date_to_locale_time_string", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
+        Expr::DateToJSON(o) => {
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_date_to_json", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
         Expr::ArrayWith { array, index, value } => {
             let _ = lower_expr(ctx, index)?;
             let _ = lower_expr(ctx, value)?;
