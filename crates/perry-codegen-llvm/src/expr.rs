@@ -2497,6 +2497,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(i32_bool_to_nanbox(blk, &i32_v))
         }
         Expr::RegExpExec { regex, string } => {
+            // Returns ArrayHeader* or null. For a null (0) result we must
+            // produce TAG_NULL so `re.exec(s) !== null` loops terminate
+            // correctly — just NaN-boxing 0 with POINTER_TAG produces a
+            // non-null pointer value that compares unequal to null, causing
+            // infinite loops + segfaults when callers IndexGet on the result.
             let regex_box = lower_expr(ctx, regex)?;
             let str_box = lower_expr(ctx, string)?;
             let blk = ctx.block();
@@ -2508,8 +2513,18 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 "js_regexp_exec",
                 &[(I64, &regex_handle), (I64, &str_handle)],
             );
-            // Returns ArrayHeader* or null. NaN-box as pointer.
-            Ok(nanbox_pointer_inline(blk, &result))
+            // Branch on result == 0 → TAG_NULL; else NaN-box as pointer.
+            let is_null = blk.icmp_eq(I64, &result, "0");
+            let ptr_boxed = nanbox_pointer_inline(ctx.block(), &result);
+            let ptr_bits = ctx.block().bitcast_double_to_i64(&ptr_boxed);
+            let selected = ctx.block().select(
+                I1,
+                &is_null,
+                I64,
+                crate::nanbox::TAG_NULL_I64,
+                &ptr_bits,
+            );
+            Ok(ctx.block().bitcast_i64_to_double(&selected))
         }
 
         // -------- GlobalGet stub --------
@@ -3082,8 +3097,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // -------- ProcessHrtimeBigint stub --------
         Expr::ProcessHrtimeBigint => Ok(double_literal(0.0)),
 
-        // -------- RegExpExecIndex stub (returns -1) --------
-        Expr::RegExpExecIndex => Ok(double_literal(-1.0)),
+        // -------- RegExpExecIndex — reads thread-local from the last exec() call --------
+        Expr::RegExpExecIndex => {
+            Ok(ctx.block().call(DOUBLE, "js_regexp_exec_get_index", &[]))
+        }
 
         // -------- Crypto.* stubs --------
         Expr::CryptoRandomUUID => Ok(double_literal(0.0)),
@@ -3234,8 +3251,27 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(acc)
         }
 
-        // -------- RegExpExecGroups stub (returns null/0.0) --------
-        Expr::RegExpExecGroups => Ok(double_literal(0.0)),
+        // -------- RegExpExecGroups — reads thread-local from the last exec() call --------
+        // Returns an ObjectHeader* (as raw i64); NaN-box with POINTER_TAG so
+        // `lastExecResult.groups.year` reaches the generic object field path.
+        // When no named groups were matched the runtime returns 0, which we
+        // surface as TAG_UNDEFINED so `groups?.year` and `groups === undefined`
+        // probes behave correctly.
+        Expr::RegExpExecGroups => {
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_regexp_exec_get_groups", &[]);
+            let is_zero = blk.icmp_eq(I64, &handle, "0");
+            let ptr_boxed = nanbox_pointer_inline(ctx.block(), &handle);
+            let ptr_bits = ctx.block().bitcast_double_to_i64(&ptr_boxed);
+            let selected = ctx.block().select(
+                I1,
+                &is_zero,
+                I64,
+                crate::nanbox::TAG_UNDEFINED_I64,
+                &ptr_bits,
+            );
+            Ok(ctx.block().bitcast_i64_to_double(&selected))
+        }
 
         // -------- set.clear() --------
         Expr::SetClear(s) => {
@@ -3272,9 +3308,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let idx_i32 = blk.fptosi(DOUBLE, &idx_d, I32);
             Ok(blk.call(DOUBLE, "js_string_code_point_at", &[(I64, &s_handle), (I32, &idx_i32)]))
         }
-        Expr::RegExpSource(o) | Expr::RegExpFlags(o) => {
-            let _ = lower_expr(ctx, o)?;
-            Ok(double_literal(0.0))
+        Expr::RegExpSource(o) => {
+            let r_box = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let r_handle = unbox_to_i64(blk, &r_box);
+            let s_handle = blk.call(I64, "js_regexp_get_source", &[(I64, &r_handle)]);
+            Ok(nanbox_string_inline(blk, &s_handle))
+        }
+        Expr::RegExpFlags(o) => {
+            let r_box = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let r_handle = unbox_to_i64(blk, &r_box);
+            let s_handle = blk.call(I64, "js_regexp_get_flags", &[(I64, &r_handle)]);
+            Ok(nanbox_string_inline(blk, &s_handle))
         }
         Expr::ProcessChdir(p) => {
             let _ = lower_expr(ctx, p)?;
@@ -3406,8 +3452,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_string_inline(blk, &handle))
         }
         Expr::RegExpSetLastIndex { regex, value } => {
-            let _ = lower_expr(ctx, value)?;
-            lower_expr(ctx, regex)
+            let r_box = lower_expr(ctx, regex)?;
+            let v = lower_expr(ctx, value)?;
+            let blk = ctx.block();
+            let r_handle = unbox_to_i64(blk, &r_box);
+            blk.call_void(
+                "js_regexp_set_last_index",
+                &[(I64, &r_handle), (DOUBLE, &v)],
+            );
+            Ok(v)
         }
         Expr::ProcessStdin | Expr::ProcessStdout | Expr::ProcessStderr => {
             Ok(double_literal(0.0))
@@ -3626,8 +3679,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_pointer_inline(blk, &err_handle))
         }
 
-        // -------- RegExpLastIndex stub --------
-        Expr::RegExpLastIndex(_) => Ok(double_literal(0.0)),
+        // -------- RegExpLastIndex — regex.lastIndex getter --------
+        Expr::RegExpLastIndex(r) => {
+            let r_box = lower_expr(ctx, r)?;
+            let blk = ctx.block();
+            let r_handle = unbox_to_i64(blk, &r_box);
+            Ok(blk.call(DOUBLE, "js_regexp_get_last_index", &[(I64, &r_handle)]))
+        }
 
         // -------- BufferConcat stub --------
         Expr::BufferConcat(operand) => lower_expr(ctx, operand),

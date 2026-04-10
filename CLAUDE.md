@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.113
+**Current Version:** 0.4.114
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.114 (llvm-backend)
+- feat: regex advanced + string method wiring (parallel Agent REGEX). `test_edge_strings` flipped DIFF (22) → MATCH. `test_gap_regexp_advanced` flipped CRASH → DIFF (8). `test_gap_string_methods` 75 → 9 diff. `test_edge_json_regex` 14 → 10 diff. Changes touch `lower_string_method.rs` (290+ lines of new string-method dispatch — `padStart`/`padEnd`/`charCodeAt`/`lastIndexOf`/`replaceAll`/`normalize`/`matchAll`/`split` fallbacks), `expr.rs` String*/RegExp* arms (84 lines — `RegExpSource`/`RegExpFlags` now return real string handles, `StringAt` wired, fromCharCode/fromCodePoint), `type_analysis.rs` (34 lines — string-returning method detection for chained calls like `s.trimStart().trimEnd()`), `regex.rs` (lastIndex state tracking fix that was causing the infinite-loop crash in `while (re.exec(text) !== null)`).
 
 ### v0.4.113 (llvm-backend)
 - feat: LLVM backend Web Fetch API — `new Response(body, init)` / `new Headers()` / `new Request(url, init)` constructors lowered in `lower_new` via new `lower_builtin_new` helper, extracting `{status, statusText, headers}` from inline init objects. `NativeMethodCall` dispatch for `module: "fetch"/"Headers"/"Request"` wired in `lower_native_method_call` → `js_fetch_response_text/json/status/statusText/ok/headers/clone/arrayBuffer/blob`, `js_headers_set/get/has/delete/forEach`, `js_request_get_url/method/body`. Chained `r.headers.get(k)` / `r.clone().text()` / `new Response(...).text()` shapes handled at the `Call { PropertyGet { NativeMethodCall, ... } }` callsite. `AbortController` wired: `new AbortController()` allocates via `js_abort_controller_new` (NaN-boxed pointer so `controller.signal`/`.aborted` work via the normal object-field path); `controller.abort(reason?)` and `controller.signal.addEventListener("abort", cb)` dispatch directly via new `lower_abort_controller_call` helper. `Response.json(v)` / `Response.redirect(url, s)` static factories handled. `test_gap_fetch_response` flipped DIFF → MATCH (44 → 0). Sweep 89 → 91 MATCH.

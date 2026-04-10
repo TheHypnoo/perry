@@ -102,6 +102,20 @@ fn is_valid_ptr<T>(p: *const T) -> bool {
     !p.is_null() && (p as usize) >= 0x1000
 }
 
+/// Check if a RegExpHeader pointer is legitimate — it must point to a
+/// header we allocated via `js_regexp_new` (tracked in REGEX_POINTERS).
+/// The LLVM backend's `new RegExp(pat, flags)` currently falls through
+/// to the generic `lower_new` path which allocates an empty object and
+/// NaN-boxes it as a regex; subsequent `.exec()` / `.test()` calls would
+/// read garbage from that object if we didn't gate them on this check.
+#[inline]
+fn is_valid_regex_ptr(p: *const RegExpHeader) -> bool {
+    if !is_valid_ptr(p) {
+        return false;
+    }
+    REGEX_POINTERS.with(|s| s.borrow().contains(&(p as usize)))
+}
+
 /// Internal helper: Get string data from StringHeader
 fn string_as_str<'a>(s: *const StringHeader) -> &'a str {
     unsafe {
@@ -212,7 +226,7 @@ pub extern "C" fn js_regexp_new(pattern: *const StringHeader, flags: *const Stri
 /// regex.test(string) -> boolean
 #[no_mangle]
 pub extern "C" fn js_regexp_test(re: *const RegExpHeader, s: *const StringHeader) -> i32 {
-    if !is_valid_ptr(re) || !is_valid_ptr(s) {
+    if !is_valid_regex_ptr(re) || !is_valid_ptr(s) {
         return 0;
     }
 
@@ -228,7 +242,7 @@ pub extern "C" fn js_regexp_test(re: *const RegExpHeader, s: *const StringHeader
 /// string.match(regex) -> string[] | null (returns array pointer, null if no match)
 #[no_mangle]
 pub extern "C" fn js_string_match(s: *const StringHeader, re: *const RegExpHeader) -> *mut ArrayHeader {
-    if !is_valid_ptr(s) || !is_valid_ptr(re) {
+    if !is_valid_ptr(s) || !is_valid_regex_ptr(re) {
         return ptr::null_mut();
     }
 
@@ -290,7 +304,7 @@ pub extern "C" fn js_string_match(s: *const StringHeader, re: *const RegExpHeade
 /// string.matchAll(regex) -> Array<Array<string>> (array of match arrays)
 #[no_mangle]
 pub extern "C" fn js_string_match_all(s: *const StringHeader, re: *const RegExpHeader) -> *mut ArrayHeader {
-    if !is_valid_ptr(s) || !is_valid_ptr(re) {
+    if !is_valid_ptr(s) || !is_valid_regex_ptr(re) {
         // Return empty array, not null (matchAll never returns null)
         return crate::array::js_array_alloc(0);
     }
@@ -353,7 +367,7 @@ pub extern "C" fn js_string_replace_regex(
     let str_data = string_as_str(s);
     let repl_str = if is_valid_ptr(replacement) { string_as_str(replacement) } else { "undefined" };
 
-    if !is_valid_ptr(re) {
+    if !is_valid_regex_ptr(re) {
         // If regex is null, return original string
         return js_string_from_str(str_data);
     }
@@ -430,7 +444,7 @@ pub extern "C" fn js_string_split_regex(
     }
     let str_data = string_as_str(s);
 
-    if !is_valid_ptr(re) {
+    if !is_valid_regex_ptr(re) {
         // No regex: return array with the whole string as a single element
         let arr = crate::array::js_array_alloc(1);
         unsafe {
@@ -467,7 +481,7 @@ pub extern "C" fn js_string_search_regex(
     s: *const StringHeader,
     re: *const RegExpHeader,
 ) -> i32 {
-    if !is_valid_ptr(s) || !is_valid_ptr(re) {
+    if !is_valid_ptr(s) || !is_valid_regex_ptr(re) {
         return -1;
     }
     let str_data = string_as_str(s);
@@ -497,7 +511,9 @@ pub extern "C" fn js_regexp_exec(re: *mut RegExpHeader, s: *const StringHeader) 
     const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
     const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
-    if !is_valid_ptr(re) || !is_valid_ptr(s) {
+    if !is_valid_regex_ptr(re) || !is_valid_ptr(s) {
+        LAST_EXEC_INDEX.with(|idx| *idx.borrow_mut() = -1.0);
+        LAST_EXEC_GROUPS.with(|g| *g.borrow_mut() = ptr::null_mut());
         return ptr::null_mut();
     }
 
@@ -629,7 +645,7 @@ pub extern "C" fn js_regexp_exec_get_groups() -> i64 {
 /// Get regex.source — returns the pattern string
 #[no_mangle]
 pub extern "C" fn js_regexp_get_source(re: *const RegExpHeader) -> *mut StringHeader {
-    if !is_valid_ptr(re) {
+    if !is_valid_regex_ptr(re) {
         return js_string_from_str("");
     }
     unsafe {
@@ -646,7 +662,7 @@ pub extern "C" fn js_regexp_get_source(re: *const RegExpHeader) -> *mut StringHe
 /// Get regex.flags — returns the flags string
 #[no_mangle]
 pub extern "C" fn js_regexp_get_flags(re: *const RegExpHeader) -> *mut StringHeader {
-    if !is_valid_ptr(re) {
+    if !is_valid_regex_ptr(re) {
         return js_string_from_str("");
     }
     unsafe {
@@ -662,7 +678,7 @@ pub extern "C" fn js_regexp_get_flags(re: *const RegExpHeader) -> *mut StringHea
 /// Get regex.lastIndex — returns the current lastIndex value as f64
 #[no_mangle]
 pub extern "C" fn js_regexp_get_last_index(re: *const RegExpHeader) -> f64 {
-    if !is_valid_ptr(re) {
+    if !is_valid_regex_ptr(re) {
         return 0.0;
     }
     unsafe {
@@ -673,7 +689,7 @@ pub extern "C" fn js_regexp_get_last_index(re: *const RegExpHeader) -> f64 {
 /// Set regex.lastIndex
 #[no_mangle]
 pub extern "C" fn js_regexp_set_last_index(re: *mut RegExpHeader, value: f64) {
-    if !is_valid_ptr(re) {
+    if !is_valid_regex_ptr(re) {
         return;
     }
     unsafe {
@@ -695,7 +711,7 @@ pub extern "C" fn js_string_replace_regex_fn(
     }
     let str_data = string_as_str(s);
 
-    if !is_valid_ptr(re) {
+    if !is_valid_regex_ptr(re) {
         return js_string_from_str(str_data);
     }
 
@@ -820,7 +836,7 @@ pub extern "C" fn js_string_replace_regex_named(
     let str_data = string_as_str(s);
     let repl_str = if is_valid_ptr(replacement) { string_as_str(replacement) } else { "undefined" };
 
-    if !is_valid_ptr(re) {
+    if !is_valid_regex_ptr(re) {
         return js_string_from_str(str_data);
     }
 

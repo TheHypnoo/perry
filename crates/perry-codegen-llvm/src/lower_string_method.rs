@@ -5,8 +5,9 @@
 
 use anyhow::{anyhow, bail, Result};
 use perry_hir::Expr;
+use perry_types::Type as HirType;
 
-use crate::expr::{lower_expr, nanbox_string_inline, unbox_to_i64, i32_bool_to_nanbox, FnCtx};
+use crate::expr::{lower_expr, nanbox_pointer_inline, nanbox_string_inline, unbox_to_i64, i32_bool_to_nanbox, FnCtx};
 use crate::nanbox::POINTER_MASK_I64;
 use crate::type_analysis::is_string_expr;
 use crate::types::{DOUBLE, I1, I32, I64};
@@ -180,19 +181,47 @@ pub(crate) fn lower_string_method(
                     args.len()
                 );
             }
-            // First arg is either a string or a regex literal — pick
-            // the right runtime function. The regex form takes a
-            // RegExpHeader pointer; the string form takes a string
-            // handle. Both replacements are string handles.
-            let needle_is_regex = matches!(&args[0], Expr::RegExp { .. });
+            // First arg is either a string or a regex literal. The
+            // second arg can be a string OR a function (replacer
+            // callback). Pick the right runtime function based on
+            // both shapes.
+            let needle_is_regex = matches!(&args[0], Expr::RegExp { .. })
+                || matches!(&args[0], Expr::LocalGet(id) if matches!(
+                    ctx.local_types.get(id),
+                    Some(HirType::Named(n)) if n == "RegExp"
+                ));
+            // Detect a function replacer: a Closure literal, a FuncRef,
+            // or a LocalGet of a function-typed local.
+            let repl_is_function = matches!(
+                &args[1],
+                Expr::Closure { .. } | Expr::FuncRef(_)
+            ) || matches!(&args[1], Expr::LocalGet(id) if ctx.local_closure_func_ids.contains_key(id));
+            // Detect a string literal that includes $<name> back-refs
+            // so we route to the named-group-aware runtime variant.
+            let repl_has_named = matches!(&args[1], Expr::String(s) if s.contains("$<"));
             let needle_box = lower_expr(ctx, &args[0])?;
             let repl_box = lower_expr(ctx, &args[1])?;
             let blk = ctx.block();
             let recv_handle = unbox_to_i64(blk, &recv_box);
             let needle_handle = unbox_to_i64(blk, &needle_box);
-            let repl_handle = unbox_to_i64(blk, &repl_box);
+            if needle_is_regex && repl_is_function {
+                // repl_box is a NaN-boxed closure pointer (double).
+                // js_string_replace_regex_fn takes the callback as f64.
+                let result = blk.call(
+                    I64,
+                    "js_string_replace_regex_fn",
+                    &[(I64, &recv_handle), (I64, &needle_handle), (DOUBLE, &repl_box)],
+                );
+                return Ok(nanbox_string_inline(blk, &result));
+            }
+            let repl_bits = blk.bitcast_double_to_i64(&repl_box);
+            let repl_handle = blk.and(I64, &repl_bits, POINTER_MASK_I64);
             let runtime_fn = if needle_is_regex {
-                "js_string_replace_regex"
+                if repl_has_named {
+                    "js_string_replace_regex_named"
+                } else {
+                    "js_string_replace_regex"
+                }
             } else if property == "replaceAll" {
                 "js_string_replace_all_string"
             } else {
@@ -202,6 +231,251 @@ pub(crate) fn lower_string_method(
                 I64,
                 runtime_fn,
                 &[(I64, &recv_handle), (I64, &needle_handle), (I64, &repl_handle)],
+            );
+            Ok(nanbox_string_inline(blk, &result))
+        }
+        // str.at(i) / str.charCodeAt(i) / str.codePointAt(i)
+        "at" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: String.at expects 1 arg, got {}", args.len());
+            }
+            let idx_d = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let idx_i32 = blk.fptosi(DOUBLE, &idx_d, I32);
+            // js_string_at returns a NaN-boxed string or undefined directly.
+            Ok(blk.call(DOUBLE, "js_string_at", &[(I64, &recv_handle), (I32, &idx_i32)]))
+        }
+        "codePointAt" => {
+            if args.is_empty() || args.len() > 1 {
+                bail!("perry-codegen-llvm: String.codePointAt expects 1 arg, got {}", args.len());
+            }
+            let idx_d = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let idx_i32 = blk.fptosi(DOUBLE, &idx_d, I32);
+            // Returns NaN-boxed number or undefined directly.
+            Ok(blk.call(DOUBLE, "js_string_code_point_at", &[(I64, &recv_handle), (I32, &idx_i32)]))
+        }
+        "charCodeAt" => {
+            if args.is_empty() || args.len() > 1 {
+                bail!("perry-codegen-llvm: String.charCodeAt expects 1 arg, got {}", args.len());
+            }
+            let idx_d = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let idx_i32 = blk.fptosi(DOUBLE, &idx_d, I32);
+            // js_string_char_code_at returns a plain f64 (NaN for OOB).
+            Ok(blk.call(DOUBLE, "js_string_char_code_at", &[(I64, &recv_handle), (I32, &idx_i32)]))
+        }
+        "lastIndexOf" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: String.lastIndexOf expects 1 arg, got {}", args.len());
+            }
+            let needle_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let needle_handle = unbox_to_i64(blk, &needle_box);
+            let i32_v = blk.call(
+                I32,
+                "js_string_last_index_of",
+                &[(I64, &recv_handle), (I64, &needle_handle)],
+            );
+            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+        }
+        "padStart" | "padEnd" => {
+            if args.is_empty() || args.len() > 2 {
+                bail!("perry-codegen-llvm: String.{} expects 1 or 2 args, got {}", property, args.len());
+            }
+            let len_d = lower_expr(ctx, &args[0])?;
+            // Optional pad string; defaults to " " when missing.
+            let pad_handle = if args.len() == 2 {
+                let pad_box = lower_expr(ctx, &args[1])?;
+                let blk = ctx.block();
+                unbox_to_i64(blk, &pad_box)
+            } else {
+                let sp_idx = ctx.strings.intern(" ");
+                let sp_global = format!("@{}", ctx.strings.entry(sp_idx).handle_global);
+                let blk = ctx.block();
+                let sp_box = blk.load(DOUBLE, &sp_global);
+                unbox_to_i64(blk, &sp_box)
+            };
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let len_i32 = blk.fptosi(DOUBLE, &len_d, I32);
+            let runtime_fn = if property == "padStart" {
+                "js_string_pad_start"
+            } else {
+                "js_string_pad_end"
+            };
+            let result = blk.call(
+                I64,
+                runtime_fn,
+                &[(I64, &recv_handle), (I32, &len_i32), (I64, &pad_handle)],
+            );
+            Ok(nanbox_string_inline(blk, &result))
+        }
+        "normalize" => {
+            // 0 or 1 string arg. Empty arg → default ("NFC" handled by
+            // the runtime when form is null).
+            if args.len() > 1 {
+                bail!("perry-codegen-llvm: String.normalize expects 0 or 1 args, got {}", args.len());
+            }
+            let form_handle = if args.is_empty() {
+                "0".to_string()
+            } else {
+                let form_box = lower_expr(ctx, &args[0])?;
+                let blk = ctx.block();
+                unbox_to_i64(blk, &form_box)
+            };
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let result = blk.call(
+                I64,
+                "js_string_normalize",
+                &[(I64, &recv_handle), (I64, &form_handle)],
+            );
+            Ok(nanbox_string_inline(blk, &result))
+        }
+        "localeCompare" => {
+            if args.is_empty() || args.len() > 3 {
+                bail!("perry-codegen-llvm: String.localeCompare expects 1-3 args, got {}", args.len());
+            }
+            let other_box = lower_expr(ctx, &args[0])?;
+            // Ignore optional locale/options args.
+            for extra in args.iter().skip(1) {
+                let _ = lower_expr(ctx, extra)?;
+            }
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let other_handle = unbox_to_i64(blk, &other_box);
+            // Returns a plain f64 (-1/0/1) — NOT NaN-tagged.
+            Ok(blk.call(
+                DOUBLE,
+                "js_string_locale_compare",
+                &[(I64, &recv_handle), (I64, &other_handle)],
+            ))
+        }
+        "search" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: String.search expects 1 arg, got {}", args.len());
+            }
+            // The arg is a regex (literal or local).
+            let re_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let re_handle = unbox_to_i64(blk, &re_box);
+            let i32_v = blk.call(
+                I32,
+                "js_string_search_regex",
+                &[(I64, &recv_handle), (I64, &re_handle)],
+            );
+            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+        }
+        "match" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: String.match expects 1 arg, got {}", args.len());
+            }
+            let re_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let re_handle = unbox_to_i64(blk, &re_box);
+            let result = blk.call(
+                I64,
+                "js_string_match",
+                &[(I64, &recv_handle), (I64, &re_handle)],
+            );
+            // Runtime may return null (0) on no-match. Convert that to
+            // TAG_NULL so `s.match(re) !== null` behaves correctly.
+            let is_null = blk.icmp_eq(I64, &result, "0");
+            let ptr_boxed = nanbox_pointer_inline(ctx.block(), &result);
+            let ptr_bits = ctx.block().bitcast_double_to_i64(&ptr_boxed);
+            let selected = ctx.block().select(
+                I1,
+                &is_null,
+                I64,
+                crate::nanbox::TAG_NULL_I64,
+                &ptr_bits,
+            );
+            Ok(ctx.block().bitcast_i64_to_double(&selected))
+        }
+        "matchAll" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: String.matchAll expects 1 arg, got {}", args.len());
+            }
+            let re_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let re_handle = unbox_to_i64(blk, &re_box);
+            let result = blk.call(
+                I64,
+                "js_string_match_all",
+                &[(I64, &recv_handle), (I64, &re_handle)],
+            );
+            // matchAll always returns an array (possibly empty), never null.
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        "isWellFormed" => {
+            if !args.is_empty() {
+                bail!("perry-codegen-llvm: String.isWellFormed takes no args, got {}", args.len());
+            }
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            // Returns a NaN-tagged boolean directly.
+            Ok(blk.call(DOUBLE, "js_string_is_well_formed", &[(I64, &recv_handle)]))
+        }
+        "toWellFormed" => {
+            if !args.is_empty() {
+                bail!("perry-codegen-llvm: String.toWellFormed takes no args, got {}", args.len());
+            }
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let result = blk.call(I64, "js_string_to_well_formed", &[(I64, &recv_handle)]);
+            Ok(nanbox_string_inline(blk, &result))
+        }
+        "concat" => {
+            // str.concat(s1, s2, …) = str + s1 + s2 + … . Sequential
+            // js_string_concat calls; each op returns a new handle.
+            let blk = ctx.block();
+            let mut acc_handle = unbox_to_i64(blk, &recv_box);
+            for a in args {
+                let s_box = lower_expr(ctx, a)?;
+                let blk = ctx.block();
+                let s_handle = unbox_to_i64(blk, &s_box);
+                acc_handle = blk.call(
+                    I64,
+                    "js_string_concat",
+                    &[(I64, &acc_handle), (I64, &s_handle)],
+                );
+            }
+            Ok(nanbox_string_inline(ctx.block(), &acc_handle))
+        }
+        "substr" => {
+            // Legacy substr(start, length) — map to slice(start, start+length).
+            // Without a dedicated runtime helper we approximate with substring.
+            if args.is_empty() || args.len() > 2 {
+                bail!("perry-codegen-llvm: String.substr expects 1 or 2 args, got {}", args.len());
+            }
+            let start_d = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let start_i32 = blk.fptosi(DOUBLE, &start_d, I32);
+            let end_i32 = if args.len() == 2 {
+                let len_d = lower_expr(ctx, &args[1])?;
+                let blk = ctx.block();
+                let len_i32 = blk.fptosi(DOUBLE, &len_d, I32);
+                blk.add(I32, &start_i32, &len_i32)
+            } else {
+                // Default end = receiver length.
+                let blk = ctx.block();
+                let len_ptr = blk.inttoptr(I64, &recv_handle);
+                blk.load(I32, &len_ptr)
+            };
+            let blk = ctx.block();
+            let result = blk.call(
+                I64,
+                "js_string_substring",
+                &[(I64, &recv_handle), (I32, &start_i32), (I32, &end_i32)],
             );
             Ok(nanbox_string_inline(blk, &result))
         }

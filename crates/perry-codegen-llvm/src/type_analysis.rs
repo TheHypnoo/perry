@@ -54,9 +54,14 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         Expr::MapNewFromArray(_) | Expr::MapNew => Some(HirType::Named("Map".into())),
         // Object.keys() always returns string handles.
         Expr::ObjectKeys(_) => Some(HirType::Array(Box::new(HirType::String))),
-        Expr::String(_) | Expr::ArrayJoin { .. } | Expr::StringCoerce(_) => {
-            Some(HirType::String)
-        }
+        Expr::String(_)
+        | Expr::ArrayJoin { .. }
+        | Expr::StringCoerce(_)
+        | Expr::StringFromCodePoint(_)
+        | Expr::StringFromCharCode(_)
+        | Expr::StringAt { .. }
+        | Expr::RegExpSource(_)
+        | Expr::RegExpFlags(_) => Some(HirType::String),
         // `let l = new ClassName<...>()` — refine to Named(ClassName)
         // so subsequent `l.method()` dispatch goes through the class
         // method registry instead of the universal fallback. This is
@@ -285,6 +290,13 @@ pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         | Expr::PathExtname(_)
         | Expr::PathResolve(_)
         | Expr::PathNormalize(_) => true,
+        // String.fromCodePoint(...) / String.fromCharCode(...) / str.at(i)
+        // / RegExp.source|flags — all produce string handles.
+        Expr::StringFromCodePoint(_)
+        | Expr::StringFromCharCode(_)
+        | Expr::StringAt { .. }
+        | Expr::RegExpSource(_)
+        | Expr::RegExpFlags(_) => true,
         // `obj.toString()` always returns a string. Same for the
         // string-returning method family (trim, trimStart, trimEnd,
         // toLowerCase, toUpperCase, slice, substring, charAt, repeat,
@@ -301,6 +313,7 @@ pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
                         | "trimStart" | "trimEnd" | "slice" | "substring"
                         | "substr" | "charAt" | "repeat" | "replace"
                         | "replaceAll" | "padStart" | "padEnd" | "concat"
+                        | "normalize" | "at" | "toWellFormed"
                 ) && (
                     is_string_expr(ctx, object)
                         || matches!(property.as_str(), "toString")
@@ -549,6 +562,21 @@ pub(crate) fn static_type_of(ctx: &FnCtx<'_>, e: &Expr) -> Option<HirType> {
         | Expr::ObjectValues(_)
         | Expr::ObjectEntries(_) => {
             Some(HirType::Array(Box::new(HirType::Any)))
+        }
+        // `str.split(delim)` returns Array<String>. Catches the generic
+        // Call form that bypasses the `Expr::StringSplit` variant — e.g.
+        // `"a,b,c".split(",")` in an expression position where we need
+        // `.length` / `[i]` to follow the array fast path.
+        // Also: `str.match(regex)` / `str.matchAll(regex)` produce arrays.
+        Expr::Call { callee, .. }
+            if matches!(
+                callee.as_ref(),
+                Expr::PropertyGet { property, object } if matches!(
+                    property.as_str(), "split" | "match" | "matchAll"
+                ) && is_string_expr(ctx, object)
+            ) =>
+        {
+            Some(HirType::Array(Box::new(HirType::String)))
         }
         // `arr[i]` where `arr: Array<T>` has static type `T`. This lets
         // nested access like `grid[i][j]` and `grid[i].length` reach
