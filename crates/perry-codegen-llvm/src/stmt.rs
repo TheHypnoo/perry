@@ -357,6 +357,14 @@ fn lower_try(
 ) -> Result<()> {
     use crate::types::{I32, PTR};
 
+    // Mark the enclosing function so IR emission adds `#1`
+    // (noinline optnone). At -O2 on aarch64, LLVM's mem2reg/SROA will
+    // otherwise promote allocas to SSA registers across the setjmp
+    // call — making mutations performed in the try body invisible in
+    // the catch block after longjmp. `returns_twice` on the setjmp
+    // call site alone is not sufficient.
+    ctx.func.has_try = true;
+
     // Allocate blocks.
     let try_body_idx = ctx.new_block("try.body");
     let catch_idx = ctx.new_block("try.catch");

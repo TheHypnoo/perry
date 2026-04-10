@@ -186,6 +186,13 @@ impl LlModule {
         // Only emit if setjmp was actually declared in this module.
         if self.declared_names.contains("setjmp") {
             ir.push_str("\nattributes #0 = { returns_twice }\n");
+            // Functions that contain a `try` statement are marked with `#1`.
+            // `optnone` forces LLVM to skip mem2reg/SROA inside the function,
+            // so allocas aren't promoted to SSA registers across the setjmp
+            // call — otherwise mutations in the try body are invisible to
+            // the catch block after longjmp. Pairs with `noinline` so the
+            // constraint isn't lost via inlining into a caller.
+            ir.push_str("attributes #1 = { noinline optnone }\n");
         }
 
         ir

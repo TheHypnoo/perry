@@ -16,6 +16,13 @@ pub struct LlFunction {
     /// Optional LLVM linkage string, e.g. `"internal"` or `"private"`. Empty
     /// string means external (default) linkage.
     pub linkage: String,
+    /// When true, the function body contains a `try` statement (setjmp/longjmp).
+    /// We must emit `#1` (noinline optnone) on the definition so LLVM doesn't
+    /// promote allocas to SSA registers across the setjmp call — otherwise
+    /// mutations performed in the try body are invisible in the catch block
+    /// after longjmp returns. `returns_twice` alone on the setjmp call is not
+    /// sufficient at -O2 on aarch64.
+    pub has_try: bool,
     blocks: Vec<LlBlock>,
     block_counter: u32,
     reg_counter: Rc<RegCounter>,
@@ -28,6 +35,7 @@ impl LlFunction {
             return_type,
             params,
             linkage: String::new(),
+            has_try: false,
             blocks: Vec::new(),
             block_counter: 0,
             reg_counter: Rc::new(RegCounter::new()),
@@ -82,9 +90,10 @@ impl LlFunction {
             format!("{} ", self.linkage)
         };
 
+        let attrs = if self.has_try { " #1" } else { "" };
         let mut ir = format!(
-            "define {}{} @{}({}) {{\n",
-            linkage, self.return_type, self.name, param_str
+            "define {}{} @{}({}){} {{\n",
+            linkage, self.return_type, self.name, param_str, attrs
         );
 
         for (i, blk) in self.blocks.iter().enumerate() {

@@ -1195,6 +1195,39 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         // for static/const objects that don't have GcHeaders.
         let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
         let gc_type = (*gc_header).obj_type;
+        // Error objects: route the common instance properties (message,
+        // name, stack, cause) through the dedicated error accessors.
+        // `js_object_get_field_by_name_f64` is the codegen's default
+        // property dispatch for caught exceptions, so this is the only
+        // sensible place to wire Error access.
+        if gc_type == crate::gc::GC_TYPE_ERROR {
+            if !key.is_null() {
+                let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                let key_len = (*key).length as usize;
+                let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
+                let err_ptr = obj as *mut crate::error::ErrorHeader;
+                match key_bytes {
+                    b"message" => {
+                        let s = crate::error::js_error_get_message(err_ptr);
+                        return JSValue::from_bits(crate::js_nanbox_string(s as i64).to_bits());
+                    }
+                    b"name" => {
+                        let s = crate::error::js_error_get_name(err_ptr);
+                        return JSValue::from_bits(crate::js_nanbox_string(s as i64).to_bits());
+                    }
+                    b"stack" => {
+                        let s = crate::error::js_error_get_stack(err_ptr);
+                        return JSValue::from_bits(crate::js_nanbox_string(s as i64).to_bits());
+                    }
+                    b"cause" => {
+                        let v = crate::error::js_error_get_cause(err_ptr);
+                        return JSValue::from_bits(v.to_bits());
+                    }
+                    _ => return JSValue::undefined(),
+                }
+            }
+            return JSValue::undefined();
+        }
         if gc_type != crate::gc::GC_TYPE_OBJECT {
             let object_type = (*obj).object_type;
             if object_type != crate::error::OBJECT_TYPE_REGULAR {

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.101
+**Current Version:** 0.4.102
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.102 (llvm-backend)
+- fix: **try/catch state preservation across setjmp**. At -O2 on aarch64, LLVM's mem2reg promoted allocas to SSA registers inside functions containing `try {}` — so mutations performed in the try body (like `log = log + "try,"`) were invisible in the catch block after longjmp returned. `returns_twice` on the setjmp call alone was not sufficient. Fix: mark the enclosing function with `noinline optnone` (`#1`) in the LLVM IR so the optimizer leaves allocas on the stack across setjmp. New `has_try` bit on `LlFunction` set by `lower_try`; module emits `attributes #1 = { noinline optnone }`.
+- fix: `e.message` / `e.name` / `e.stack` / `e.cause` on caught exceptions returned `undefined` because codegen routed property access through `js_object_get_field_by_name_f64`, which returned undefined for non-Object GC types. Runtime now detects `GC_TYPE_ERROR` in that path and dispatches to `js_error_get_message`/`_get_name`/`_get_stack`/`_get_cause`. Tests flipped to MATCH: test_edge_control_flow, test_edge_error_handling (was: 28+4 = 32 lines diff → 0).
 
 ### v0.4.101 (llvm-backend)
 - fix: `js_array_clone` runtime declaration was missing from `runtime_decls.rs` — Array.from and all chained array ops that touch it failed with `use of undefined value '@js_array_clone'`. 4 tests flipped from COMPILE_FAIL to DIFF (test_edge_arrays, test_edge_iteration, test_edge_map_set, test_gap_class_advanced).
