@@ -3211,13 +3211,46 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_regexp_exec_get_index", &[]))
         }
 
-        // -------- Crypto.* stubs --------
-        Expr::CryptoRandomUUID => Ok(double_literal(0.0)),
-        Expr::CryptoRandomBytes(operand)
-        | Expr::CryptoSha256(operand)
-        | Expr::CryptoMd5(operand) => {
-            let _ = lower_expr(ctx, operand)?;
-            Ok(double_literal(0.0))
+        // -------- Crypto.* wired to real runtime helpers --------
+        Expr::CryptoRandomUUID => {
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_crypto_random_uuid", &[]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
+        Expr::CryptoRandomBytes(operand) => {
+            // Returns a raw *mut BufferHeader i64. NaN-box with
+            // POINTER_TAG so downstream BUFFER_REGISTRY checks
+            // (format_jsvalue, .length, etc.) see a real buffer.
+            let size_box = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            let buf_handle = blk.call(
+                I64,
+                "js_crypto_random_bytes_buffer",
+                &[(DOUBLE, &size_box)],
+            );
+            Ok(nanbox_pointer_inline(blk, &buf_handle))
+        }
+        Expr::CryptoSha256(operand) => {
+            let data_box = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            let data_handle = unbox_to_i64(blk, &data_box);
+            let result = blk.call(
+                I64,
+                "js_crypto_sha256",
+                &[(I64, &data_handle)],
+            );
+            Ok(nanbox_string_inline(blk, &result))
+        }
+        Expr::CryptoMd5(operand) => {
+            let data_box = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            let data_handle = unbox_to_i64(blk, &data_box);
+            let result = blk.call(
+                I64,
+                "js_crypto_md5",
+                &[(I64, &data_handle)],
+            );
+            Ok(nanbox_string_inline(blk, &result))
         }
 
         // -------- arr.indexOf(value) -> number --------
