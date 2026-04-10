@@ -90,7 +90,17 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         | Expr::DateToLocaleDateString(_)
         | Expr::DateToLocaleTimeString(_)
         | Expr::DateToISOString(_)
-        | Expr::DateToJSON(_) => Some(HirType::String),
+        | Expr::DateToJSON(_)
+        // node:path constants
+        | Expr::PathSep
+        | Expr::PathDelimiter
+        // JSON.stringify returns a string (Union<String,Void> for toJSON
+        // interop, but always a string in practice for the common case —
+        // explicitly refining to String makes `s.includes(...)` /
+        // `s.split(...)` etc. hit the string method fast path).
+        | Expr::JsonStringify(_)
+        | Expr::JsonStringifyPretty { .. }
+        | Expr::JsonStringifyFull(..) => Some(HirType::String),
         // `let l = new ClassName<...>()` — refine to Named(ClassName)
         // so subsequent `l.method()` dispatch goes through the class
         // method registry instead of the universal fallback. This is
@@ -351,7 +361,11 @@ pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         | Expr::DateToJSON(_)
         // node:path constants
         | Expr::PathSep
-        | Expr::PathDelimiter => true,
+        | Expr::PathDelimiter
+        // JSON.stringify returns a string
+        | Expr::JsonStringify(_)
+        | Expr::JsonStringifyPretty { .. }
+        | Expr::JsonStringifyFull(..) => true,
         // process.* / os.* string-returning accessors. These lower to runtime
         // calls that return raw StringHeader* pointers, NaN-boxed with STRING_TAG
         // in expr.rs. Without this, `process.version.startsWith('v')` falls
