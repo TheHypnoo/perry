@@ -376,8 +376,8 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                         }
                     }
                     let inner = parts.join(", ");
-                    // Node uses multi-line for arrays with >5 elements or >72 chars
-                    if length > 5 || inner.len() > 72 {
+                    // Node uses multi-line for arrays with >6 elements or >72 chars
+                    if length > 6 || inner.len() > 72 {
                         let indent = "  ";
                         let lines: Vec<String> = parts.chunks(4).map(|chunk| {
                             format!("{}{}", indent, chunk.join(", "))

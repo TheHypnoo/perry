@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.114
+**Current Version:** 0.4.115
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.115 (llvm-backend)
+- feat: ES2023 immutable array methods (parallel Agent ARRAY) — `Expr::ArrayToReversed`/`ArrayToSorted`/`ArrayToSpliced`/`ArrayWith`/`ArrayCopyWithin` now call the existing runtime functions (`js_array_to_reversed`/`js_array_to_sorted_default`/`js_array_to_sorted_with_comparator`/`js_array_to_spliced`/`js_array_with`/`js_array_copy_within`) instead of returning the receiver unchanged. `toSpliced` builds a stack `[N x double]` buffer for insert items. Runtime declarations added in `runtime_decls.rs`. `test_gap_array_methods` diff drops 64 → 37 lines.
+- fix: `format_jsvalue` array wrap threshold raised from `> 5` to `> 6` — Node uses single-line formatting for arrays of ≤ 6 elements, multiline for ≥ 7.
 
 ### v0.4.114 (llvm-backend)
 - feat: regex advanced + string method wiring (parallel Agent REGEX). `test_edge_strings` flipped DIFF (22) → MATCH. `test_gap_regexp_advanced` flipped CRASH → DIFF (8). `test_gap_string_methods` 75 → 9 diff. `test_edge_json_regex` 14 → 10 diff. Changes touch `lower_string_method.rs` (290+ lines of new string-method dispatch — `padStart`/`padEnd`/`charCodeAt`/`lastIndexOf`/`replaceAll`/`normalize`/`matchAll`/`split` fallbacks), `expr.rs` String*/RegExp* arms (84 lines — `RegExpSource`/`RegExpFlags` now return real string handles, `StringAt` wired, fromCharCode/fromCodePoint), `type_analysis.rs` (34 lines — string-returning method detection for chained calls like `s.trimStart().trimEnd()`), `regex.rs` (lastIndex state tracking fix that was causing the infinite-loop crash in `while (re.exec(text) !== null)`).

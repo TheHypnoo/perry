@@ -3555,35 +3555,112 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_string_inline(blk, &handle))
         }
         Expr::ArrayWith { array, index, value } => {
-            let _ = lower_expr(ctx, index)?;
-            let _ = lower_expr(ctx, value)?;
-            lower_expr(ctx, array)
+            let arr_box = lower_expr(ctx, array)?;
+            let idx_d = lower_expr(ctx, index)?;
+            let val_d = lower_expr(ctx, value)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let result = blk.call(
+                I64,
+                "js_array_with",
+                &[(I64, &arr_handle), (DOUBLE, &idx_d), (DOUBLE, &val_d)],
+            );
+            Ok(nanbox_pointer_inline(blk, &result))
         }
         Expr::ArrayCopyWithin { array_id, target, start, end } => {
-            let _ = lower_expr(ctx, target)?;
-            let _ = lower_expr(ctx, start)?;
-            if let Some(e) = end {
-                let _ = lower_expr(ctx, e)?;
-            }
-            lower_expr(ctx, &Expr::LocalGet(*array_id))
+            let arr_box = lower_expr(ctx, &Expr::LocalGet(*array_id))?;
+            let target_d = lower_expr(ctx, target)?;
+            let start_d = lower_expr(ctx, start)?;
+            let (has_end_str, end_d) = if let Some(e) = end {
+                let v = lower_expr(ctx, e)?;
+                ("1".to_string(), v)
+            } else {
+                ("0".to_string(), "0.0".to_string())
+            };
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let result = blk.call(
+                I64,
+                "js_array_copy_within",
+                &[
+                    (I64, &arr_handle),
+                    (DOUBLE, &target_d),
+                    (DOUBLE, &start_d),
+                    (I32, &has_end_str),
+                    (DOUBLE, &end_d),
+                ],
+            );
+            Ok(nanbox_pointer_inline(blk, &result))
         }
-        Expr::ArrayToReversed { array } => lower_expr(ctx, array),
+        Expr::ArrayToReversed { array } => {
+            let arr_box = lower_expr(ctx, array)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let result = blk.call(I64, "js_array_to_reversed", &[(I64, &arr_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
         Expr::ArrayToSorted { array, comparator } => {
-            // Lower the comparator for side effects (closure walker
-            // needs to find any closures inside it). Return the array
-            // unchanged — wrong but doesn't crash.
-            if let Some(c) = comparator {
-                let _ = lower_expr(ctx, c)?;
-            }
-            lower_expr(ctx, array)
+            let arr_box = lower_expr(ctx, array)?;
+            let result = if let Some(c) = comparator {
+                let cmp_box = lower_expr(ctx, c)?;
+                let blk = ctx.block();
+                let arr_handle = unbox_to_i64(blk, &arr_box);
+                let cmp_handle = unbox_to_i64(blk, &cmp_box);
+                blk.call(
+                    I64,
+                    "js_array_to_sorted_with_comparator",
+                    &[(I64, &arr_handle), (I64, &cmp_handle)],
+                )
+            } else {
+                let blk = ctx.block();
+                let arr_handle = unbox_to_i64(blk, &arr_box);
+                blk.call(I64, "js_array_to_sorted_default", &[(I64, &arr_handle)])
+            };
+            Ok(nanbox_pointer_inline(ctx.block(), &result))
         }
         Expr::ArrayToSpliced { array, start, delete_count, items } => {
-            let _ = lower_expr(ctx, start)?;
-            let _ = lower_expr(ctx, delete_count)?;
+            let arr_box = lower_expr(ctx, array)?;
+            let start_d = lower_expr(ctx, start)?;
+            let count_d = lower_expr(ctx, delete_count)?;
+
+            // Lower items to a Vec of f64 expressions
+            let mut item_vals: Vec<String> = Vec::new();
             for it in items {
-                let _ = lower_expr(ctx, it)?;
+                item_vals.push(lower_expr(ctx, it)?);
             }
-            lower_expr(ctx, array)
+
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+
+            let (items_ptr, items_count_str) = if item_vals.is_empty() {
+                ("null".to_string(), "0".to_string())
+            } else {
+                let n = item_vals.len();
+                let items_count_str = format!("{}", n);
+                let buf_reg = blk.next_reg();
+                blk.emit_raw(format!(
+                    "{} = alloca [{} x double]",
+                    buf_reg, n
+                ));
+                for (i, val) in item_vals.iter().enumerate() {
+                    let slot = blk.gep(DOUBLE, &buf_reg, &[(I64, &format!("{}", i))]);
+                    blk.store(DOUBLE, val, &slot);
+                }
+                (buf_reg, items_count_str)
+            };
+
+            let result = blk.call(
+                I64,
+                "js_array_to_spliced",
+                &[
+                    (I64, &arr_handle),
+                    (DOUBLE, &start_d),
+                    (DOUBLE, &count_d),
+                    (PTR, &items_ptr),
+                    (I32, &items_count_str),
+                ],
+            );
+            Ok(nanbox_pointer_inline(blk, &result))
         }
         Expr::ArrayAt { array, index } => {
             // arr.at(i) — negative index counts from the end. The

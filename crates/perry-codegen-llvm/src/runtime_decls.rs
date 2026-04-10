@@ -265,6 +265,13 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_array_flat", I64, &[I64]);
     module.declare_function("js_array_flatMap", I64, &[I64, I64]);
     module.declare_function("js_array_sort_with_comparator", I64, &[I64, I64]);
+    // ES2023 immutable array methods
+    module.declare_function("js_array_to_reversed", I64, &[I64]);
+    module.declare_function("js_array_to_sorted_default", I64, &[I64]);
+    module.declare_function("js_array_to_sorted_with_comparator", I64, &[I64, I64]);
+    module.declare_function("js_array_to_spliced", I64, &[I64, DOUBLE, DOUBLE, PTR, I32]);
+    module.declare_function("js_array_with", I64, &[I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_array_copy_within", I64, &[I64, DOUBLE, DOUBLE, I32, DOUBLE]);
     module.declare_function("js_regexp_new", I64, &[I64, I64]);
     module.declare_function("js_regexp_test", I32, &[I64, I64]);
     module.declare_function("js_get_string_pointer_unified", I64, &[DOUBLE]);
