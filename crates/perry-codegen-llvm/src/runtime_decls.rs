@@ -352,6 +352,25 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_string_code_point_at", DOUBLE, &[I64, I32]);
     module.declare_function("js_string_from_code_point", I64, &[I32]);
     module.declare_function("js_string_from_char_code", I64, &[I32]);
+    module.declare_function("js_string_char_code_at", DOUBLE, &[I64, I32]);
+    module.declare_function("js_string_last_index_of", I32, &[I64, I64]);
+    module.declare_function("js_string_locale_compare", DOUBLE, &[I64, I64]);
+    module.declare_function("js_string_normalize", I64, &[I64, I64]);
+    module.declare_function("js_string_pad_start", I64, &[I64, I32, I64]);
+    module.declare_function("js_string_pad_end", I64, &[I64, I32, I64]);
+    module.declare_function("js_string_is_well_formed", DOUBLE, &[I64]);
+    module.declare_function("js_string_to_well_formed", I64, &[I64]);
+    module.declare_function("js_string_match_all", I64, &[I64, I64]);
+    module.declare_function("js_string_search_regex", I32, &[I64, I64]);
+    // Regex extras (runtime has them; codegen was stubbing).
+    module.declare_function("js_regexp_exec_get_index", DOUBLE, &[]);
+    module.declare_function("js_regexp_exec_get_groups", I64, &[]);
+    module.declare_function("js_regexp_get_last_index", DOUBLE, &[I64]);
+    module.declare_function("js_regexp_set_last_index", VOID, &[I64, DOUBLE]);
+    module.declare_function("js_regexp_get_source", I64, &[I64]);
+    module.declare_function("js_regexp_get_flags", I64, &[I64]);
+    module.declare_function("js_string_replace_regex_named", I64, &[I64, I64, I64]);
+    module.declare_function("js_string_replace_regex_fn", I64, &[I64, I64, DOUBLE]);
     // structuredClone(v) — real deep copy, was stubbed as passthrough.
     module.declare_function("js_structured_clone", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_is_frozen", DOUBLE, &[DOUBLE]);
@@ -415,6 +434,63 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_array_entries", I64, &[I64]);
     module.declare_function("js_array_keys", I64, &[I64]);
     module.declare_function("js_array_values", I64, &[I64]);
+
+    // ──────────────────────────────────────────────────────────────────
+    // Web Fetch API: Response / Headers / Request constructors +
+    // response body methods + static factories. These are in
+    // `crates/perry-stdlib/src/fetch.rs`. Handles flow as plain numeric
+    // f64 values (not NaN-boxed) so codegen passes them as DOUBLE.
+    // Where the runtime takes i64 (e.g. js_fetch_response_status),
+    // codegen converts via fptosi.
+    // ──────────────────────────────────────────────────────────────────
+    // new Response(body_ptr, status, status_text_ptr, headers_handle) -> f64
+    module.declare_function("js_response_new", DOUBLE, &[I64, DOUBLE, I64, DOUBLE]);
+    // new Headers() -> f64
+    module.declare_function("js_headers_new", DOUBLE, &[]);
+    // headers.set(handle_f64, key_ptr, val_ptr) -> f64 (undefined-tag)
+    module.declare_function("js_headers_set", DOUBLE, &[DOUBLE, I64, I64]);
+    // headers.get(handle_f64, key_ptr) -> *mut StringHeader (i64)
+    module.declare_function("js_headers_get", I64, &[DOUBLE, I64]);
+    // headers.has(handle_f64, key_ptr) -> f64 (TAG_TRUE/FALSE)
+    module.declare_function("js_headers_has", DOUBLE, &[DOUBLE, I64]);
+    // headers.delete(handle_f64, key_ptr) -> f64 (undefined-tag)
+    module.declare_function("js_headers_delete", DOUBLE, &[DOUBLE, I64]);
+    // headers.forEach(handle_f64, cb_nanbox) -> f64 (undefined-tag)
+    module.declare_function("js_headers_for_each", DOUBLE, &[DOUBLE, DOUBLE]);
+
+    // new Request(url_ptr, method_ptr, body_ptr, headers_handle_f64) -> f64
+    module.declare_function("js_request_new", DOUBLE, &[I64, I64, I64, DOUBLE]);
+    module.declare_function("js_request_get_url", I64, &[DOUBLE]);
+    module.declare_function("js_request_get_method", I64, &[DOUBLE]);
+    module.declare_function("js_request_get_body", DOUBLE, &[DOUBLE]);
+
+    // Response body getters
+    module.declare_function("js_fetch_response_status", DOUBLE, &[I64]);
+    module.declare_function("js_fetch_response_status_text", I64, &[I64]);
+    module.declare_function("js_fetch_response_ok", DOUBLE, &[I64]);
+    module.declare_function("js_fetch_response_text", I64, &[I64]);
+    module.declare_function("js_fetch_response_json", I64, &[I64]);
+    // response.headers / .clone() / .arrayBuffer() / .blob() — all take
+    // the f64 response handle.
+    module.declare_function("js_response_get_headers", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_response_clone", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_response_array_buffer", I64, &[DOUBLE]);
+    module.declare_function("js_response_blob", I64, &[DOUBLE]);
+    // Static factories.
+    module.declare_function("js_response_static_json", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_response_static_redirect", DOUBLE, &[I64, DOUBLE]);
+
+    // ──────────────────────────────────────────────────────────────────
+    // AbortController / AbortSignal — perry-runtime/src/url.rs.
+    // Returns *mut ObjectHeader (i64 pointer) — codegen NaN-boxes with
+    // POINTER_TAG so regular property get can read fields.
+    // ──────────────────────────────────────────────────────────────────
+    module.declare_function("js_abort_controller_new", I64, &[]);
+    module.declare_function("js_abort_controller_signal", I64, &[I64]);
+    module.declare_function("js_abort_controller_abort", VOID, &[I64]);
+    module.declare_function("js_abort_controller_abort_reason", VOID, &[I64, DOUBLE]);
+    module.declare_function("js_abort_signal_add_listener", VOID, &[I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_abort_signal_timeout", I64, &[DOUBLE]);
 
     declare_phase_b_arrays(module);
 }

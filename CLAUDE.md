@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.111
+**Current Version:** 0.4.113
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.113 (llvm-backend)
+- feat: LLVM backend Web Fetch API — `new Response(body, init)` / `new Headers()` / `new Request(url, init)` constructors lowered in `lower_new` via new `lower_builtin_new` helper, extracting `{status, statusText, headers}` from inline init objects. `NativeMethodCall` dispatch for `module: "fetch"/"Headers"/"Request"` wired in `lower_native_method_call` → `js_fetch_response_text/json/status/statusText/ok/headers/clone/arrayBuffer/blob`, `js_headers_set/get/has/delete/forEach`, `js_request_get_url/method/body`. Chained `r.headers.get(k)` / `r.clone().text()` / `new Response(...).text()` shapes handled at the `Call { PropertyGet { NativeMethodCall, ... } }` callsite. `AbortController` wired: `new AbortController()` allocates via `js_abort_controller_new` (NaN-boxed pointer so `controller.signal`/`.aborted` work via the normal object-field path); `controller.abort(reason?)` and `controller.signal.addEventListener("abort", cb)` dispatch directly via new `lower_abort_controller_call` helper. `Response.json(v)` / `Response.redirect(url, s)` static factories handled. `test_gap_fetch_response` flipped DIFF → MATCH (44 → 0). Sweep 89 → 91 MATCH.
+- fix: `js_fetch_response_text/json`, `js_response_array_buffer/blob` now resolve their Promise synchronously via `js_promise_resolve` instead of routing through the deferred `PENDING_RESOLUTIONS` queue. The LLVM backend's `await` busy-wait loop only calls `js_promise_run_microtasks` (not `js_stdlib_process_pending`), so without this fix `await r.text()` etc. hang forever. The body is already in-memory at call time so inline resolution is safe — no behavior change for Cranelift.
 
 ### v0.4.112 (llvm-backend)
 - feat: generator `for...of` / spread / `Array.from` / array destructuring now produce real arrays. `Expr::IteratorToArray` in LLVM backend was a passthrough — it now calls `js_iterator_to_array` (walks `.next()` loop, collects `.value` into a fresh array). Fixes the 4 denormal output lines in `test_gap_generators`.

@@ -405,6 +405,72 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             }
         }
 
+        // ── AbortController / AbortSignal dispatch ──
+        // `new AbortController()` returns a NaN-boxed pointer
+        // (refined to `Named("AbortController")`). The runtime's
+        // ObjectHeader carries `signal` / `aborted` fields that the
+        // generic property-get path reads. Method calls need explicit
+        // interception because the class isn't in `ctx.classes`.
+        if let Some(val) = lower_abort_controller_call(ctx, object, property, args)? {
+            return Ok(val);
+        }
+
+        // ── Chained Web Fetch dispatch ──
+        // `r.headers.get(k)` — the inner `r.headers` lowered to a
+        // NativeMethodCall that returns an f64 Headers handle; route
+        // the outer `.get(...)` (and friends) through the Headers FFI.
+        // `r.clone().status` / `.text()` / etc — the inner clone call
+        // returns an f64 Response handle; route the outer call through
+        // the fetch dispatch.
+        //
+        // `new Response(...).text()` — likewise, when the receiver is
+        // a direct `Expr::New { class_name: "Response"|"Headers"|"Request" }`
+        // (no intermediate let binding).
+        if let Expr::NativeMethodCall {
+            module: chain_mod,
+            method: chain_method,
+            ..
+        } = object.as_ref()
+        {
+            // Chain `<Response>.headers.<method>(...)` where chain_method == "headers".
+            if chain_mod == "fetch" && chain_method == "headers" {
+                if let Some(val) =
+                    lower_fetch_native_method(ctx, "Headers", property.as_str(), Some(object), args)?
+                {
+                    return Ok(val);
+                }
+            }
+            // Chain `<Response>.clone().<method>(...)` — dispatch as a
+            // fetch method on the cloned handle.
+            if chain_mod == "fetch" && chain_method == "clone" {
+                if let Some(val) =
+                    lower_fetch_native_method(ctx, "fetch", property.as_str(), Some(object), args)?
+                {
+                    return Ok(val);
+                }
+            }
+        }
+        // Chain `new Response(...).text()` / `.json()` etc.
+        if let Expr::New { class_name: nc, .. } = object.as_ref() {
+            let fetch_dispatch = matches!(
+                nc.as_str(),
+                "Response" | "Headers" | "Request"
+            );
+            if fetch_dispatch {
+                let module = match nc.as_str() {
+                    "Response" => "fetch",
+                    "Headers" => "Headers",
+                    "Request" => "Request",
+                    _ => unreachable!(),
+                };
+                if let Some(val) =
+                    lower_fetch_native_method(ctx, module, property.as_str(), Some(object), args)?
+                {
+                    return Ok(val);
+                }
+            }
+        }
+
         // Class instance method call. The receiver's static type is
         // `Type::Named(<class>)` for typed instances.
         //
@@ -858,15 +924,24 @@ pub(crate) fn lower_new(
     class_name: &str,
     args: &[Expr],
 ) -> Result<String> {
+    // Built-in Web classes that the runtime provides constructors for.
+    // These are checked BEFORE the ctx.classes lookup because the user
+    // code may shadow the name — if they do, the class lookup below
+    // wins.
+    if !ctx.classes.contains_key(class_name) {
+        if let Some(val) = lower_builtin_new(ctx, class_name, args)? {
+            return Ok(val);
+        }
+    }
+
     let class = match ctx.classes.get(class_name).copied() {
         Some(c) => c,
         None => {
-            // Built-in / native class (Response, Promise, Error, Date,
-            // etc.) — no HIR class definition. Lower the args for side
-            // effects (so closures get auto-collected and string
-            // literals are interned), then return a sentinel pointer
-            // value. Real built-in dispatch routes through Expr::Call
-            // / NativeMethodCall paths instead.
+            // Built-in / native class (Promise, Error, Date, etc.) with
+            // no dedicated lower_builtin_new handler — lower args for
+            // side effects (closures, string literal interning) and
+            // return a sentinel. Real dispatch happens via later
+            // NativeMethodCall / PropertyGet paths.
             for a in args {
                 let _ = lower_expr(ctx, a)?;
             }
@@ -1027,6 +1102,13 @@ pub(crate) fn lower_native_method_call(
     object: Option<&Expr>,
     args: &[Expr],
 ) -> Result<String> {
+    // Web Fetch API dispatch — Response / Headers / Request / static
+    // factories. Handled before the receiver-less early-out so that
+    // `Response.json(v)` (object.is_none()) finds its runtime function.
+    if let Some(val) = lower_fetch_native_method(ctx, module, method, object, args)? {
+        return Ok(val);
+    }
+
     // Receiver-less native method calls (e.g. plugin::setConfig(...)
     // as a static module function): lower args for side effects and
     // return a sentinel. Compilation succeeds; runtime gets a NaN.
@@ -1117,4 +1199,534 @@ pub(crate) fn lower_native_method_call(
         let _ = lower_expr(ctx, a)?;
     }
     Ok(double_literal(0.0))
+}
+
+/// Extract a raw string pointer (i64) from a NaN-boxed JSValue via the
+/// unified helper. Handles string literals, concat results, and any
+/// other expression that produces a NaN-boxed double.
+fn get_raw_string_ptr(ctx: &mut FnCtx<'_>, e: &Expr) -> Result<String> {
+    let v = lower_expr(ctx, e)?;
+    let blk = ctx.block();
+    Ok(blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &v)]))
+}
+
+/// Build a Headers handle from an inline object literal `{ "k": "v", ... }`.
+/// Returns the f64 handle (raw numeric, not NaN-boxed).
+fn build_headers_from_object(
+    ctx: &mut FnCtx<'_>,
+    props: &[(String, Expr)],
+) -> Result<String> {
+    let h = ctx.block().call(DOUBLE, "js_headers_new", &[]);
+    for (k, vexpr) in props {
+        let key_expr = Expr::String(k.clone());
+        let key_ptr = get_raw_string_ptr(ctx, &key_expr)?;
+        let val_ptr = get_raw_string_ptr(ctx, vexpr)?;
+        ctx.block().call(
+            DOUBLE,
+            "js_headers_set",
+            &[(DOUBLE, &h), (I64, &key_ptr), (I64, &val_ptr)],
+        );
+    }
+    Ok(h)
+}
+
+/// Lower `new ClassName(args)` for the built-in Web classes that don't
+/// live in `ctx.classes`. Returns `Ok(None)` if the class isn't one we
+/// handle here (caller should fall through to the default path).
+pub(crate) fn lower_builtin_new(
+    ctx: &mut FnCtx<'_>,
+    class_name: &str,
+    args: &[Expr],
+) -> Result<Option<String>> {
+    match class_name {
+        "Response" => {
+            // new Response(body?, init?) — init = { status?, statusText?, headers? }
+            let body_ptr = if !args.is_empty() {
+                get_raw_string_ptr(ctx, &args[0])?
+            } else {
+                "0".to_string()
+            };
+
+            // Default init: status=200, statusText=null, headers=0
+            let mut status_val = "200.0".to_string();
+            let mut status_text_ptr = "0".to_string();
+            let mut headers_handle = "0.0".to_string();
+
+            if args.len() >= 2 {
+                if let Expr::Object(props) = &args[1] {
+                    for (k, vexpr) in props {
+                        match k.as_str() {
+                            "status" => {
+                                status_val = lower_expr(ctx, vexpr)?;
+                            }
+                            "statusText" => {
+                                status_text_ptr = get_raw_string_ptr(ctx, vexpr)?;
+                            }
+                            "headers" => {
+                                // Inline object → build a Headers handle.
+                                // Any other expression → use as a Headers
+                                // handle (numeric f64) directly.
+                                if let Expr::Object(hprops) = vexpr {
+                                    headers_handle = build_headers_from_object(ctx, hprops)?;
+                                } else {
+                                    headers_handle = lower_expr(ctx, vexpr)?;
+                                }
+                            }
+                            _ => {
+                                let _ = lower_expr(ctx, vexpr)?;
+                            }
+                        }
+                    }
+                } else {
+                    // Not an object literal — still evaluate for side effects.
+                    let _ = lower_expr(ctx, &args[1])?;
+                }
+            }
+
+            let handle = ctx.block().call(
+                DOUBLE,
+                "js_response_new",
+                &[
+                    (I64, &body_ptr),
+                    (DOUBLE, &status_val),
+                    (I64, &status_text_ptr),
+                    (DOUBLE, &headers_handle),
+                ],
+            );
+            // Response handle is a plain numeric f64 (response-registry id).
+            // DO NOT NaN-box — method dispatch expects raw f64.
+            Ok(Some(handle))
+        }
+
+        "Headers" => {
+            // new Headers(init?) — init can be an object literal or another
+            // Headers/array iterable. Only inline object literals are
+            // handled so far; anything else falls back to empty.
+            let h = ctx.block().call(DOUBLE, "js_headers_new", &[]);
+            if !args.is_empty() {
+                if let Expr::Object(props) = &args[0] {
+                    for (k, vexpr) in props {
+                        let key_expr = Expr::String(k.clone());
+                        let key_ptr = get_raw_string_ptr(ctx, &key_expr)?;
+                        let val_ptr = get_raw_string_ptr(ctx, vexpr)?;
+                        ctx.block().call(
+                            DOUBLE,
+                            "js_headers_set",
+                            &[(DOUBLE, &h), (I64, &key_ptr), (I64, &val_ptr)],
+                        );
+                    }
+                } else {
+                    let _ = lower_expr(ctx, &args[0])?;
+                }
+            }
+            Ok(Some(h))
+        }
+
+        "Request" => {
+            // new Request(url, init?) — init = { method?, body?, headers? }
+            let url_ptr = if !args.is_empty() {
+                get_raw_string_ptr(ctx, &args[0])?
+            } else {
+                "0".to_string()
+            };
+
+            let mut method_ptr = "0".to_string();
+            let mut body_ptr = "0".to_string();
+            let mut headers_handle = "0.0".to_string();
+
+            if args.len() >= 2 {
+                if let Expr::Object(props) = &args[1] {
+                    for (k, vexpr) in props {
+                        match k.as_str() {
+                            "method" => {
+                                method_ptr = get_raw_string_ptr(ctx, vexpr)?;
+                            }
+                            "body" => {
+                                body_ptr = get_raw_string_ptr(ctx, vexpr)?;
+                            }
+                            "headers" => {
+                                if let Expr::Object(hprops) = vexpr {
+                                    headers_handle = build_headers_from_object(ctx, hprops)?;
+                                } else {
+                                    headers_handle = lower_expr(ctx, vexpr)?;
+                                }
+                            }
+                            _ => {
+                                let _ = lower_expr(ctx, vexpr)?;
+                            }
+                        }
+                    }
+                } else {
+                    let _ = lower_expr(ctx, &args[1])?;
+                }
+            }
+
+            let handle = ctx.block().call(
+                DOUBLE,
+                "js_request_new",
+                &[
+                    (I64, &url_ptr),
+                    (I64, &method_ptr),
+                    (I64, &body_ptr),
+                    (DOUBLE, &headers_handle),
+                ],
+            );
+            Ok(Some(handle))
+        }
+
+        "AbortController" => {
+            // Lower any incidental args for side effects (shouldn't have any).
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let handle = ctx.block().call(I64, "js_abort_controller_new", &[]);
+            // The runtime returns a raw *mut ObjectHeader — NaN-box with
+            // POINTER_TAG so regular property get (`controller.signal`,
+            // `controller.aborted`) works via js_object_get_field_by_name_f64.
+            let boxed = nanbox_pointer_inline(ctx.block(), &handle);
+            Ok(Some(boxed))
+        }
+
+        _ => Ok(None),
+    }
+}
+
+/// Returns `true` if the expression statically resolves to an
+/// `AbortController`-typed value (either a local whose declared type
+/// is `Named("AbortController")` or a `new AbortController()` call).
+fn is_abort_controller_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
+    match e {
+        Expr::New { class_name, .. } => class_name == "AbortController",
+        Expr::LocalGet(id) => matches!(
+            ctx.local_types.get(id),
+            Some(HirType::Named(n)) if n == "AbortController"
+        ),
+        _ => false,
+    }
+}
+
+/// Lower AbortController / AbortSignal method calls:
+/// - `controller.abort(reason?)`
+/// - `controller.signal.addEventListener("abort", cb)`
+/// - `AbortSignal.timeout(ms)` (static)
+///
+/// Returns `None` if the call shape doesn't match one of the handled
+/// patterns — caller falls through to the generic dispatch.
+fn lower_abort_controller_call(
+    ctx: &mut FnCtx<'_>,
+    object: &Expr,
+    property: &str,
+    args: &[Expr],
+) -> Result<Option<String>> {
+    // ── AbortSignal.timeout(ms) static ──
+    if property == "timeout" {
+        if let Expr::GlobalGet(_) = object {
+            // Can't distinguish AbortSignal.timeout from other globals
+            // without more context — skip.
+        }
+    }
+    // Static `AbortSignal.timeout(ms)` — matched via a PropertyGet on a
+    // GlobalGet-shaped object isn't quite right because GlobalGet has
+    // no name; best we can do is detect by property name "timeout" and
+    // the local-isn't-a-known-thing. Skip for now.
+
+    // ── controller.abort(reason?) ──
+    if property == "abort" && is_abort_controller_expr(ctx, object) {
+        let recv_box = lower_expr(ctx, object)?;
+        let blk = ctx.block();
+        let ctrl_handle = unbox_to_i64(blk, &recv_box);
+        if args.is_empty() {
+            blk.call_void("js_abort_controller_abort", &[(I64, &ctrl_handle)]);
+        } else {
+            let reason = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            blk.call_void(
+                "js_abort_controller_abort_reason",
+                &[(I64, &ctrl_handle), (DOUBLE, &reason)],
+            );
+        }
+        return Ok(Some(double_literal(f64::from_bits(
+            crate::nanbox::TAG_UNDEFINED,
+        ))));
+    }
+
+    // ── controller.signal.addEventListener("abort", cb) ──
+    if property == "addEventListener" && args.len() >= 2 {
+        if let Expr::PropertyGet {
+            object: inner_obj,
+            property: inner_prop,
+        } = object
+        {
+            if inner_prop == "signal" && is_abort_controller_expr(ctx, inner_obj) {
+                let ctrl_box = lower_expr(ctx, inner_obj)?;
+                let blk = ctx.block();
+                let ctrl_handle = unbox_to_i64(blk, &ctrl_box);
+                // Get the signal pointer.
+                let signal_handle = blk.call(
+                    I64,
+                    "js_abort_controller_signal",
+                    &[(I64, &ctrl_handle)],
+                );
+                let evt = lower_expr(ctx, &args[0])?;
+                let listener = lower_expr(ctx, &args[1])?;
+                let blk = ctx.block();
+                blk.call_void(
+                    "js_abort_signal_add_listener",
+                    &[(I64, &signal_handle), (DOUBLE, &evt), (DOUBLE, &listener)],
+                );
+                return Ok(Some(double_literal(f64::from_bits(
+                    crate::nanbox::TAG_UNDEFINED,
+                ))));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Dispatch for the Web Fetch API family: Response/Headers/Request
+/// methods and property getters. Called before the generic
+/// `lower_native_method_call` path so static factories
+/// (`Response.json(v)`) also land here. Returns `Ok(None)` if the
+/// (module, method) combination isn't handled.
+///
+/// Handle ABI note: Response/Headers/Request handles are plain numeric
+/// doubles (ids into the runtime's registry), not NaN-boxed pointers.
+/// Most runtime functions take the handle as f64; status/statusText/
+/// ok/text/json take i64 and we convert via `fptosi`.
+fn lower_fetch_native_method(
+    ctx: &mut FnCtx<'_>,
+    module: &str,
+    method: &str,
+    object: Option<&Expr>,
+    args: &[Expr],
+) -> Result<Option<String>> {
+    // ── Response static factories (no receiver) ──
+    if module == "fetch" && object.is_none() {
+        match method {
+            "static_json" => {
+                let v = if !args.is_empty() {
+                    lower_expr(ctx, &args[0])?
+                } else {
+                    double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+                };
+                let handle = ctx
+                    .block()
+                    .call(DOUBLE, "js_response_static_json", &[(DOUBLE, &v)]);
+                return Ok(Some(handle));
+            }
+            "static_redirect" => {
+                let url_ptr = if !args.is_empty() {
+                    get_raw_string_ptr(ctx, &args[0])?
+                } else {
+                    "0".to_string()
+                };
+                let status = if args.len() >= 2 {
+                    lower_expr(ctx, &args[1])?
+                } else {
+                    "302.0".to_string()
+                };
+                let handle = ctx.block().call(
+                    DOUBLE,
+                    "js_response_static_redirect",
+                    &[(I64, &url_ptr), (DOUBLE, &status)],
+                );
+                return Ok(Some(handle));
+            }
+            _ => {}
+        }
+    }
+
+    // Everything below needs a receiver.
+    let Some(recv) = object else {
+        return Ok(None);
+    };
+
+    // ── Headers method dispatch ──
+    if module == "Headers" {
+        let h_handle = lower_expr(ctx, recv)?;
+        match method {
+            "set" | "append" => {
+                if args.len() < 2 {
+                    return Ok(Some(double_literal(0.0)));
+                }
+                let key_ptr = get_raw_string_ptr(ctx, &args[0])?;
+                let val_ptr = get_raw_string_ptr(ctx, &args[1])?;
+                ctx.block().call(
+                    DOUBLE,
+                    "js_headers_set",
+                    &[(DOUBLE, &h_handle), (I64, &key_ptr), (I64, &val_ptr)],
+                );
+                return Ok(Some(double_literal(f64::from_bits(
+                    crate::nanbox::TAG_UNDEFINED,
+                ))));
+            }
+            "get" => {
+                if args.is_empty() {
+                    return Ok(Some(double_literal(0.0)));
+                }
+                let key_ptr = get_raw_string_ptr(ctx, &args[0])?;
+                let str_ptr = ctx.block().call(
+                    I64,
+                    "js_headers_get",
+                    &[(DOUBLE, &h_handle), (I64, &key_ptr)],
+                );
+                let blk = ctx.block();
+                return Ok(Some(nanbox_string_inline(blk, &str_ptr)));
+            }
+            "has" => {
+                if args.is_empty() {
+                    return Ok(Some(double_literal(f64::from_bits(
+                        crate::nanbox::TAG_FALSE,
+                    ))));
+                }
+                let key_ptr = get_raw_string_ptr(ctx, &args[0])?;
+                let out = ctx.block().call(
+                    DOUBLE,
+                    "js_headers_has",
+                    &[(DOUBLE, &h_handle), (I64, &key_ptr)],
+                );
+                return Ok(Some(out));
+            }
+            "delete" => {
+                if args.is_empty() {
+                    return Ok(Some(double_literal(f64::from_bits(
+                        crate::nanbox::TAG_UNDEFINED,
+                    ))));
+                }
+                let key_ptr = get_raw_string_ptr(ctx, &args[0])?;
+                ctx.block().call(
+                    DOUBLE,
+                    "js_headers_delete",
+                    &[(DOUBLE, &h_handle), (I64, &key_ptr)],
+                );
+                return Ok(Some(double_literal(f64::from_bits(
+                    crate::nanbox::TAG_UNDEFINED,
+                ))));
+            }
+            "forEach" => {
+                if args.is_empty() {
+                    return Ok(Some(double_literal(0.0)));
+                }
+                let cb = lower_expr(ctx, &args[0])?;
+                ctx.block().call(
+                    DOUBLE,
+                    "js_headers_for_each",
+                    &[(DOUBLE, &h_handle), (DOUBLE, &cb)],
+                );
+                return Ok(Some(double_literal(f64::from_bits(
+                    crate::nanbox::TAG_UNDEFINED,
+                ))));
+            }
+            _ => return Ok(None),
+        }
+    }
+
+    // ── Request property getters ──
+    if module == "Request" {
+        let h_handle = lower_expr(ctx, recv)?;
+        match method {
+            "url" => {
+                let str_ptr = ctx
+                    .block()
+                    .call(I64, "js_request_get_url", &[(DOUBLE, &h_handle)]);
+                let blk = ctx.block();
+                return Ok(Some(nanbox_string_inline(blk, &str_ptr)));
+            }
+            "method" => {
+                let str_ptr = ctx
+                    .block()
+                    .call(I64, "js_request_get_method", &[(DOUBLE, &h_handle)]);
+                let blk = ctx.block();
+                return Ok(Some(nanbox_string_inline(blk, &str_ptr)));
+            }
+            "body" => {
+                let val = ctx
+                    .block()
+                    .call(DOUBLE, "js_request_get_body", &[(DOUBLE, &h_handle)]);
+                return Ok(Some(val));
+            }
+            _ => return Ok(None),
+        }
+    }
+
+    // ── Response methods / property getters ──
+    if module == "fetch" {
+        // Lower the receiver once. It may be a Response (f64 handle) or
+        // a chained result from `.headers` / `.clone()` — in the former
+        // case we dispatch the methods here; the chain cases are
+        // recognised at the Call callsite in lower_call.
+        let recv_handle = lower_expr(ctx, recv)?;
+        match method {
+            "text" => {
+                let blk = ctx.block();
+                let h_i64 = blk.fptosi(DOUBLE, &recv_handle, I64);
+                let promise = blk.call(I64, "js_fetch_response_text", &[(I64, &h_i64)]);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise)));
+            }
+            "json" => {
+                let blk = ctx.block();
+                let h_i64 = blk.fptosi(DOUBLE, &recv_handle, I64);
+                let promise = blk.call(I64, "js_fetch_response_json", &[(I64, &h_i64)]);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise)));
+            }
+            "status" => {
+                let blk = ctx.block();
+                let h_i64 = blk.fptosi(DOUBLE, &recv_handle, I64);
+                let status = blk.call(DOUBLE, "js_fetch_response_status", &[(I64, &h_i64)]);
+                return Ok(Some(status));
+            }
+            "statusText" => {
+                let blk = ctx.block();
+                let h_i64 = blk.fptosi(DOUBLE, &recv_handle, I64);
+                let str_ptr =
+                    blk.call(I64, "js_fetch_response_status_text", &[(I64, &h_i64)]);
+                return Ok(Some(nanbox_string_inline(blk, &str_ptr)));
+            }
+            "ok" => {
+                // js_fetch_response_ok returns 1.0 or 0.0 as f64. Map to
+                // TAG_TRUE/TAG_FALSE so console.log prints "true"/"false".
+                let blk = ctx.block();
+                let h_i64 = blk.fptosi(DOUBLE, &recv_handle, I64);
+                let raw = blk.call(DOUBLE, "js_fetch_response_ok", &[(I64, &h_i64)]);
+                let cmp = blk.fcmp("une", &raw, "0.0");
+                let tagged = blk.select(
+                    crate::types::I1,
+                    &cmp,
+                    I64,
+                    crate::nanbox::TAG_TRUE_I64,
+                    crate::nanbox::TAG_FALSE_I64,
+                );
+                return Ok(Some(blk.bitcast_i64_to_double(&tagged)));
+            }
+            "headers" => {
+                let out = ctx.block().call(
+                    DOUBLE,
+                    "js_response_get_headers",
+                    &[(DOUBLE, &recv_handle)],
+                );
+                return Ok(Some(out));
+            }
+            "clone" => {
+                let out = ctx
+                    .block()
+                    .call(DOUBLE, "js_response_clone", &[(DOUBLE, &recv_handle)]);
+                return Ok(Some(out));
+            }
+            "arrayBuffer" => {
+                let blk = ctx.block();
+                let promise =
+                    blk.call(I64, "js_response_array_buffer", &[(DOUBLE, &recv_handle)]);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise)));
+            }
+            "blob" => {
+                let blk = ctx.block();
+                let promise = blk.call(I64, "js_response_blob", &[(DOUBLE, &recv_handle)]);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise)));
+            }
+            _ => return Ok(None),
+        }
+    }
+
+    Ok(None)
 }
