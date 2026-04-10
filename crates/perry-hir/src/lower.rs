@@ -6026,7 +6026,17 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 // includes, split) — those are handled by the general dispatch which
                                 // checks is_string at codegen time.
                                 let type_info = ctx.lookup_local_type(&arr_name);
-                                let is_known_string = type_info.map(|ty| matches!(ty, Type::String)).unwrap_or(false);
+                                // `Union<String, Void>` (e.g. `JSON.stringify` return type) is
+                                // a possible-string — must NOT be treated as definitely not-a-
+                                // string, otherwise `.indexOf`/`.includes` get routed through
+                                // ArrayIndexOf/ArrayIncludes and return -1/false on a real
+                                // string value.
+                                let is_union_with_string = matches!(
+                                    type_info,
+                                    Some(Type::Union(variants)) if variants.iter().any(|v| matches!(v, Type::String))
+                                );
+                                let is_known_string = type_info.map(|ty| matches!(ty, Type::String)).unwrap_or(false)
+                                    || is_union_with_string;
                                 // A user-defined class instance is NOT an array — must skip the array
                                 // fast path so user-defined methods like Stack<T>.push() are dispatched
                                 // to the class method, not runtime js_array_push. Map/Set/Promise are
@@ -6040,7 +6050,10 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     }
                                     _ => false,
                                 };
-                                let is_known_not_string = type_info.map(|ty| !matches!(ty, Type::String | Type::Any | Type::Unknown)).unwrap_or(false);
+                                let is_known_not_string = type_info
+                                    .map(|ty| !matches!(ty, Type::String | Type::Any | Type::Unknown))
+                                    .unwrap_or(false)
+                                    && !is_union_with_string;
                                 // Object type literals (e.g., { push: (v: number) => void; ... })
                                 // are NOT arrays — they are plain objects with closure-valued
                                 // properties and must NOT enter the array fast path.

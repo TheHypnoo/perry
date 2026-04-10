@@ -1304,6 +1304,39 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
             }
             return JSValue::undefined();
         }
+        // Arrays: handle `.length` so dynamic property access on a
+        // typed-Any local returned from `JSON.parse("[1,2,3]")` picks
+        // up the real length instead of falling through to object
+        // field lookup and returning undefined. The array-length
+        // inline fast path in codegen fires only when the type is
+        // statically known, so this branch catches the dynamic case.
+        if gc_type == crate::gc::GC_TYPE_ARRAY {
+            if !key.is_null() {
+                let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                let key_len = (*key).length as usize;
+                let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
+                if key_bytes == b"length" {
+                    let arr = obj as *const crate::array::ArrayHeader;
+                    return JSValue::number(crate::array::js_array_length(arr) as f64);
+                }
+            }
+            return JSValue::undefined();
+        }
+        // Strings: handle `.length` so `(x as string).length` on an
+        // unknown-typed local (TypeScript `as` casts are erased in
+        // HIR) produces the real codepoint length.
+        if gc_type == crate::gc::GC_TYPE_STRING {
+            if !key.is_null() {
+                let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                let key_len = (*key).length as usize;
+                let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
+                if key_bytes == b"length" {
+                    let s = obj as *const crate::StringHeader;
+                    return JSValue::number((*s).length as f64);
+                }
+            }
+            return JSValue::undefined();
+        }
         if gc_type != crate::gc::GC_TYPE_OBJECT {
             let object_type = (*obj).object_type;
             if object_type != crate::error::OBJECT_TYPE_REGULAR {

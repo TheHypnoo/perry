@@ -131,10 +131,17 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
                 if let Some(HirType::Array(elem_ty)) = ctx.local_types.get(arr_id) {
                     return Some((**elem_ty).clone());
                 }
+                // str[i] — single-char string from string indexing.
+                if let Some(HirType::String) = ctx.local_types.get(arr_id) {
+                    return Some(HirType::String);
+                }
             }
             if let Some(ty) = static_type_of(ctx, object) {
                 if let HirType::Array(elem_ty) = ty {
                     return Some(*elem_ty);
+                }
+                if let HirType::String = ty {
+                    return Some(HirType::String);
                 }
             }
             None
@@ -397,9 +404,16 @@ pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         }
         // arr[i] where arr is Array<string> → element is a string.
         // Lets `this.parts[i].length` use the string fast path inline
-        // without needing an intermediate let binding.
+        // without needing an intermediate let binding. Also str[i] on
+        // a string-typed receiver returns a single-character string,
+        // so the tokenizer pattern `input[pos] >= "0"` routes through
+        // string comparison.
         Expr::IndexGet { object, .. } => {
-            matches!(static_type_of(ctx, object), Some(HirType::Array(elem)) if matches!(*elem, HirType::String))
+            match static_type_of(ctx, object) {
+                Some(HirType::Array(elem)) if matches!(*elem, HirType::String) => true,
+                Some(HirType::String) => true,
+                _ => false,
+            }
         }
         // Enum string members lower to string literals at the use
         // site, so a comparison like `c === Color.Red` should fire

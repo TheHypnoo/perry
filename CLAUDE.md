@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.125
+**Current Version:** 0.4.126
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.126 (llvm-backend)
+- fix: HIR `lower_call` array-method block used `is_known_not_string` to route `.indexOf`/`.includes`/`.slice` on `Union<String, Void>` (JSON.stringify return) through ArrayIndexOf/ArrayIncludes, returning -1/false on a real string. Now treats `Union<T, ...>` containing String as possibly-string (`is_union_with_string`) so the ambiguous-method path falls through to runtime string dispatch. `test_edge_json_regex` DIFF 10 → MATCH.
+- fix: `js_object_get_field_by_name` now handles `.length` on `GC_TYPE_ARRAY` and `GC_TYPE_STRING` receivers. Previously the dynamic path returned undefined for `p.length` where `p: any = JSON.parse("[1,2,3]")` or `(x as string).length` where x is unknown — both fall through to the dynamic field lookup at LLVM codegen time because the static type isn't Array/String. `test_edge_type_narrowing` DIFF 12 → MATCH (cumulative with v0.4.124's union narrowing fixes).
+- fix: String indexing `str[i]` refines to `HirType::String` in `is_string_expr` and `refine_type_from_init`, so the tokenizer pattern `const ch = input[pos]; ch >= "0" && ch <= "9"` routes through string comparison instead of fcmp-on-NaN. `test_edge_complex_patterns` tokenizer case (line 27) flipped — only EventEmitter closure dispatch bug remains.
+- fix: `e.message` / `e.stack` / `e.name` recognized as string-returning PropertyGets in both `refine_type_from_init` and `is_string_expr`, so chained access (`stackErr.stack!.includes("...")`) hits the string method fast path.
 
 ### v0.4.125 (llvm-backend)
 - feat: `test_gap_error_extensions` DIFF 14 → MATCH. Four coordinated fixes:
