@@ -7995,7 +7995,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         let key_expr = match &member.prop {
                             ast::MemberProp::Ident(i) => Expr::String(i.sym.to_string()),
                             ast::MemberProp::Computed(c) => lower_expr(ctx, &c.expr)?,
-                            ast::MemberProp::PrivateName(pn) => Expr::String(format!("#{}", pn.name.sym.as_ref())),
+                            ast::MemberProp::PrivateName(pn) => Expr::String(format!("#{}", pn.name.as_str())),
                         };
                         return Ok(Expr::ProxyGet { proxy: Box::new(proxy_expr), key: Box::new(key_expr) });
                     }
