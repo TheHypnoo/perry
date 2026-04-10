@@ -303,6 +303,21 @@ pub(crate) fn is_set_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
             ctx.local_types.get(id),
             Some(HirType::Generic { base, .. }) if base == "Set"
         ),
+        // `this.field` where the field is declared as `Set<T>` on the
+        // enclosing class. Same rationale as is_map_expr.
+        Expr::PropertyGet { object, property } => {
+            if let Some(cls_name) = receiver_class_name(ctx, object) {
+                if let Some(cls) = ctx.classes.get(&cls_name) {
+                    if let Some(field) = cls.fields.iter().find(|f| f.name == *property) {
+                        return matches!(
+                            field.ty,
+                            HirType::Generic { ref base, .. } if base == "Set"
+                        );
+                    }
+                }
+            }
+            false
+        }
         _ => false,
     }
 }
@@ -314,6 +329,24 @@ pub(crate) fn is_map_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
             ctx.local_types.get(id),
             Some(HirType::Generic { base, .. }) if base == "Map"
         ),
+        // `this.field` where the field is declared as `Map<K, V>` on
+        // the enclosing class. Needed so `this.handlers.set(...)` /
+        // `this.handlers.get(...)` inside class methods dispatch
+        // through the Map fast path instead of the dynamic field-set
+        // fallback.
+        Expr::PropertyGet { object, property } => {
+            if let Some(cls_name) = receiver_class_name(ctx, object) {
+                if let Some(cls) = ctx.classes.get(&cls_name) {
+                    if let Some(field) = cls.fields.iter().find(|f| f.name == *property) {
+                        return matches!(
+                            field.ty,
+                            HirType::Generic { ref base, .. } if base == "Map"
+                        );
+                    }
+                }
+            }
+            false
+        }
         _ => false,
     }
 }

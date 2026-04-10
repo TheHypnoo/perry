@@ -351,6 +351,9 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_weakset_has", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_weakset_delete", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_weak_throw_primitive", DOUBLE, &[]);
+    // Buffer.from(str, encoding) runtime helpers.
+    module.declare_function("js_buffer_from_string", I64, &[I64, I32]);
+    module.declare_function("js_encoding_tag_from_value", I32, &[DOUBLE]);
     module.declare_function("js_fs_unlink_sync", I32, &[DOUBLE]);
     module.declare_function("js_object_values", I64, &[I64]);
     module.declare_function("js_object_entries", I64, &[I64]);

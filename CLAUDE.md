@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.128
+**Current Version:** 0.4.129
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.129 (llvm-backend)
+- fix: Map/Set method dispatch on `this.field` receivers. HIR lowering only folds `m.set(k,v)` → `MapSet` when `m` is a plain Ident; class methods accessing a Map-typed field (`this.handlers.set(...)`) fell through to the generic Call path which `js_native_call_method` couldn't resolve (set/get returned undefined). Two fixes:
+  1. `type_analysis::is_map_expr`/`is_set_expr` now recognize `PropertyGet { object: this, property: field }` where the class field declared type is `Generic{base: "Map"/"Set"}`.
+  2. `lower_call.rs` adds explicit Map.set/get/has/delete/clear and Set.add/has/delete/clear dispatch for Map/Set-typed PropertyGet receivers, calling the runtime helpers directly.
+- `test_edge_complex_patterns` DIFF 4 → MATCH.
 
 ### v0.4.128 (llvm-backend)
 - fix: `pre_scan_weakref_locals` in `lower.rs` didn't descend into function bodies — only walked top-level statements, block/if/while/for/try/switch. Function declarations were skipped, so `function f() { const ref = new WeakRef(x); ref.deref(); }` didn't register `ref` as a weakref local and `ref.deref()` fell through to the generic method dispatch (which returns undefined). Added `ast::Decl::Fn(...)` descent. Same fix needed for WeakMap/WeakSet/FinalizationRegistry/Proxy via `record_var`'s switch. `test_gap_weakref_finalization` DIFF 18 → MATCH.

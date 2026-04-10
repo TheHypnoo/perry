@@ -394,6 +394,118 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             }
         }
 
+        // -------- Map/Set methods on PropertyGet receivers --------
+        // The HIR only folds `m.set(...)`/`m.get(...)` to MapSet/MapGet
+        // when `m` is an Ident receiver (plain local). When the receiver
+        // is `this.field` (class method accessing a Map-typed field),
+        // the generic Call reaches here and needs an explicit dispatch
+        // to the Map runtime helpers. Without this branch,
+        // `this.handlers.get(event)` falls through to js_native_call_method
+        // which doesn't know about Maps and returns undefined.
+        if is_map_expr(ctx, object) {
+            match property.as_str() {
+                "set" if args.len() == 2 => {
+                    let m_box = lower_expr(ctx, object)?;
+                    let k_box = lower_expr(ctx, &args[0])?;
+                    let v_box = lower_expr(ctx, &args[1])?;
+                    let blk = ctx.block();
+                    let m_handle = unbox_to_i64(blk, &m_box);
+                    blk.call_void(
+                        "js_map_set",
+                        &[(I64, &m_handle), (DOUBLE, &k_box), (DOUBLE, &v_box)],
+                    );
+                    return Ok(m_box);
+                }
+                "get" if args.len() == 1 => {
+                    let m_box = lower_expr(ctx, object)?;
+                    let k_box = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    let m_handle = unbox_to_i64(blk, &m_box);
+                    return Ok(blk.call(
+                        DOUBLE,
+                        "js_map_get",
+                        &[(I64, &m_handle), (DOUBLE, &k_box)],
+                    ));
+                }
+                "has" if args.len() == 1 => {
+                    let m_box = lower_expr(ctx, object)?;
+                    let k_box = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    let m_handle = unbox_to_i64(blk, &m_box);
+                    let i32_v = blk.call(
+                        crate::types::I32,
+                        "js_map_has",
+                        &[(I64, &m_handle), (DOUBLE, &k_box)],
+                    );
+                    return Ok(crate::expr::i32_bool_to_nanbox(blk, &i32_v));
+                }
+                "delete" if args.len() == 1 => {
+                    let m_box = lower_expr(ctx, object)?;
+                    let k_box = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    let m_handle = unbox_to_i64(blk, &m_box);
+                    let i32_v = blk.call(
+                        crate::types::I32,
+                        "js_map_delete",
+                        &[(I64, &m_handle), (DOUBLE, &k_box)],
+                    );
+                    return Ok(crate::expr::i32_bool_to_nanbox(blk, &i32_v));
+                }
+                "clear" if args.is_empty() => {
+                    let m_box = lower_expr(ctx, object)?;
+                    let blk = ctx.block();
+                    let m_handle = unbox_to_i64(blk, &m_box);
+                    blk.call_void("js_map_clear", &[(I64, &m_handle)]);
+                    return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+                }
+                _ => {}
+            }
+        }
+        if is_set_expr(ctx, object) {
+            match property.as_str() {
+                "add" if args.len() == 1 => {
+                    let s_box = lower_expr(ctx, object)?;
+                    let v_box = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    let s_handle = unbox_to_i64(blk, &s_box);
+                    blk.call_void("js_set_add", &[(I64, &s_handle), (DOUBLE, &v_box)]);
+                    return Ok(s_box);
+                }
+                "has" if args.len() == 1 => {
+                    let s_box = lower_expr(ctx, object)?;
+                    let v_box = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    let s_handle = unbox_to_i64(blk, &s_box);
+                    let i32_v = blk.call(
+                        crate::types::I32,
+                        "js_set_has",
+                        &[(I64, &s_handle), (DOUBLE, &v_box)],
+                    );
+                    return Ok(crate::expr::i32_bool_to_nanbox(blk, &i32_v));
+                }
+                "delete" if args.len() == 1 => {
+                    let s_box = lower_expr(ctx, object)?;
+                    let v_box = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    let s_handle = unbox_to_i64(blk, &s_box);
+                    let i32_v = blk.call(
+                        crate::types::I32,
+                        "js_set_delete",
+                        &[(I64, &s_handle), (DOUBLE, &v_box)],
+                    );
+                    return Ok(crate::expr::i32_bool_to_nanbox(blk, &i32_v));
+                }
+                "clear" if args.is_empty() => {
+                    let s_box = lower_expr(ctx, object)?;
+                    let blk = ctx.block();
+                    let s_handle = unbox_to_i64(blk, &s_box);
+                    blk.call_void("js_set_clear", &[(I64, &s_handle)]);
+                    return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+                }
+                _ => {}
+            }
+        }
+
         // -------- Map.forEach / Set.forEach --------
         // The HIR emits these as generic Call { callee: PropertyGet }
         // because it skips ArrayForEach when the receiver is Map/Set.
