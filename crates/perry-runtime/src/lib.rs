@@ -20,6 +20,7 @@ pub mod bigint;
 pub mod closure;
 pub mod exception;
 pub mod error;
+pub mod symbol;
 pub mod promise;
 pub mod timer;
 pub mod builtins;

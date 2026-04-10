@@ -177,6 +177,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
 
+### v0.4.109 (llvm-backend)
+- feat: new `perry-runtime::symbol` module — `SymbolHeader` + `SYMBOL_REGISTRY` (global `Symbol.for` dedup) + 9 FFI functions (`js_symbol_new`, `js_symbol_new_empty`, `js_symbol_for`, `js_symbol_key_for`, `js_symbol_description`, `js_symbol_to_string`, `js_symbol_typeof`, `js_symbol_equals`, `js_object_get_own_property_symbols`). Self-contained scaffolding for future LLVM/HIR wiring; no behavior change yet (codegen still routes `Symbol()` / `Object.getOwnPropertySymbols` through the generic Call fallback). Sweep unchanged 87/27/6.
+
 ### v0.4.108 (llvm-backend)
 - feat: wire up LLVM backend stubs to existing runtime functions — `Expr::DateToISOString` → `js_date_to_iso_string`, `Expr::DateParse` → `js_date_parse`, `Expr::DateUtc` → `js_date_utc` (7-arg pad), all 7 `DateSetUtc*` setters → `js_date_set_utc_*`, `MathCbrt`/`Fround`/`Clz32`/`Sinh`/`Cosh`/`Tanh`/`Asinh`/`Acosh`/`Atanh` → `js_math_*`, `NumberIsSafeInteger` → `js_number_is_safe_integer`, `MathHypot` chained via new runtime `js_math_hypot(a, b)` in `math.rs`. All called functions already existed in the runtime — pure wiring. `test_gap_number_math` flipped DIFF → MATCH; `test_gap_date_methods` diff drops 30 → 12. Sweep MATCH 86 → 87.
 
