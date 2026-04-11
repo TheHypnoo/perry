@@ -7,28 +7,44 @@ use anyhow::Result;
 use perry_hir::{Expr, LogicalOp};
 
 use crate::expr::{lower_expr, FnCtx};
-use crate::type_analysis::is_numeric_expr;
+use crate::type_analysis::{is_bool_expr, is_numeric_expr};
 use crate::types::{DOUBLE, I32, I64};
 
 /// Convert a lowered condition value to an `i1` for `cond_br`.
 ///
-/// Fast path: if the expression is statically a numeric double, emit
-/// `fcmp one cond, 0.0` (5-cycle ALU op).
+/// Fast path 1 (numeric): if the expression is statically a numeric
+/// double, emit `fcmp one cond, 0.0` (5-cycle ALU op).
 ///
-/// Slow path: for everything else (booleans, strings, objects, unions),
+/// Fast path 2 (NaN-boxed bool): if the expression is a `Compare` /
+/// `Logical` / `Bool` / known-bool local, the lowered value is the
+/// NaN-tagged `TAG_TRUE` / `TAG_FALSE` bit pattern. Inline the
+/// truthiness check as `bitcast → icmp ne TAG_FALSE` (2 ALU ops, no
+/// function call). This is the **dominant cost** in tight loops where
+/// the loop condition is `i < N` — without this fast path, every
+/// iteration calls `js_is_truthy` which prevents LLVM from
+/// constant-propagating / hoisting the comparison.
+///
+/// Slow path: for everything else (strings, objects, unions),
 /// dispatch through `js_is_truthy(double) -> i32` which inspects the
-/// NaN tag to handle null/undefined/false correctly. The slow path is a
-/// function call but produces correct results across the entire JS
+/// NaN tag to handle null/undefined/false correctly. The slow path is
+/// a function call but produces correct results across the entire JS
 /// truthiness table.
 pub(crate) fn lower_truthy(ctx: &mut FnCtx<'_>, cond_val: &str, cond_expr: &Expr) -> String {
     if is_numeric_expr(ctx, cond_expr) {
-        ctx.block().fcmp("one", cond_val, "0.0")
-    } else {
-        let i32_truthy = ctx
-            .block()
-            .call(I32, "js_is_truthy", &[(DOUBLE, cond_val)]);
-        ctx.block().icmp_ne(I32, &i32_truthy, "0")
+        return ctx.block().fcmp("one", cond_val, "0.0");
     }
+    if is_bool_expr(ctx, cond_expr) {
+        // The lowered cond_val is NaN-boxed TAG_TRUE or TAG_FALSE.
+        // bitcast to i64 and check against TAG_FALSE — equal means
+        // false, not-equal means true. Two ALU ops, no function call.
+        let blk = ctx.block();
+        let bits = blk.bitcast_double_to_i64(cond_val);
+        return blk.icmp_ne(I64, &bits, crate::nanbox::TAG_FALSE_I64);
+    }
+    let i32_truthy = ctx
+        .block()
+        .call(I32, "js_is_truthy", &[(DOUBLE, cond_val)]);
+    ctx.block().icmp_ne(I32, &i32_truthy, "0")
 }
 
 /// Lower `cond ? then_expr : else_expr` to a 4-block CFG with a phi at

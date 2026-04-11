@@ -344,6 +344,28 @@ pub(crate) fn is_numeric_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         Expr::Binary { op, .. } => !matches!(op, BinaryOp::Add), // Add may concat strings
         Expr::Update { .. } => true,
         Expr::DateNow => true,
+        // `obj.field` where the field is declared as `number` on the
+        // owning class. Without this, `this.value + 1` in a hot loop
+        // wraps the field load in `js_number_coerce` which prevents
+        // LLVM from doing GVN/LICM on the load. The class field
+        // walker matches `class_field_global_index`'s inheritance
+        // traversal so the type of any inherited field is also seen.
+        Expr::PropertyGet { object, property } => {
+            let Some(owner_class_name) = receiver_class_name(ctx, object) else {
+                return false;
+            };
+            let mut current = ctx.classes.get(owner_class_name.as_str()).copied();
+            while let Some(cls) = current {
+                if let Some(f) = cls.fields.iter().find(|f| f.name == *property) {
+                    return matches!(f.ty, HirType::Number | HirType::Int32);
+                }
+                current = cls
+                    .extends_name
+                    .as_deref()
+                    .and_then(|p| ctx.classes.get(p).copied());
+            }
+            false
+        }
         _ => false,
     }
 }
