@@ -645,6 +645,12 @@ pub(crate) fn is_promise_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
                 {
                     return true;
                 }
+                // `Array.fromAsync(...)` returns a Promise<Array>.
+                if matches!(object.as_ref(), Expr::GlobalGet(_))
+                    && property == "fromAsync"
+                {
+                    return true;
+                }
                 // `.then(cb)` / `.catch(cb)` / `.finally(cb)` on a promise
                 // receiver — the result is itself a promise.
                 if matches!(property.as_str(), "then" | "catch" | "finally")
@@ -654,18 +660,11 @@ pub(crate) fn is_promise_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
                 }
                 false
             }
-            // Async function call returns a promise.
-            Expr::FuncRef(fid) => ctx
-                .func_names
-                .get(fid)
-                .map(|_| {
-                    // Check if the function name suggests async. We can't
-                    // check func_return_types because we don't have them,
-                    // but we don't need to be exhaustive — the LocalGet
-                    // path catches assigned results.
-                    false
-                })
-                .unwrap_or(false),
+            // Direct call to a locally-defined async function — its
+            // return value is a `Promise<T>`. The HIR's
+            // `Function::is_async` flag is collected into
+            // `cross_module.local_async_funcs` at module compile time.
+            Expr::FuncRef(fid) => ctx.local_async_funcs.contains(fid),
             _ => false,
         },
         _ => false,

@@ -158,6 +158,39 @@ fn scan_expr_for_max_local(expr: &Expr, max_id: &mut LocalId) {
             for e in exprs { scan_expr_for_max_local(e, max_id); }
         }
         Expr::Yield { value: Some(v), .. } => scan_expr_for_max_local(v, max_id),
+        // Array fast-path variants — each has a closure callback whose
+        // parameter LocalIds would otherwise be invisible to the scanner.
+        Expr::ArrayForEach { array, callback }
+        | Expr::ArrayMap { array, callback }
+        | Expr::ArrayFilter { array, callback }
+        | Expr::ArrayFind { array, callback }
+        | Expr::ArrayFindIndex { array, callback }
+        | Expr::ArrayFindLast { array, callback }
+        | Expr::ArrayFindLastIndex { array, callback }
+        | Expr::ArraySome { array, callback }
+        | Expr::ArrayEvery { array, callback }
+        | Expr::ArrayFlatMap { array, callback } => {
+            scan_expr_for_max_local(array, max_id);
+            scan_expr_for_max_local(callback, max_id);
+        }
+        Expr::ArraySort { array, comparator } => {
+            scan_expr_for_max_local(array, max_id);
+            scan_expr_for_max_local(comparator, max_id);
+        }
+        Expr::ArrayReduce { array, callback, initial }
+        | Expr::ArrayReduceRight { array, callback, initial } => {
+            scan_expr_for_max_local(array, max_id);
+            scan_expr_for_max_local(callback, max_id);
+            if let Some(i) = initial { scan_expr_for_max_local(i, max_id); }
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            scan_expr_for_max_local(array, max_id);
+            if let Some(c) = comparator { scan_expr_for_max_local(c, max_id); }
+        }
+        Expr::ObjectGroupBy { items, key_fn } => {
+            scan_expr_for_max_local(items, max_id);
+            scan_expr_for_max_local(key_fn, max_id);
+        }
         _ => {}
     }
 }
@@ -259,6 +292,44 @@ fn scan_expr_for_max_func(expr: &Expr, max_id: &mut FuncId) {
             for e in exprs { scan_expr_for_max_func(e, max_id); }
         }
         Expr::Yield { value: Some(v), .. } => scan_expr_for_max_func(v, max_id),
+        // Array fast-path variants — each carries a `callback` Closure that
+        // would otherwise hide its FuncId from the scanner. Without these
+        // arms, hoisting a nested `function*` (which my v0.4.146-followup
+        // commit added) caused the generator-state-machine transform's
+        // `next_func_id` to start lower than the existing user closure
+        // ids, producing duplicate FuncIds and a SIGSEGV at codegen.
+        Expr::ArrayForEach { array, callback }
+        | Expr::ArrayMap { array, callback }
+        | Expr::ArrayFilter { array, callback }
+        | Expr::ArrayFind { array, callback }
+        | Expr::ArrayFindIndex { array, callback }
+        | Expr::ArrayFindLast { array, callback }
+        | Expr::ArrayFindLastIndex { array, callback }
+        | Expr::ArraySome { array, callback }
+        | Expr::ArrayEvery { array, callback }
+        | Expr::ArrayFlatMap { array, callback } => {
+            scan_expr_for_max_func(array, max_id);
+            scan_expr_for_max_func(callback, max_id);
+        }
+        Expr::ArraySort { array, comparator } => {
+            scan_expr_for_max_func(array, max_id);
+            scan_expr_for_max_func(comparator, max_id);
+        }
+        Expr::ArrayReduce { array, callback, initial }
+        | Expr::ArrayReduceRight { array, callback, initial } => {
+            scan_expr_for_max_func(array, max_id);
+            scan_expr_for_max_func(callback, max_id);
+            if let Some(i) = initial { scan_expr_for_max_func(i, max_id); }
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            scan_expr_for_max_func(array, max_id);
+            if let Some(c) = comparator { scan_expr_for_max_func(c, max_id); }
+        }
+        // ObjectGroupBy carries a key_fn closure.
+        Expr::ObjectGroupBy { items, key_fn } => {
+            scan_expr_for_max_func(items, max_id);
+            scan_expr_for_max_func(key_fn, max_id);
+        }
         _ => {} // Other variants don't carry FuncIds
     }
 }

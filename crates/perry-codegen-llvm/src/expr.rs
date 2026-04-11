@@ -194,6 +194,11 @@ pub(crate) struct FnCtx<'a> {
     /// Names of imported functions that are async. Used to wrap
     /// cross-module calls in promise machinery.
     pub imported_async_funcs: &'a std::collections::HashSet<String>,
+    /// FuncIds of locally-defined async functions in this module.
+    /// Used by `is_promise_expr` to recognize that `let p = asyncFn();`
+    /// produces a Promise so subsequent `p.then(cb)` chains route
+    /// through `js_promise_then` instead of `js_native_call_method`.
+    pub local_async_funcs: &'a std::collections::HashSet<u32>,
     /// Type alias map (name → Type) aggregated from all modules. Used
     /// to resolve `Named` types in function signatures and dispatch.
     pub type_aliases: &'a std::collections::HashMap<String, perry_types::Type>,

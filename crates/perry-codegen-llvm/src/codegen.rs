@@ -177,6 +177,11 @@ pub struct ImportedClass {
 pub(crate) struct CrossModuleCtx {
     pub namespace_imports: std::collections::HashSet<String>,
     pub imported_async_funcs: std::collections::HashSet<String>,
+    /// FuncIds of locally-defined async functions in this module. Populated
+    /// from `hir.functions.is_async`. Used by `is_promise_expr` to refine
+    /// `let p = asyncFn();` to `Promise(_)` so subsequent `p.then(cb)`
+    /// chains route through `js_promise_then`.
+    pub local_async_funcs: std::collections::HashSet<u32>,
     pub type_aliases: std::collections::HashMap<String, perry_types::Type>,
     pub imported_func_param_counts: std::collections::HashMap<String, usize>,
     pub imported_func_return_types: std::collections::HashMap<String, perry_types::Type>,
@@ -330,10 +335,22 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         class_table.entry(stub.name.clone()).or_insert(stub);
     }
 
+    // Local async function FuncIds — populated below from `hir.functions`
+    // (the per-function loop further down). Built here so the CrossModuleCtx
+    // construction is complete before the FnCtx instances reference it.
+    let mut local_async_funcs: std::collections::HashSet<u32> =
+        std::collections::HashSet::new();
+    for f in &hir.functions {
+        if f.is_async {
+            local_async_funcs.insert(f.id);
+        }
+    }
+
     // Build the cross-module context bundle from CompileOptions.
     let cross_module = CrossModuleCtx {
         namespace_imports: opts.namespace_imports.iter().cloned().collect(),
         imported_async_funcs: opts.imported_async_funcs,
+        local_async_funcs,
         type_aliases: opts.type_aliases,
         imported_func_param_counts: opts.imported_func_param_counts,
         imported_func_return_types: opts.imported_func_return_types,
@@ -931,6 +948,7 @@ fn compile_function(
         local_closure_func_ids: HashMap::new(),
         namespace_imports: &cross_module.namespace_imports,
         imported_async_funcs: &cross_module.imported_async_funcs,
+        local_async_funcs: &cross_module.local_async_funcs,
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
@@ -1146,6 +1164,7 @@ fn compile_closure(
         local_closure_func_ids: HashMap::new(),
         namespace_imports: &cross_module.namespace_imports,
         imported_async_funcs: &cross_module.imported_async_funcs,
+        local_async_funcs: &cross_module.local_async_funcs,
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
@@ -1255,6 +1274,7 @@ fn compile_method(
         local_closure_func_ids: HashMap::new(),
         namespace_imports: &cross_module.namespace_imports,
         imported_async_funcs: &cross_module.imported_async_funcs,
+        local_async_funcs: &cross_module.local_async_funcs,
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
@@ -1360,6 +1380,7 @@ fn compile_module_entry(
             local_closure_func_ids: HashMap::new(),
             namespace_imports: &cross_module.namespace_imports,
             imported_async_funcs: &cross_module.imported_async_funcs,
+        local_async_funcs: &cross_module.local_async_funcs,
             type_aliases: &cross_module.type_aliases,
             imported_func_param_counts: &cross_module.imported_func_param_counts,
             imported_func_return_types: &cross_module.imported_func_return_types,
@@ -1371,6 +1392,19 @@ fn compile_module_entry(
             .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
 
         if !ctx.block().is_terminated() {
+            // Final microtask drain: top-level `promise.then(cb)` calls
+            // (without an awaiting parent) need to flush before main exits,
+            // otherwise their callbacks silently never run. Drain in a
+            // bounded straight-line sequence — sufficient to flush the
+            // typical handful of tail microtasks left behind by
+            // `Array.fromAsync(...).then(...)` and similar fire-and-forget
+            // patterns.
+            for _ in 0..16 {
+                let _ = ctx.block().call(I32, "js_promise_run_microtasks", &[]);
+                let _ = ctx.block().call(I32, "js_timer_tick", &[]);
+                let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
+                let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
+            }
             ctx.block().ret(I32, "0");
         }
     } else {
@@ -1416,6 +1450,7 @@ fn compile_module_entry(
             local_closure_func_ids: HashMap::new(),
             namespace_imports: &cross_module.namespace_imports,
             imported_async_funcs: &cross_module.imported_async_funcs,
+        local_async_funcs: &cross_module.local_async_funcs,
             type_aliases: &cross_module.type_aliases,
             imported_func_param_counts: &cross_module.imported_func_param_counts,
             imported_func_return_types: &cross_module.imported_func_return_types,
@@ -1560,6 +1595,7 @@ fn compile_static_method(
         local_closure_func_ids: HashMap::new(),
         namespace_imports: &cross_module.namespace_imports,
         imported_async_funcs: &cross_module.imported_async_funcs,
+        local_async_funcs: &cross_module.local_async_funcs,
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,

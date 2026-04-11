@@ -1909,6 +1909,37 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
         }
         ast::Stmt::Decl(ast::Decl::Fn(fn_decl)) => {
             // Inner function declarations are compiled as closures and assigned to local variables.
+            // EXCEPTION: nested **generator** declarations (`function*` /
+            // `async function*`) cannot be lowered as closures because the
+            // generator-state-machine transform in `perry-transform/src/
+            // generator.rs` only operates on top-level `Function`s in
+            // `hir.functions`. Closures with `yield` in their body would
+            // never run through the transform and would silently call the
+            // raw IR (returning 0). Hoist them to top-level via
+            // `lower_fn_decl` + `pending_functions` and register the local
+            // as a FuncRef so the for-of / Array.fromAsync iterator path
+            // detects them via `generator_func_names`.
+            if fn_decl.function.body.is_some() && fn_decl.function.is_generator {
+                let func_name = fn_decl.ident.sym.to_string();
+                let func = lower_fn_decl(ctx, fn_decl)?;
+                let func_id = func.id;
+                ctx.register_func(func_name.clone(), func_id);
+                ctx.pending_functions.push(func);
+                // Also bind the local name so a downstream `LocalGet(name)`
+                // resolves to the FuncRef. We use a Let with `init: Some(FuncRef)`
+                // so existing code that does `let it = gen()` lowers via
+                // the LocalGet path → FuncRef → known generator name.
+                let local_id = ctx.lookup_local(&func_name)
+                    .unwrap_or_else(|| ctx.define_local(func_name.clone(), Type::Any));
+                result.push(Stmt::Let {
+                    id: local_id,
+                    name: func_name,
+                    ty: Type::Any,
+                    init: Some(Expr::FuncRef(func_id)),
+                    mutable: false,
+                });
+                return Ok(result);
+            }
             if fn_decl.function.body.is_some() {
                 let func_name = fn_decl.ident.sym.to_string();
                 let func_id = ctx.fresh_func();
