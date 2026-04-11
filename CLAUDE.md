@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.9
+**Current Version:** 0.5.10
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.10 (llvm-backend) — `perry/ui.App({...})` dispatch — mango actually launches
+- **fix**: the LLVM backend port (v0.5.0 cutover) silently dropped `perry/ui` dispatch — receiver-less `NativeMethodCall { module: "perry/ui", method, object: None }` fell into `lower_native_method_call`'s catch-all early-out at `lower_call.rs:1922` and returned `double 0.0`. So `App({title, width, height, body})` at the end of any perry/ui app silently no-op'd, the binary completed init without entering `NSApplication.run()`, and exited with no output. Mango compiled cleanly under v0.5.0 through v0.5.9 but couldn't actually launch — the regression was masked because the driver doesn't have an integration test that runs the resulting binary. New per-method dispatch in `lower_call.rs::lower_native_method_call` that recognizes `perry/ui.App({...})`, walks the args[0] object literal for `title` / `width` / `height` / `icon` / `body`, lazy-declares `perry_ui_app_create` / `perry_ui_app_set_icon` / `perry_ui_app_set_body` / `perry_ui_app_run` via `pending_declares`, and emits the create/set-icon/set-body/run sequence. Verified by compiling `mango/src/app.ts -o Mango`, launching the binary, and screenshotting a native macOS window titled "Mango" (menubar shows Mango/Edit/Window — proof that NSApplication.run() is now being entered). The window's content area is empty because the other perry/ui constructors (Text/Button/VStack/HStack/etc.) are still in the same dropped state — full widget dispatch is the next followup. This commit lands `App()` only as a focused proof-of-concept that the linking + runtime + Mach-O code path works end to end.
 
 ### v0.5.9 (llvm-backend) — `let C = SomeClass; new C()` correctness + alias type refinement
 - **fix**: `let C = SomeClass; new C()` now actually creates an instance of `SomeClass` instead of returning the empty-object placeholder. New `local_class_aliases: HashMap<String, String>` and `local_id_to_name: HashMap<u32, String>` fields on `FnCtx`, populated by `Stmt::Let` when the init is `Expr::ClassRef(name)` (direct alias) or `Expr::LocalGet(other_id)` where `other_id`'s name is itself an alias (chain — `let A = X; let B = A; new B()`). `lower_new` shadows its `class_name` parameter with the resolved name early so the rest of the function (alloc + ctor inline + field offsets) uses the real class. Critically, `refine_type_from_init` for `Expr::New` *also* resolves through `local_class_aliases`, so `let b: any = new C()` refines `b`'s static type to `Named("SomeClass")` not `Named("C")` — without this, the PropertyGet fast path would look up "C" in `ctx.classes`, find nothing, fall through to `js_object_get_field_by_name_f64`, and return undefined for fields that were correctly initialized in memory by the inline allocator. Verified with three test shapes: direct alias (`const C = Foo; const a = new C()`), 3-step chain (`const A = Bar; const B = A; const b = new B()`), and in-function (`function f() { const D = Foo; return new D() }`). Mango compiles cleanly.

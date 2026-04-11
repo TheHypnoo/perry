@@ -1916,6 +1916,92 @@ pub(crate) fn lower_native_method_call(
         }
     }
 
+    // `perry/ui.App({ title, width, height, body, icon? })` — minimum-viable
+    // dispatch so a perry/ui app actually launches an NSApplication and
+    // shows a window. Pre-v0.5.10 this fell into the receiver-less early-
+    // out below and returned `double 0.0`, so the program completed
+    // without entering the AppKit run loop — mango compiled cleanly but
+    // exited immediately on launch with no output. The Cranelift backend
+    // (deleted in v0.5.0) had per-method dispatch for the entire `perry/ui`
+    // surface; the LLVM backend port left that gap. This is the smallest
+    // dispatch that proves the linking + runtime + Mach-O code path works
+    // end to end. Other perry/ui constructors (Text, Button, VStack,
+    // HStack, etc.) are NOT dispatched yet so the body is the
+    // zero-sentinel — the window appears with the right title/size but
+    // no widget tree. Full widget dispatch is a separate followup.
+    if module == "perry/ui" && method == "App" && object.is_none() && args.len() == 1 {
+        if let Expr::Object(props) = &args[0] {
+            let mut title_ptr: String = "0".to_string();
+            let mut width_d: String = "1024.0".to_string();
+            let mut height_d: String = "768.0".to_string();
+            let mut body_handle: String = "0".to_string();
+            let mut icon_ptr: Option<String> = None;
+            for (key, val) in props {
+                match key.as_str() {
+                    "title" => {
+                        let v = lower_expr(ctx, val)?;
+                        let blk = ctx.block();
+                        title_ptr = unbox_to_i64(blk, &v);
+                    }
+                    "width" => {
+                        width_d = lower_expr(ctx, val)?;
+                    }
+                    "height" => {
+                        height_d = lower_expr(ctx, val)?;
+                    }
+                    "body" => {
+                        let v = lower_expr(ctx, val)?;
+                        let blk = ctx.block();
+                        body_handle = unbox_to_i64(blk, &v);
+                    }
+                    "icon" => {
+                        let v = lower_expr(ctx, val)?;
+                        let blk = ctx.block();
+                        icon_ptr = Some(unbox_to_i64(blk, &v));
+                    }
+                    _ => {
+                        let _ = lower_expr(ctx, val)?;
+                    }
+                }
+            }
+            ctx.pending_declares.push((
+                "perry_ui_app_create".to_string(),
+                I64,
+                vec![I64, DOUBLE, DOUBLE],
+            ));
+            ctx.pending_declares.push((
+                "perry_ui_app_set_icon".to_string(),
+                crate::types::VOID,
+                vec![I64],
+            ));
+            ctx.pending_declares.push((
+                "perry_ui_app_set_body".to_string(),
+                crate::types::VOID,
+                vec![I64, I64],
+            ));
+            ctx.pending_declares.push((
+                "perry_ui_app_run".to_string(),
+                crate::types::VOID,
+                vec![I64],
+            ));
+            let blk = ctx.block();
+            let app_handle = blk.call(
+                I64,
+                "perry_ui_app_create",
+                &[(I64, &title_ptr), (DOUBLE, &width_d), (DOUBLE, &height_d)],
+            );
+            if let Some(icon) = icon_ptr {
+                blk.call_void("perry_ui_app_set_icon", &[(I64, &icon)]);
+            }
+            blk.call_void(
+                "perry_ui_app_set_body",
+                &[(I64, &app_handle), (I64, &body_handle)],
+            );
+            blk.call_void("perry_ui_app_run", &[(I64, &app_handle)]);
+            return Ok(double_literal(0.0));
+        }
+    }
+
     // Receiver-less native method calls (e.g. plugin::setConfig(...)
     // as a static module function): lower args for side effects and
     // return a sentinel. Compilation succeeds; runtime gets a NaN.
