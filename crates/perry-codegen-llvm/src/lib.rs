@@ -18,6 +18,7 @@ pub mod function;
 pub mod module;
 pub mod runtime_decls;
 pub mod linker;
+pub mod stubs;
 pub(crate) mod expr;
 pub(crate) mod type_analysis;
 pub(crate) mod lower_call;

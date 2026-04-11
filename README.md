@@ -81,9 +81,9 @@ Method dispatch uses direct function calls (no vtable). String concatenation use
 | math_intensive | 370ms | 52ms | 53ms | 0.1x | 0.1x | Harmonic series: V8 vectorizes `result += 1.0/i` across SIMD lanes |
 | nested_loops | 32ms | 18ms | 20ms | 0.6x | 0.6x | V8's loop optimization + SIMD for array access in nested loops |
 
-V8's TurboFan JIT has decades of optimization for tight f64 loops — SIMD auto-vectorization (NEON/SSE), speculative type specialization, and aggressive instruction scheduling. Perry's LLVM backend benefits from LLVM's mature optimization pipeline, but these benchmarks were taken before the LLVM migration and will be updated.
+V8's TurboFan JIT has decades of optimization for tight f64 loops — SIMD auto-vectorization (NEON/SSE), speculative type specialization, and aggressive instruction scheduling. Perry's LLVM backend benefits from LLVM's mature optimization pipeline; the numbers above were taken on an earlier backend and trend faster under the current LLVM default (Phase 2.1 measurement: −44% wall time, −26% binary size on the recursive fibonacci workload). Whole-program LTO via `PERRY_LLVM_BITCODE_LINK=1` adds a further ~31% on `bench_fibonacci`.
 
-Run benchmarks yourself: `cd benchmarks/suite && ./run_benchmarks.sh` (requires node, bun, cargo)
+Run benchmarks yourself: `cd benchmarks/suite && ./run_benchmarks.sh` (requires node, bun, cargo). For LLVM-vs-Cranelift comparison numbers see [`benchmarks/llvm_vs_cranelift.md`](benchmarks/llvm_vs_cranelift.md).
 
 ## Binary Size
 
