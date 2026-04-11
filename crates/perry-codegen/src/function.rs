@@ -26,6 +26,23 @@ pub struct LlFunction {
     blocks: Vec<LlBlock>,
     block_counter: u32,
     reg_counter: Rc<RegCounter>,
+    /// Allocas hoisted to the function entry block. These are emitted at
+    /// the very top of block 0 at IR-serialization time, so they dominate
+    /// every use everywhere in the function.
+    ///
+    /// LLVM convention is that all `alloca` instructions live in the
+    /// function entry block — that way the slot pointer is in scope from
+    /// every reachable basic block. Putting an alloca inside an `if` arm
+    /// works only when its uses are also in that arm; the moment a closure
+    /// captures the slot from a sibling branch (or any code reached after
+    /// the if-merge), we get "Instruction does not dominate all uses" from
+    /// the LLVM verifier.
+    ///
+    /// Use `LlFunction::alloca_entry(ty)` to allocate; the helper bumps
+    /// the shared register counter so the returned `%r<N>` name is unique
+    /// function-wide, then appends `"  %r<N> = alloca <ty>"` to this list.
+    /// `to_ir()` prepends the list to entry-block instructions in order.
+    entry_allocas: Vec<String>,
 }
 
 impl LlFunction {
@@ -39,7 +56,20 @@ impl LlFunction {
             blocks: Vec::new(),
             block_counter: 0,
             reg_counter: Rc::new(RegCounter::new()),
+            entry_allocas: Vec::new(),
         }
+    }
+
+    /// Allocate a fresh stack slot in the function entry block. Returns
+    /// the SSA pointer name (e.g. `%r42`). The instruction is emitted at
+    /// the top of block 0, ahead of any existing entry-block code, so
+    /// the slot dominates every reachable use — even from inside nested
+    /// if/else branches that would otherwise produce a "does not dominate
+    /// all uses" verifier error.
+    pub fn alloca_entry(&mut self, ty: LlvmType) -> String {
+        let r = format!("%r{}", self.reg_counter.next());
+        self.entry_allocas.push(format!("  {} = alloca {}", r, ty));
+        r
     }
 
     /// Create a new basic block with the given semantic name (e.g. "entry",
@@ -100,7 +130,27 @@ impl LlFunction {
             if i > 0 {
                 ir.push('\n');
             }
-            ir.push_str(&blk.to_ir());
+            // Hoisted allocas live at the very top of the entry block so
+            // they dominate every reachable use in the function. We splice
+            // them in by emitting the block's label line first, then the
+            // alloca instructions, then the block's regular body.
+            if i == 0 && !self.entry_allocas.is_empty() {
+                let body = blk.to_ir();
+                // body looks like "label.0:\n  inst1\n  inst2\n"
+                if let Some(nl) = body.find('\n') {
+                    let (label_line, rest) = body.split_at(nl + 1);
+                    ir.push_str(label_line);
+                    for alloca in &self.entry_allocas {
+                        ir.push_str(alloca);
+                        ir.push('\n');
+                    }
+                    ir.push_str(rest);
+                } else {
+                    ir.push_str(&body);
+                }
+            } else {
+                ir.push_str(&blk.to_ir());
+            }
             ir.push('\n');
         }
 

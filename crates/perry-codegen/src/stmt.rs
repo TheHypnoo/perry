@@ -136,7 +136,10 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 let blk = ctx.block();
                 let box_ptr =
                     blk.call(crate::types::I64, "js_box_alloc", &[(DOUBLE, &undef)]);
-                let slot = ctx.block().alloca(DOUBLE);
+                // Slot must live in the entry block — closures from sibling
+                // branches may capture this id later, and an alloca placed
+                // here would not dominate those branches' loads.
+                let slot = ctx.func.alloca_entry(DOUBLE);
                 let box_as_double = ctx.block().bitcast_i64_to_double(&box_ptr);
                 ctx.block().store(DOUBLE, &box_as_double, &slot);
                 // Step 2: register BEFORE lowering init.
@@ -155,7 +158,12 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 }
                 return Ok(());
             }
-            let slot = ctx.block().alloca(DOUBLE);
+            // Slot must live in the entry block — see the boxed-var case
+            // above. Putting allocas inside an `if` arm causes verifier
+            // failures the moment a closure in another branch captures
+            // this local, because the alloca block doesn't dominate the
+            // closure-capture site.
+            let slot = ctx.func.alloca_entry(DOUBLE);
             ctx.locals.insert(*id, slot.clone());
             ctx.local_types.insert(*id, refined_ty);
             if let Some(init_expr) = init {
