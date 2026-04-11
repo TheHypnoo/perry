@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.7
+**Current Version:** 0.5.8
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.8 (llvm-backend) — `Expr::NewDynamic` static reroute + conditional callee branching
+- **fix**: `new (Foo)()` (parenthesized ClassRef) and `new (cond ? FooClass : BarClass)()` (conditional callee) now dispatch to the right class instead of returning the empty-object placeholder. Two new shapes recognized in the `Expr::NewDynamic` lowering: (a) `Expr::ClassRef(name)` callees reroute straight to `lower_new(name, args)`, mirroring the existing `globalThis.X` reroute; (b) `Expr::Conditional { condition, then_expr, else_expr }` callees synthesize a `NewDynamic { callee: <branch>, args }` per branch and emit a runtime cond_br + phi via the existing `lower_conditional` helper, so each branch independently runs `lower_new` (or recursively the NewDynamic fallback). Nested ternaries work because the inner NewDynamic recurses through the same handler. New `try_static_class_name(callee)` helper centralizes the static-reroute pattern. The truly-dynamic fallback (`new someVar()` where the callee is a runtime value) still emits an empty-object placeholder — that needs a `js_new_dynamic(callee_value, args)` runtime helper to inspect the value's NaN tag and dispatch to the right class constructor, tracked as a v0.5.8 followup. Verified end-to-end with two TS tests: `new (cond ? Foo : Bar)()` (5 cases including a nested ternary) and `new (Foo)()` + `new arr[0]()` (placeholder fallback). Mango compiles cleanly.
 
 ### v0.5.7 (llvm-backend) — `Expr::I18nString` compile-time resolution + runtime interpolation
 - **fix**: localized strings now resolve to the right translation at compile time. Previously the `Expr::I18nString` lowering returned the verbatim KEY string regardless of the project's `default_locale`, so any user calling `t("Hello")` from `perry/i18n` got `"Hello"` instead of `"Hallo"` even with `default_locale = "de"`. New `expr::I18nLowerCtx` (threaded through `CrossModuleCtx`) carries the i18n table from `opts.i18n_table` and the default locale index. The lowering pulls `translations[default_locale_idx * key_count + string_idx]` at compile time, parses `{name}` placeholders, lowers each interpolation param's value, and emits a `js_string_concat` chain that interleaves interned literal fragments with `js_string_coerce`'d param values. Empty / missing translation cells fall back to the source key. Plurals (`plural_forms`/`plural_param`) are still ignored — uses the canonical `string_idx` form, leaving CLDR plural rule selection as a followup. Also fixed: `lower_call.rs::lower_native_method_call` was discarding `NativeMethodCall { module: "perry/i18n", method: "t", object: None, args: [I18nString] }` and returning `double 0.0` because the receiver-less early-out path didn't know about `t()`. Now special-cases the `t()` unwrap and lowers the inner I18nString directly. Added `default_locale_idx` to `CompileOptions::i18n_table` (5-tuple). Verified end-to-end with a 2-locale test: en/de translations resolve correctly when `default_locale` is switched, and missing/empty cells fall back to the source key. Mango still compiles cleanly (89 localizable strings across 13 locales).

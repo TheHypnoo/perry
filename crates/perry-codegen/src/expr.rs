@@ -32,6 +32,37 @@ pub(crate) fn nanbox_pointer_inline(blk: &mut LlBlock, ptr_i64: &str) -> String 
     blk.bitcast_i64_to_double(&tagged)
 }
 
+/// If `callee` is a `new`-target whose class name is statically
+/// known, return that name. Used by the `Expr::NewDynamic` lowering
+/// to reroute statically-resolvable shapes to the regular `lower_new`
+/// path. Returns `None` for any callee that needs runtime dispatch
+/// (locals, conditionals with non-classy arms, computed expressions).
+///
+/// Recognized shapes:
+///   - `Expr::ClassRef(name)` — class identifier referenced as a value
+///     (the lowering at `crates/perry-hir/src/lower.rs::ast::Expr::Ident`
+///     turns class names referenced as values into ClassRef so they
+///     can flow through generic Expr slots without losing the class
+///     identity).
+///   - `Expr::PropertyGet { object: GlobalGet(_), property }` — a
+///     property access on the global object, e.g. `globalThis.WebSocket`
+///     or `window.Date`. The `globalThis.X` form is what the parser
+///     emits for `new globalThis.WebSocket(url)` (mango uses this for
+///     the websocket helper in `_wsOpen`).
+fn try_static_class_name(callee: &Expr) -> Option<&str> {
+    match callee {
+        Expr::ClassRef(name) => Some(name.as_str()),
+        Expr::PropertyGet { object, property } => {
+            if matches!(object.as_ref(), Expr::GlobalGet(_)) {
+                Some(property.as_str())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Alias kept for backwards compatibility with existing callers
 /// in `stmt.rs` and `codegen.rs` that use the `_pub` suffix.
 pub(crate) fn nanbox_pointer_inline_pub(blk: &mut LlBlock, ptr_i64: &str) -> String {
@@ -1963,22 +1994,74 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::New { class_name, args, .. } => lower_new(ctx, class_name, args),
 
         // `new <expr>(args…)` where the callee isn't a bare identifier.
-        // Two common shapes:
-        //   1. `new globalThis.WebSocket(url)` — the parser emits this as
-        //      `NewDynamic { callee: PropertyGet { GlobalGet(0), "WebSocket" }, args }`.
-        //      Reroute to the static path so the existing built-in/runtime
-        //      class handling kicks in.
-        //   2. Anything else (`new (cond ? A : B)()`, `new someVar()`) —
-        //      lower the callee + args for side effects (closures, string
-        //      literal interning) and return an empty object placeholder.
-        //      The runtime won't dispatch correctly here, but the binary
-        //      compiles and links instead of failing the whole module.
+        // Several shapes get static rerouting; the rest fall back to a
+        // best-effort empty-object placeholder so the binary still
+        // compiles.
+        //
+        // Cases handled (in priority order):
+        //
+        //   1. `new ClassRef("Foo")` — the HIR's `Expr::ClassRef` is what
+        //      a class identifier referenced as a value lowers to (see
+        //      `crates/perry-hir/src/lower.rs::ast::Expr::Ident` →
+        //      `Expr::ClassRef` at line ~4480). When the parser sees
+        //      `new (Foo)()` or `new (someParen)()` where the inner is a
+        //      class name, the callee comes through as `ClassRef("Foo")`.
+        //      Reroute straight to `lower_new`.
+        //
+        //   2. `new globalThis.WebSocket(url)` — the parser emits this as
+        //      `NewDynamic { callee: PropertyGet { GlobalGet(_), "WebSocket" }, args }`
+        //      (used for built-ins like WebSocket / Date / Map / etc. that
+        //      live on the global object). Reroute to `lower_new(name)`
+        //      so the existing built-in/runtime class handling kicks in.
+        //
+        //   3. `new (condition ? A : B)()` — emit a runtime conditional
+        //      where each arm runs `lower_new` (or recursively the
+        //      NewDynamic fallback) on its own branch. We synthesize
+        //      `NewDynamic { callee: A, args }` and `NewDynamic { callee: B, args }`,
+        //      then call `lower_conditional` to emit the standard
+        //      cond_br/phi pattern. Args are cloned for each branch — fine
+        //      because `new` args are typically simple expressions, and
+        //      side effects fire under the conditional's cond_br anyway
+        //      (matching JS evaluation semantics where the unchosen arm
+        //      doesn't run).
+        //
+        //   4. Anything else (`new someVar()`, `new this.something()`,
+        //      `new someFn()()`) — lower the callee + args for side
+        //      effects (closures, string literal interning, lazy declares)
+        //      and return an empty-object placeholder. The runtime won't
+        //      dispatch correctly here — calling a method on the result
+        //      will return `undefined` — but the binary compiles instead
+        //      of failing the whole module. Real fix requires a runtime
+        //      `js_new_dynamic(callee_value, args_vec)` helper that
+        //      inspects the callee's NaN tag and dispatches to the right
+        //      class constructor. That's a separate followup tracked in
+        //      the v0.5.8 changelog.
         Expr::NewDynamic { callee, args } => {
-            if let Expr::PropertyGet { object, property } = callee.as_ref() {
-                if matches!(object.as_ref(), Expr::GlobalGet(_)) {
-                    return lower_new(ctx, property, args);
-                }
+            // Case 1 + 2: callee is statically a class.
+            if let Some(name) = try_static_class_name(callee.as_ref()) {
+                return lower_new(ctx, name, args);
             }
+
+            // Case 3: callee is a ternary. Synthesize a NewDynamic for
+            // each branch and emit a runtime if/else with phi. The inner
+            // NewDynamics fall through this same handler — if they're
+            // statically resolvable they reroute to lower_new; otherwise
+            // they fall back to the empty-object placeholder. Either way
+            // each branch produces a valid double for the phi to merge.
+            if let Expr::Conditional { condition, then_expr, else_expr } = callee.as_ref() {
+                let then_synth = Expr::NewDynamic {
+                    callee: then_expr.clone(),
+                    args: args.clone(),
+                };
+                let else_synth = Expr::NewDynamic {
+                    callee: else_expr.clone(),
+                    args: args.clone(),
+                };
+                return lower_conditional(ctx, condition, &then_synth, &else_synth);
+            }
+
+            // Case 4: best-effort fallback. Lower the callee + args for
+            // side effects, then return an empty object as the result.
             let _ = lower_expr(ctx, callee)?;
             for a in args {
                 let _ = lower_expr(ctx, a)?;

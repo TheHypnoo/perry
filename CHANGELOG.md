@@ -2,6 +2,125 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.8 (llvm-backend) — `Expr::NewDynamic` static reroute + conditional callee branching
+
+The sixth followup from the v0.5.1 mango compile sweep. Improves `Expr::NewDynamic` handling beyond the original v0.5.1 "empty-object placeholder for everything except `globalThis.X`" pragmatic fix. Closes the followup item: "NewDynamic for non-globalThis callees currently returns an empty object placeholder."
+
+### Background
+
+The HIR lowering at `crates/perry-hir/src/lower.rs::ast::Expr::New` emits `Expr::NewDynamic { callee, args }` whenever the `new` expression's callee isn't a bare identifier. Examples:
+
+- `new (Foo)()` — parenthesized class name → callee is `Expr::ClassRef("Foo")`
+- `new globalThis.WebSocket(url)` — globalThis lookup → callee is `Expr::PropertyGet { object: GlobalGet(_), property: "WebSocket" }` *(handled in v0.5.1)*
+- `new (cond ? Foo : Bar)()` — conditional class → callee is `Expr::Conditional { condition, then_expr: ClassRef("Foo"), else_expr: ClassRef("Bar") }`
+- `new someVar()` — runtime value → callee is `Expr::LocalGet(id)`
+- `new arr[0]()` — computed → callee is `Expr::IndexGet { ... }`
+
+Identifier callees (`new Foo()`) take a different path that emits `Expr::New { class_name }` directly, so they never hit `NewDynamic`.
+
+Pre-v0.5.8 the lowering recognized only the `globalThis.X` shape and fell back to an empty-object placeholder for everything else. The fallback let mango compile (the original motivation: `new globalThis.WebSocket(url)` in `_wsOpen`) but produced wrong results for any other dynamic-callee shape.
+
+### What changed
+
+**1. New `try_static_class_name(callee)` helper** in `crates/perry-codegen/src/expr.rs`:
+
+```rust
+fn try_static_class_name(callee: &Expr) -> Option<&str> {
+    match callee {
+        Expr::ClassRef(name) => Some(name.as_str()),
+        Expr::PropertyGet { object, property } => {
+            if matches!(object.as_ref(), Expr::GlobalGet(_)) {
+                Some(property.as_str())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+```
+
+Centralizes the "is this callee statically a class?" predicate. Two recognized shapes:
+
+- `Expr::ClassRef(name)` — what the HIR lowering at `lower.rs::ast::Expr::Ident` (line ~4480) produces when a class identifier is referenced as a value (e.g. `const C = SomeClass`, `new (Foo)()` after parens flatten).
+- `Expr::PropertyGet { object: GlobalGet(_), property }` — `globalThis.X` / `window.X`. Existing behavior, just refactored.
+
+**2. `Expr::NewDynamic` lowering rewrite** in `crates/perry-codegen/src/expr.rs`:
+
+```rust
+Expr::NewDynamic { callee, args } => {
+    if let Some(name) = try_static_class_name(callee.as_ref()) {
+        return lower_new(ctx, name, args);
+    }
+    if let Expr::Conditional { condition, then_expr, else_expr } = callee.as_ref() {
+        let then_synth = Expr::NewDynamic { callee: then_expr.clone(), args: args.clone() };
+        let else_synth = Expr::NewDynamic { callee: else_expr.clone(), args: args.clone() };
+        return lower_conditional(ctx, condition, &then_synth, &else_synth);
+    }
+    // Fallback: empty-object placeholder.
+    ...
+}
+```
+
+The conditional case is the new functionality. Each branch synthesizes a `NewDynamic` with the same args and recursively calls `lower_conditional`, which already knows how to emit the standard cond_br/phi pattern. The recursive NewDynamic in each branch hits the same handler — if the branch's callee is `try_static_class_name`-recognizable it reroutes to `lower_new`, otherwise it falls back to the empty-object placeholder. Either way each branch produces a valid double for the phi to merge, so deeply nested ternaries (`new (a ? X : (b ? Y : Z))()`) work without special-casing.
+
+The `args.clone()` per branch is the only real cost. Args in `new` calls are typically simple (numbers, strings, locals), and JS evaluation semantics already say the unchosen arm doesn't run — so cloning the args expression is correct because each branch evaluates its own copy under the cond_br.
+
+**3. Truly dynamic fallback unchanged.** `new someVar()`, `new this.something()`, `new arr[0]()` — all callees that need to be evaluated at runtime to know which class to instantiate — still emit an empty-object placeholder. The lowering walks the callee + args for side effects (closures, string literal interning, lazy declares for cross-module calls) so nothing is silently dropped, but the result is a class-less object. Calling methods on it returns `undefined`. Real fix needs a runtime helper:
+
+```rust
+extern "C" fn js_new_dynamic(callee: f64, args_ptr: *const f64, args_len: usize) -> f64;
+```
+
+that inspects `callee`'s NaN tag (POINTER → check ClosureHeader magic; STRING → throw TypeError; etc.) and dispatches to the right constructor. Class instances would need a discoverable constructor pointer, which currently doesn't exist on Perry's `ObjectHeader`. Tracked as a future followup.
+
+### Verified end-to-end
+
+`/tmp/perry_newdynamic_test.ts` — conditional callee with nested ternary:
+
+```ts
+class Foo { kind: string; constructor() { this.kind = "Foo"; } }
+class Bar { kind: string; constructor() { this.kind = "Bar"; } }
+
+function pickClass(useFoo: boolean): Foo | Bar {
+  return new (useFoo ? Foo : Bar)();   // NewDynamic with Conditional callee
+}
+console.log("a.kind: " + (pickClass(true)  as any).kind);   // a.kind: Foo
+console.log("b.kind: " + (pickClass(false) as any).kind);   // b.kind: Bar
+
+function tri(n: number): Foo | Bar {
+  return new (n === 0 ? Foo : (n === 1 ? Bar : Foo))();    // nested ternary
+}
+console.log("c.kind: " + (tri(0) as any).kind);   // c.kind: Foo
+console.log("d.kind: " + (tri(1) as any).kind);   // d.kind: Bar
+console.log("e.kind: " + (tri(2) as any).kind);   // e.kind: Foo
+```
+
+All five cases produce the right class. The cond_br + phi emits at runtime, each branch dispatches to its own `lower_new`, and the result merges correctly.
+
+`/tmp/perry_newdynamic2.ts` — ClassRef + truly-dynamic fallback:
+
+```ts
+class Foo { kind: string; constructor() { this.kind = "Foo"; } }
+
+const x: any = new (Foo)();              // ClassRef path
+console.log("x.kind: " + x.kind);        // x.kind: Foo
+
+const fns: any[] = [Foo];
+const dyn: any = new fns[0]();           // truly dynamic — fallback
+console.log("dyn.kind: " + (dyn.kind || "(empty placeholder)"));   // (empty placeholder)
+```
+
+`new (Foo)()` resolves correctly via the ClassRef path. `new fns[0]()` falls back to the empty-object placeholder as documented — the user can read `dyn.kind` and get `undefined`, which is at least a defined behavior.
+
+Mango compiles cleanly: `Wrote executable: /tmp/Mango-newdyn` with no `error compiling` or `module(s) failed` messages. The `_wsOpen` `new globalThis.WebSocket(url)` call still goes through the existing PropertyGet→GlobalGet reroute path.
+
+### Followups
+
+- **`js_new_dynamic` runtime helper** for the truly-dynamic fallback. Would unlock `new someVar()`, `new arr[0]()`, `new this.factory()`. Requires adding a constructor-pointer slot to `ObjectHeader` (or equivalent) so the runtime can find the right `__perry_init_<class>__ctor` to call.
+- **`Expr::New { class_name }` lookup-failure improvement.** Right now `let C = SomeClass; new C()` lowers as `Expr::New { class_name: "C" }` (because the parser sees an Ident callee), and `lower_new("C", ...)` finds nothing in `ctx.classes` and falls back to the same empty-object placeholder. Tracking `local_id → class_name` for `Stmt::Let { init: Some(ClassRef(name)) }` would let `lower_new` reroute when the class name turns out to be a local-bound alias.
+- **Namespace-import callee.** `import * as ns from 'm'; new ns.Foo()` becomes `NewDynamic { callee: PropertyGet { LocalGet(ns), "Foo" }, args }` — the `try_static_class_name` predicate doesn't recognize this because `LocalGet` isn't `GlobalGet`. Could be added by checking `ctx.namespace_imports` for the local and looking up `Foo` in `ctx.imported_classes`.
+
 ## v0.5.7 (llvm-backend) — `Expr::I18nString` compile-time resolution + runtime interpolation
 
 The fifth followup from the v0.5.1 mango compile sweep. Closes the followup item "I18nString currently returns the verbatim key string; need to wire up the locale-table lookup that the rest of the codebase already has plumbing for."
