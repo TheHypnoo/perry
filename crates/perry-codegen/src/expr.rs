@@ -5906,23 +5906,35 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- ExternFuncRef as a value --------
-        // The Call path in `lower_call.rs` knows how to dispatch
-        // `Expr::Call { callee: ExternFuncRef, .. }` directly to the
-        // cross-module symbol. But when an imported function appears as
-        // a STANDALONE value — `if (this.ffi.setCursors)` truthiness
-        // checks, equality comparisons, or being passed as a callback —
-        // we still need *some* JSValue to thread through. Pragmatic:
-        // return TAG_TRUE so truthiness checks succeed (which is the
-        // overwhelmingly common case for capability-detection code).
-        // Calling an extern fn via a stored value is NOT supported and
-        // will misbehave at runtime; emit the declare anyway in case a
-        // direct call to the same name appears elsewhere in the body.
-        Expr::ExternFuncRef { name, param_types, .. } => {
+        // The Call path in `lower_call.rs` dispatches `Expr::Call { callee:
+        // ExternFuncRef, .. }` directly to the cross-module symbol. When
+        // an imported function appears as a STANDALONE value — `if
+        // (this.ffi.setCursors)` truthiness check, `someFn === otherFn`
+        // equality comparison, or being passed as a callback — we route
+        // to the static `__perry_extern_closure_<src>__<name>` global
+        // emitted by `compile_module` for every imported function (see the
+        // wrapper-emit block right after the user-function `__perry_wrap_*`
+        // loop). The global is a `ClosureHeader` with `func_ptr` pointing
+        // at a thin `__perry_wrap_extern_<src>__<name>` thunk and
+        // `type_tag = CLOSURE_MAGIC`, so the runtime's `js_closure_callN`
+        // sees a valid closure and dispatches correctly. We just take the
+        // address and NaN-box it as POINTER.
+        //
+        // For namespaces / built-ins that aren't in `import_function_prefixes`
+        // (e.g. setTimeout / clearTimeout / Math / Date), we still don't
+        // have a wrapper to point at. Fall back to TAG_TRUE so truthiness
+        // checks work; calling those values via stored references would
+        // need a separate runtime path that this commit doesn't add.
+        Expr::ExternFuncRef { name, .. } => {
             if let Some(source_prefix) = ctx.import_function_prefixes.get(name).cloned() {
-                let llvm_name = format!("perry_fn_{}__{}", source_prefix, name);
-                let pts: Vec<crate::types::LlvmType> =
-                    std::iter::repeat(DOUBLE).take(param_types.len()).collect();
-                ctx.pending_declares.push((llvm_name, DOUBLE, pts));
+                let global_name = format!(
+                    "__perry_extern_closure_{}__{}",
+                    source_prefix, name
+                );
+                let global_ref = format!("@{}", global_name);
+                let blk = ctx.block();
+                let addr_i64 = blk.ptrtoint(&global_ref, I64);
+                return Ok(nanbox_pointer_inline(blk, &addr_i64));
             }
             Ok(double_literal(f64::from_bits(crate::nanbox::TAG_TRUE)))
         }

@@ -94,6 +94,16 @@ impl LlModule {
             .push(format!("@{} = internal global {} {}", name, ty, init));
     }
 
+    /// Module-private read-only constant. Goes into `.rodata` instead of
+    /// `.data` and the linker may merge identical copies across compilation
+    /// units. Used by the ExternFuncRef-as-value path to emit static
+    /// `ClosureHeader` records pointing at `__perry_wrap_extern_*` thunks
+    /// — those are pure data and never mutated at runtime.
+    pub fn add_internal_constant(&mut self, name: &str, ty: LlvmType, init: &str) {
+        self.globals
+            .push(format!("@{} = internal constant {} {}", name, ty, init));
+    }
+
     /// Add a string constant with a caller-controlled name. Used by the
     /// `StringPool` so that emission order matches the pool's interned
     /// indices and the bytes globals can be referenced by name from

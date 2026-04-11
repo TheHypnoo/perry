@@ -2,6 +2,63 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.4 (llvm-backend) — `Expr::ExternFuncRef`-as-value via static `ClosureHeader` thunks
+
+The second followup from the v0.5.1 mango compile sweep. Fixes the limitation flagged in the v0.5.1 changelog: "calling an extern fn via a stored value is NOT supported and will misbehave at runtime." After this commit, imported functions are first-class values — you can pass them as callbacks, store them in variables, compare them for reference equality, and call them indirectly through `js_closure_callN`, just like locally-defined functions.
+
+### Why the previous fix wasn't enough
+
+v0.5.1's `Expr::ExternFuncRef`-as-value handler in `crates/perry-codegen/src/expr.rs` returned `TAG_TRUE` so truthiness checks like `if (this._ffi.setCursors)` worked (the original mango motivation — a capability check inside `NativeRenderCoordinator::renderCursors`). But TAG_TRUE is a NaN-tagged boolean, not a `ClosureHeader` pointer, so `arr.forEach(importedFn)` would try to dispatch through `js_closure_call1(callback, element)` where `callback` is the bool's NaN bits — `get_valid_func_ptr` would either return null (TAG_UNDEFINED on the call result) or, worse, dereference garbage trying to read `type_tag` at offset 12 of the bool's representation.
+
+### The fix
+
+Mirror the existing `__perry_wrap_<name>` machinery for local funcs (`crates/perry-codegen/src/codegen.rs:870-904`) for cross-module externs. For every entry in `opts.import_function_prefixes`, `compile_module` now emits two things at the end of code generation, right before `compile_module_entry`:
+
+1. **A thin wrapper function** named `__perry_wrap_extern_<src>__<name>` with the closure-call ABI signature: `define internal double @__perry_wrap_extern_helper_ts__double(i64 %this_closure, double %a0) { entry: %r1 = call double @perry_fn_helper_ts__double(double %a0); ret double %r1 }`. The first parameter (`%this_closure`) is discarded; the rest are forwarded to the cross-module target. Marked `internal` linkage so multiple consumer modules can each emit their own copy without colliding at link time.
+
+2. **A static `ClosureHeader` constant** named `__perry_extern_closure_<src>__<name>` whose layout matches `crates/perry-runtime/src/closure.rs::ClosureHeader`: `{ ptr func_ptr (8 bytes), i32 capture_count (4 bytes), i32 type_tag (4 bytes) }`. The `func_ptr` field points at the wrapper; `capture_count = 0`; `type_tag = CLOSURE_MAGIC = 0x434C4F53 ("CLOS" in ASCII = 1129074515 decimal)`. Goes into `.rodata` via the new `LlModule::add_internal_constant()` helper so the linker can merge identical copies across compilation units.
+
+The `Expr::ExternFuncRef` lowering at `crates/perry-codegen/src/expr.rs` (the case I added in v0.5.1) is updated to take the address of the static global via `ptrtoint @__perry_extern_closure_<src>__<name> to i64` and NaN-box it as POINTER. The runtime's `get_valid_func_ptr` validates the pointer (address range check + read `type_tag` at offset 12, compare against `CLOSURE_MAGIC`), then `transmute`s `func_ptr` to the right `extern "C" fn(*const ClosureHeader, ...) -> f64` signature and dispatches.
+
+For built-ins not in `import_function_prefixes` (`setTimeout`, `clearTimeout`, `Math.*`, `Date.now`, etc.), there's no wrapper to point at. The lowering still falls back to TAG_TRUE for those — capability checks work, indirect calls don't. That's a separate followup.
+
+### Verified end-to-end
+
+Test case at `/tmp/extern_callback_test/main.ts`:
+
+```ts
+import { double, add } from './helper';
+const arr = [1, 2, 3, 4, 5];
+const doubled = arr.map(double);              // exercises arr.map(externFn)
+console.log("doubled: " + doubled.join(","));
+if (double) console.log("double is truthy");  // truthiness
+const f = double, g = double;
+console.log("self-equal: " + (f === g));      // reference equality
+const fn = add;
+console.log("indirect add(3, 4): " + fn(3, 4)); // stored-value call
+```
+
+| Case | Pre-v0.5.4 | Post-v0.5.4 |
+|---|---|---|
+| `arr.map(double)` | `,,,,,` (5 undefined) | `2,4,6,8,10` ✓ |
+| `if (double)` | `truthy` | `truthy` ✓ |
+| `f === g` | `true` | `true` ✓ |
+| `fn(3, 4)` | `undefined` | `7` ✓ |
+
+### Debug story (worth recording)
+
+Spent ~15 minutes chasing a wrong-decimal bug: I'd written `i32 1129268051` in the IR for `CLOSURE_MAGIC`, but the correct decimal for `0x434C_4F53` is **1129074515**, not 1129268051 (digit transposition: 0x434F4353 = 1129268051). The difference: `'C' 'O' 'C' 'S'` vs `'C' 'L' 'O' 'S'` in memory. The runtime's `get_valid_func_ptr` rejected the bogus magic and returned null, so `js_closure_callN` fast-pathed to `TAG_UNDEFINED`, producing the `,,,,` output. Caught by inspecting the `__DATA,__const` section of `main_ts.o` with `otool -s` and noticing `434f4353` instead of the expected `534f4c43`. The lesson: when emitting raw u32 magic constants in IR text, double-check the decimal conversion — there's no compile-time check that the value matches the runtime's expectation.
+
+### Mango status
+
+`mango/src/app.ts` still compiles + links cleanly. The mango entry path uses `if (this._ffi.setCursors)` which only needed truthiness — the v0.5.1 TAG_TRUE fix already covered it. v0.5.4 adds correctness for the call-through-stored-value path, which mango doesn't currently exercise but other consumers (and any future mango code) will benefit from.
+
+### Followups
+
+- **TAG_TRUE fallback for non-imported externs.** `setTimeout`, `Math.floor`, etc. still return TAG_TRUE when used as values. If anyone ever does `const f = setTimeout; f(cb, 100)`, it'll fail. Real fix: emit wrappers for all the runtime-bound builtins too, or route them through a `js_runtime_builtin_dispatch(name_id, args)` runtime helper.
+- **Stable export ordering for the wrapper emission loop.** Currently sorts `import_function_prefixes` by name for deterministic IR output; consider recording arity inline in the import metadata so the wrapper emission doesn't need a separate `imported_func_param_counts` lookup.
+- **Wrapper signature should match the actual extern arity, not be capped at 16.** Currently emits a wrapper that matches the imported function's declared param count exactly. The `js_closure_callN` cap at 16 args (lifted from 5 in v0.5.1) doesn't apply here because the wrapper uses the System V ABI to forward args directly. But there's no check that `imported_func_param_counts.get(name)` returns the right value — if the import metadata is stale, the wrapper will pass garbage to the target. Worth a defensive assertion in the wrapper emission loop.
+
 ## v0.5.3 (llvm-backend) — driver hard-fails on entry-module codegen errors
 
 The first followup from the v0.5.1 mango compile sweep. Fixes the misdiagnosis chain that wasted ~an hour of debugging on mango: codegen errors hidden in cargo build noise, driver silently stubbing them, link step exploding with `Undefined symbols for architecture arm64: "_main"` — and you have to dig backwards through the build log to figure out that the real bugs are 13 module-level codegen failures, one of which is the entry file itself.
