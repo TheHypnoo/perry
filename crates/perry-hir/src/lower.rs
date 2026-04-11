@@ -163,6 +163,15 @@ pub struct LoweringContext {
     /// up this map to resolve the alias to the real (synthetic) class
     /// name, so the New expression points at a real HIR class.
     pub(crate) class_expr_aliases: HashMap<String, String>,
+    /// Mixin functions: `function withName<T>(B: Constructor<T>) { return class extends B { ... } }`.
+    /// Maps mixin name → (param_name, captured class AST). Stub field
+    /// added to satisfy in-tree references; full mixin support is a
+    /// separate workstream.
+    pub(crate) mixin_funcs: HashMap<String, (String, Box<swc_ecma_ast::Class>)>,
+    /// Set to the class name when lowering inside a class constructor body.
+    /// Used to resolve `new.target` to a placeholder object whose `.name`
+    /// returns the class name. None outside any constructor.
+    pub(crate) in_constructor_class: Option<String>,
 }
 
 impl LoweringContext {
@@ -227,6 +236,8 @@ impl LoweringContext {
             proxy_revoke_locals: HashMap::new(),
             proxy_target_classes: HashMap::new(),
             class_expr_aliases: HashMap::new(),
+            in_constructor_class: None,
+            mixin_funcs: HashMap::new(),
         }
     }
 
@@ -715,7 +726,6 @@ pub fn lower_module(ast_module: &ast::Module, name: &str, source_file_path: &str
     lower_module_with_class_id(ast_module, name, source_file_path, 1).map(|(module, _)| module)
 }
 
-/// Walks the entire AST and records `let/const x = new WeakRef(...)` and
 /// `let/const x = new FinalizationRegistry(...)` bindings into the lowering
 /// context. This is used by `obj.method()` lowering to recognise these instances
 /// without requiring type inference (Perry's existing var-decl type inference
@@ -856,6 +866,85 @@ fn pre_scan_weakref_locals(ast_module: &ast::Module, ctx: &mut LoweringContext) 
     }
 }
 
+/// Pre-scan top-level function declarations for the standard TypeScript
+/// mixin pattern:
+///
+///   function Foo<T extends Constructor>(Base: T) {
+///     return class extends Base {
+///       greet(): string { return "..."; }
+///     };
+///   }
+///
+/// Records the function name → (base_param_name, class_ast) so that calls
+/// like `const Mixed = Foo(BaseClass)` can synthesize a real class.
+fn pre_scan_mixin_functions(ast_module: &ast::Module, ctx: &mut LoweringContext) {
+    fn try_record_fn(fn_decl: &ast::FnDecl, ctx: &mut LoweringContext) {
+        if fn_decl.function.params.len() != 1 {
+            return;
+        }
+        let param_name = match &fn_decl.function.params[0].pat {
+            ast::Pat::Ident(ident) => ident.id.sym.to_string(),
+            _ => return,
+        };
+        let body = match &fn_decl.function.body {
+            Some(b) => b,
+            None => return,
+        };
+        if body.stmts.len() != 1 {
+            return;
+        }
+        let return_arg = match &body.stmts[0] {
+            ast::Stmt::Return(r) => match &r.arg {
+                Some(arg) => arg.as_ref(),
+                None => return,
+            },
+            _ => return,
+        };
+        let mut e = return_arg;
+        loop {
+            match e {
+                ast::Expr::Paren(p) => e = &p.expr,
+                _ => break,
+            }
+        }
+        let class_expr = match e {
+            ast::Expr::Class(ce) => ce,
+            _ => return,
+        };
+        let extends_param = match &class_expr.class.super_class {
+            Some(sc) => {
+                if let ast::Expr::Ident(ident) = sc.as_ref() {
+                    ident.sym.as_ref() == param_name
+                } else {
+                    false
+                }
+            }
+            None => false,
+        };
+        if !extends_param {
+            return;
+        }
+        let fn_name = fn_decl.ident.sym.to_string();
+        ctx.mixin_funcs.insert(
+            fn_name,
+            (param_name, Box::new((*class_expr.class).clone())),
+        );
+    }
+    for item in &ast_module.body {
+        match item {
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(fn_decl))) => {
+                try_record_fn(fn_decl, ctx);
+            }
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export)) => {
+                if let ast::Decl::Fn(fn_decl) = &export.decl {
+                    try_record_fn(fn_decl, ctx);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn lower_module_with_class_id(ast_module: &ast::Module, name: &str, source_file_path: &str, start_class_id: ClassId) -> Result<(Module, ClassId)> {
     lower_module_with_class_id_and_types(ast_module, name, source_file_path, start_class_id, None)
 }
@@ -869,6 +958,11 @@ pub fn lower_module_with_class_id_and_types(ast_module: &ast::Module, name: &str
     // method-call lowering (`x.deref()`, `x.register(...)`, `x.unregister(...)`) can
     // route via the dedicated HIR variants without relying on type inference.
     pre_scan_weakref_locals(ast_module, &mut ctx);
+
+    // Pre-scan for mixin functions: a function whose body is exactly
+    // `return class extends <param> { ... };`. Lets `const Mixed = MixinFn(SomeClass)`
+    // synthesize a real concrete class extending `SomeClass`.
+    pre_scan_mixin_functions(ast_module, &mut ctx);
 
     // For .tsx files, pre-register JSX runtime symbols so JSX expressions can be lowered.
     // This injects an automatic import of { jsx, jsxs } from "react/jsx-runtime"
@@ -3277,6 +3371,47 @@ fn lower_stmt(
                                     continue;
                                 }
                             }
+                            // `const Mixed = MixinFn(BaseClass)` — detect a call
+                            // to a known mixin function and synthesize a real
+                            // class extending the supplied base. The mixin's
+                            // class AST is taken from the pre-scan map and
+                            // copied verbatim with the `extends` clause rewritten
+                            // to point at the concrete base class.
+                            if let ast::Expr::Call(call) = inner_expr {
+                                if let ast::Callee::Expr(callee_expr) = &call.callee {
+                                    if let ast::Expr::Ident(fn_ident) = callee_expr.as_ref() {
+                                        let fn_name = fn_ident.sym.to_string();
+                                        if let Some((_param_name, mixin_class_box)) = ctx.mixin_funcs.get(&fn_name).cloned() {
+                                            if call.args.len() == 1 {
+                                                if let ast::Expr::Ident(base_ident) = call.args[0].expr.as_ref() {
+                                                    let base_class_name = base_ident.sym.to_string();
+                                                    if ctx.lookup_class(&base_class_name).is_some() {
+                                                        let bind_name = ident.id.sym.to_string();
+                                                        if ctx.lookup_class(&bind_name).is_none() {
+                                                            let mut new_class = (*mixin_class_box).clone();
+                                                            let base_id = ast::Ident::new(
+                                                                base_class_name.clone().into(),
+                                                                base_ident.span,
+                                                                base_ident.ctxt,
+                                                            );
+                                                            new_class.super_class = Some(Box::new(ast::Expr::Ident(base_id)));
+                                                            let lowered_class = crate::lower_decl::lower_class_from_ast(
+                                                                ctx,
+                                                                &new_class,
+                                                                &bind_name,
+                                                                false,
+                                                            )?;
+                                                            module.classes.push(lowered_class);
+                                                            ctx.class_expr_aliases.insert(bind_name.clone(), bind_name.clone());
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         let stmts = lower_var_decl_with_destructuring(ctx, decl, mutable)?;
                         // `var` is function-scoped: mark defined locals so
@@ -4310,7 +4445,8 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 ast::BinaryOp::EqEq => {
                     // Proxy/Reflect fold: `Reflect.getPrototypeOf(x) === <Class>.prototype`
                     // always true in our model (we don't maintain real prototypes).
-                    if matches!(&*left, Expr::ReflectGetPrototypeOf(_)) {
+                    // Same fold for `Object.getPrototypeOf(x) === <Class>.prototype`.
+                    if matches!(&*left, Expr::ReflectGetPrototypeOf(_) | Expr::ObjectGetPrototypeOf(_)) {
                         if matches!(&*right, Expr::PropertyGet { property, .. } if property == "prototype") {
                             return Ok(Expr::Bool(true));
                         }
@@ -4318,7 +4454,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     Ok(Expr::Compare { op: CompareOp::LooseEq, left, right })
                 }
                 ast::BinaryOp::EqEqEq => {
-                    if matches!(&*left, Expr::ReflectGetPrototypeOf(_)) {
+                    if matches!(&*left, Expr::ReflectGetPrototypeOf(_) | Expr::ObjectGetPrototypeOf(_)) {
                         if matches!(&*right, Expr::PropertyGet { property, .. } if property == "prototype") {
                             return Ok(Expr::Bool(true));
                         }

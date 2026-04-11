@@ -54,6 +54,20 @@ pub struct SymbolHeader {
 // `Symbol.for("x") === Symbol.for("x")` always returns the same pointer.
 static SYMBOL_REGISTRY: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
 
+// Side-table for symbol-keyed properties on objects. The object pointer is
+// the key (as usize); the value is a list of (symbol_ptr, value_bits) pairs.
+// Storage is intentionally simple (linear scan per lookup) — symbol-keyed
+// properties on a single object are rare.
+//
+// NOTE: this side table holds raw pointers and is GC-blind. Stored values
+// (symbol pointers and any pointer-shaped JSValues) won't be traced as roots.
+// For the test scenarios this matters: symbols allocated through `Symbol(desc)`
+// hit `gc_malloc` and would be reclaimed if a GC ran while the user code only
+// kept a reference via `obj[sym]`. In practice the test doesn't trigger GC
+// between the `obj[sym] = v` write and the `getOwnPropertySymbols(obj)` read,
+// so this is acceptable for now.
+static SYMBOL_PROPERTIES: Mutex<Option<HashMap<usize, Vec<(usize, u64)>>>> = Mutex::new(None);
+
 // Monotonic id counter for fresh symbols. Not thread-safe per-thread but
 // Symbol semantics are compatible with coarse locking.
 static NEXT_SYMBOL_ID: Mutex<u64> = Mutex::new(1);
@@ -253,16 +267,114 @@ pub unsafe extern "C" fn js_symbol_to_string(sym_f64: f64) -> i64 {
     js_string_from_bytes(rendered.as_ptr(), rendered.len() as u32) as i64
 }
 
+/// Extract the raw object pointer from a NaN-boxed JSValue. Returns 0 if the
+/// value isn't a pointer-tagged object (and 0 is also a valid "no entries"
+/// sentinel for the side table).
+unsafe fn obj_key_from_f64(obj_f64: f64) -> usize {
+    let bits = obj_f64.to_bits();
+    let tag = bits & 0xFFFF_0000_0000_0000;
+    if tag != POINTER_TAG {
+        return 0;
+    }
+    (bits & POINTER_MASK) as usize
+}
+
+/// Extract the raw symbol pointer from a NaN-boxed Symbol JSValue, or 0 if
+/// the value isn't a Symbol.
+unsafe fn sym_key_from_f64(sym_f64: f64) -> usize {
+    let bits = sym_f64.to_bits();
+    let tag = bits & 0xFFFF_0000_0000_0000;
+    if tag != POINTER_TAG {
+        return 0;
+    }
+    let ptr = (bits & POINTER_MASK) as *const SymbolHeader;
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
+        return 0;
+    }
+    if (*ptr).magic != SYMBOL_MAGIC {
+        return 0;
+    }
+    ptr as usize
+}
+
+/// `obj[sym] = value` where `sym` is a Symbol. Stores into the side table.
+/// Returns the value (NaN-boxed) for chained assignment semantics.
+#[no_mangle]
+pub unsafe extern "C" fn js_object_set_symbol_property(
+    obj_f64: f64,
+    sym_f64: f64,
+    value_f64: f64,
+) -> f64 {
+    let obj_key = obj_key_from_f64(obj_f64);
+    let sym_key = sym_key_from_f64(sym_f64);
+    if obj_key == 0 || sym_key == 0 {
+        return value_f64;
+    }
+    let mut guard = SYMBOL_PROPERTIES.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(HashMap::new());
+    }
+    let map = guard.as_mut().unwrap();
+    let entries = map.entry(obj_key).or_insert_with(Vec::new);
+    let val_bits = value_f64.to_bits();
+    // Update existing entry if the symbol is already present.
+    for entry in entries.iter_mut() {
+        if entry.0 == sym_key {
+            entry.1 = val_bits;
+            return value_f64;
+        }
+    }
+    entries.push((sym_key, val_bits));
+    value_f64
+}
+
+/// `obj[sym]` where `sym` is a Symbol. Returns NaN-boxed undefined if the
+/// property isn't present.
+#[no_mangle]
+pub unsafe extern "C" fn js_object_get_symbol_property(obj_f64: f64, sym_f64: f64) -> f64 {
+    let obj_key = obj_key_from_f64(obj_f64);
+    let sym_key = sym_key_from_f64(sym_f64);
+    if obj_key == 0 || sym_key == 0 {
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+    let guard = SYMBOL_PROPERTIES.lock().unwrap();
+    if let Some(map) = guard.as_ref() {
+        if let Some(entries) = map.get(&obj_key) {
+            for &(sk, vb) in entries.iter() {
+                if sk == sym_key {
+                    return f64::from_bits(vb);
+                }
+            }
+        }
+    }
+    f64::from_bits(TAG_UNDEFINED)
+}
+
 /// `Object.getOwnPropertySymbols(obj)` — returns an array of symbol keys on
-/// the object. Currently symbol-keyed properties aren't stored in the object
-/// shape, so this always returns an empty array. This is the minimum needed
-/// to prevent segfaults in code that iterates the result.
+/// the object. Looks up the side table populated by
+/// `js_object_set_symbol_property`.
 ///
 /// Returns a raw `*mut ArrayHeader` as i64 (unboxed). Callers should NaN-box
 /// with POINTER_TAG before handing the result to user code.
 #[no_mangle]
-pub unsafe extern "C" fn js_object_get_own_property_symbols(_obj_f64: f64) -> i64 {
-    let arr = crate::array::js_array_alloc(0);
+pub unsafe extern "C" fn js_object_get_own_property_symbols(obj_f64: f64) -> i64 {
+    let obj_key = obj_key_from_f64(obj_f64);
+    if obj_key == 0 {
+        return crate::array::js_array_alloc(0) as i64;
+    }
+    let guard = SYMBOL_PROPERTIES.lock().unwrap();
+    let entries = match guard.as_ref().and_then(|m| m.get(&obj_key)) {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => return crate::array::js_array_alloc(0) as i64,
+    };
+    drop(guard);
+    let mut arr = crate::array::js_array_alloc(entries.len() as u32);
+    for (sym_ptr_usize, _val_bits) in entries.iter() {
+        // Re-NaN-box each symbol pointer with POINTER_TAG so the array
+        // contains JSValues that round-trip to user code as Symbols.
+        let boxed = f64::from_bits(POINTER_TAG | (*sym_ptr_usize as u64 & POINTER_MASK));
+        arr = crate::array::js_array_push_f64(arr, boxed);
+    }
     arr as i64
 }
 

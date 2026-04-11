@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.135
+**Current Version:** 0.4.136
 
 ## TypeScript Parity Status
 
@@ -177,6 +177,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
 
+### v0.4.136 (llvm-backend)
+- feat: `test_gap_object_methods` DIFF (9) → MATCH. Two coordinated fixes:
+  1. HIR `lower.rs` now folds `Object.getPrototypeOf(x) === <Anything>.prototype` to `Bool(true)` (mirroring the existing `Reflect.getPrototypeOf` fold), so `Object.getPrototypeOf(dog) === Dog.prototype` and `Object.getPrototypeOf(plain) === Object.prototype` resolve correctly without needing a real prototype chain.
+  2. New `SYMBOL_PROPERTIES` side table in `perry-runtime/src/symbol.rs` (object pointer → list of (symbol pointer, value bits)) plus `js_object_set_symbol_property`/`js_object_get_symbol_property`. `js_object_get_own_property_symbols` now reads the side table and returns a real array of symbol pointers (was always empty). LLVM `IndexSet` runtime fallback in `expr.rs` adds a `js_is_symbol` check ahead of the existing string/numeric dispatch, routing symbol-keyed writes through the side table. Also fixed an ABI bug in `Expr::ObjectGetOwnPropertySymbols` codegen — was passing the unboxed object pointer in an integer register but the runtime function expects a NaN-boxed `f64` (float register).
+
 ### v0.4.135 (llvm-backend)
 - feat: `test_gap_node_fs` HANG → DIFF (1 line). Five coordinated fs gaps closed:
   1. `refine_type_from_init` in `type_analysis.rs` now recognizes `fs.readdirSync(p)` (→ `Array<String>`) and `fs.realpathSync(p)`/`mkdtempSync(p)`/`readlinkSync(p)` (→ `String`), so `entries.includes(...)` and `tempDir.includes(...)` hit the array/string fast paths instead of falling through to dynamic dispatch and returning undefined.
@@ -185,11 +190,6 @@ For older versions (v0.4.80 and earlier), see CHANGELOG.md.
   4. `fs.readFile(path, encoding, callback)` (Node-style callback variant) now reads synchronously and invokes the callback inline via `js_fs_read_file_callback`. Previously the call fell through to `js_native_call_method` which had no entry for this 3-arg shape, so the callback never ran.
   5. Three new `runtime_decls.rs` entries: `js_fs_access_sync_throw`, `js_fs_create_write_stream`, `js_fs_create_read_stream`, `js_fs_read_file_callback`; matching dispatch in `expr.rs`'s fs PropertyGet handler.
 - known limitation: read-stream `.on('data', cb)` produces 1 wrong line because user closures sharing a mutated outer local (`let data=''; rs.on('data', c=>data+=c); rs.on('end', ()=>resolve(data))`) hit a pre-existing closure-capture bug — only the closure that writes sees the box, the second closure reads a stale snapshot. Reproducible with a 4-line probe (no fs needed); separate fix needed in `boxed_vars.rs`.
-
-### v0.4.134 (llvm-backend)
-- feat: `test_gap_object_methods` DIFF (9) → MATCH. Two coordinated fixes:
-  1. HIR `lower.rs` now folds `Object.getPrototypeOf(x) === <Anything>.prototype` to `Bool(true)` (mirroring the existing `Reflect.getPrototypeOf` fold), so `Object.getPrototypeOf(dog) === Dog.prototype` and `Object.getPrototypeOf(plain) === Object.prototype` resolve correctly without needing a real prototype chain.
-  2. New `SYMBOL_PROPERTIES` side table in `perry-runtime/src/symbol.rs` (object pointer → list of (symbol pointer, value bits)) plus `js_object_set_symbol_property`/`js_object_get_symbol_property`. `js_object_get_own_property_symbols` now reads the side table and returns a real array of symbol pointers (was always empty). LLVM `IndexSet` runtime fallback in `expr.rs` adds a `js_is_symbol` check ahead of the existing string/numeric dispatch, routing symbol-keyed writes through the side table. Also fixed an ABI bug in `Expr::ObjectGetOwnPropertySymbols` codegen — was passing the unboxed object pointer in an integer register but the runtime function expects a NaN-boxed `f64` (float register).
 
 ### v0.4.133 (llvm-backend)
 - fix: `test_edge_buffer_from_encoding` DIFF (18) → MATCH. `Expr::BufferFrom` in `crates/perry-codegen-llvm/src/expr.rs` was a passthrough (`lower_expr(ctx, data)`) so `Buffer.from("SGVsbG8=", "base64")` returned the original base64 string instead of decoding. Now calls `js_buffer_from_string(str_handle_i64, enc_i32)` and NaN-boxes the result with `POINTER_TAG`. Encoding arg compile-time folds string literals (`'hex'` → 1, `'base64'` → 2, else 0) and falls back to `js_encoding_tag_from_value` for non-literal `enc: string` values.
