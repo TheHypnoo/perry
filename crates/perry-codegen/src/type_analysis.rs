@@ -417,6 +417,47 @@ pub(crate) fn is_numeric_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     }
 }
 
+/// Statically determine whether an expression is provably an integer-valued
+/// number — i.e., its result has no fractional part. Stricter than
+/// `is_numeric_expr`, which accepts any numeric f64.
+///
+/// Used by `BinaryOp::Mod` lowering to decide whether to emit integer
+/// modulo (`fptosi → srem → sitofp`) instead of `frem double`. A wrong
+/// `true` here would truncate fraction bits from the operand and produce
+/// an incorrect result — so we only return true when the HIR structure
+/// proves the value is a whole number.
+///
+/// Recognizes:
+/// - `Expr::Integer(_)` — integer literal
+/// - `Expr::LocalGet(id)` for locals pre-analyzed as integer-valued by
+///   `collectors::collect_integer_locals` (for-loop counters etc.)
+/// - `Expr::Update { .. }` — `i++`/`i--`, whose value is always integer
+///   if the underlying local is integer-valued
+/// - `Expr::Binary { Add/Sub/Mul/Mod }` recursively when both operands are
+///   integer-valued (closed under integer arithmetic; Div is excluded
+///   because `1 / 2` is 0.5 in JS, not 0)
+/// - bitwise ops: always integer by JS ToInt32 semantics
+pub(crate) fn is_integer_valued_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
+    match e {
+        Expr::Integer(_) => true,
+        Expr::LocalGet(id) => ctx.integer_locals.contains(id),
+        Expr::Update { id, .. } => ctx.integer_locals.contains(id),
+        Expr::Binary { op, left, right } => match op {
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Mod => {
+                is_integer_valued_expr(ctx, left) && is_integer_valued_expr(ctx, right)
+            }
+            BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::UShr => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// Statically determine whether an expression is a string. Conservative —
 /// returns `false` for anything that requires type information we don't
 /// track (function-call returns, dynamic property access).

@@ -176,7 +176,9 @@ fn collect_closures_in_expr(
         // The catch-all `_ => {}` would silently miss them, leading
         // to "use of undefined value @perry_closure_*" link errors.
         Expr::ArrayMap { array, callback }
-        | Expr::ArrayFilter { array, callback } => {
+        | Expr::ArrayFilter { array, callback }
+        | Expr::ArraySome { array, callback }
+        | Expr::ArrayEvery { array, callback } => {
             walk(array, seen, out);
             walk(callback, seen, out);
         }
@@ -447,135 +449,65 @@ fn collect_closures_in_expr(
         // atob/btoa: the argument is just a string expression, but it could
         // still contain a nested closure (e.g. inside a ternary), so walk it.
         Expr::Atob(o) | Expr::Btoa(o) | Expr::StructuredClone(o) => walk(o, seen, out),
+        // `new <expr>(args…)` — both the callee expression and any arg
+        // can hide a closure (e.g. `new SomeBuilder(x => ...)`).
+        Expr::NewDynamic { callee, args } => {
+            walk(callee, seen, out);
+            for a in args {
+                walk(a, seen, out);
+            }
+        }
+        // fetch(url, { method, body, headers }) — headers values can be
+        // computed expressions containing closures (rare but legal).
+        Expr::FetchWithOptions { url, method, body, headers } => {
+            walk(url, seen, out);
+            walk(method, seen, out);
+            walk(body, seen, out);
+            for (_, v) in headers {
+                walk(v, seen, out);
+            }
+        }
+        Expr::FetchGetWithAuth { url, auth_header } => {
+            walk(url, seen, out);
+            walk(auth_header, seen, out);
+        }
+        Expr::FetchPostWithAuth { url, auth_header, body } => {
+            walk(url, seen, out);
+            walk(auth_header, seen, out);
+            walk(body, seen, out);
+        }
+        // I18n strings carry interpolation params that are arbitrary
+        // expressions (so a closure could appear inside `${formatter()}`).
+        Expr::I18nString { params, .. } => {
+            for (_, v) in params {
+                walk(v, seen, out);
+            }
+        }
+        // Yield expressions wrap an inner value that may itself be a closure.
+        Expr::Yield { value, .. } => {
+            if let Some(v) = value { walk(v, seen, out); }
+        }
+        // Reflect.* and other iterator/json wrappers — can carry callbacks.
+        Expr::IteratorToArray(o) | Expr::ArrayIsArray(o) => walk(o, seen, out),
+        Expr::JsonStringify(o) | Expr::JsonParse(o) => walk(o, seen, out),
+        Expr::JsonStringifyPretty { value, replacer, space } => {
+            walk(value, seen, out);
+            if let Some(r) = replacer { walk(r, seen, out); }
+            walk(space, seen, out);
+        }
         _ => {}
     }
 }
 
-/// Walk a sequence of statements and collect every Call to an
-/// `Expr::ExternFuncRef`. Used by `compile_module` to pre-declare
-/// every imported function as an LLVM extern at the top of the IR.
-///
-/// The output is `(function_name, param_count)`. Param count comes from
-/// the call's args.len() — using args.len() rather than the
-/// `ExternFuncRef.param_types` is more permissive (the import metadata
-/// can carry an outdated count after Perry's lowering).
-pub(crate) fn collect_extern_func_refs_in_stmts(
-    stmts: &[perry_hir::Stmt],
-    seen: &mut HashSet<String>,
-    out: &mut Vec<(String, usize)>,
-) {
-    for s in stmts {
-        match s {
-            perry_hir::Stmt::Expr(e) | perry_hir::Stmt::Throw(e) => {
-                collect_extern_func_refs_in_expr(e, seen, out);
-            }
-            perry_hir::Stmt::Return(opt) => {
-                if let Some(e) = opt {
-                    collect_extern_func_refs_in_expr(e, seen, out);
-                }
-            }
-            perry_hir::Stmt::Let { init, .. } => {
-                if let Some(e) = init {
-                    collect_extern_func_refs_in_expr(e, seen, out);
-                }
-            }
-            perry_hir::Stmt::If { condition, then_branch, else_branch } => {
-                collect_extern_func_refs_in_expr(condition, seen, out);
-                collect_extern_func_refs_in_stmts(then_branch, seen, out);
-                if let Some(eb) = else_branch {
-                    collect_extern_func_refs_in_stmts(eb, seen, out);
-                }
-            }
-            perry_hir::Stmt::While { condition, body } => {
-                collect_extern_func_refs_in_expr(condition, seen, out);
-                collect_extern_func_refs_in_stmts(body, seen, out);
-            }
-            perry_hir::Stmt::DoWhile { body, condition } => {
-                collect_extern_func_refs_in_stmts(body, seen, out);
-                collect_extern_func_refs_in_expr(condition, seen, out);
-            }
-            perry_hir::Stmt::For { init, condition, update, body } => {
-                if let Some(init_stmt) = init {
-                    collect_extern_func_refs_in_stmts(std::slice::from_ref(init_stmt), seen, out);
-                }
-                if let Some(cond) = condition {
-                    collect_extern_func_refs_in_expr(cond, seen, out);
-                }
-                if let Some(upd) = update {
-                    collect_extern_func_refs_in_expr(upd, seen, out);
-                }
-                collect_extern_func_refs_in_stmts(body, seen, out);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn collect_extern_func_refs_in_expr(
-    e: &perry_hir::Expr,
-    seen: &mut HashSet<String>,
-    out: &mut Vec<(String, usize)>,
-) {
-    use perry_hir::Expr;
-    match e {
-        Expr::Call { callee, args, .. } => {
-            if let Expr::ExternFuncRef { name, .. } = callee.as_ref() {
-                if seen.insert(name.clone()) {
-                    out.push((name.clone(), args.len()));
-                }
-            }
-            collect_extern_func_refs_in_expr(callee, seen, out);
-            for a in args {
-                collect_extern_func_refs_in_expr(a, seen, out);
-            }
-        }
-        Expr::Binary { left, right, .. }
-        | Expr::Compare { left, right, .. }
-        | Expr::Logical { left, right, .. } => {
-            collect_extern_func_refs_in_expr(left, seen, out);
-            collect_extern_func_refs_in_expr(right, seen, out);
-        }
-        Expr::Unary { operand, .. } | Expr::Void(operand) | Expr::TypeOf(operand) => {
-            collect_extern_func_refs_in_expr(operand, seen, out);
-        }
-        Expr::Conditional { condition, then_expr, else_expr } => {
-            collect_extern_func_refs_in_expr(condition, seen, out);
-            collect_extern_func_refs_in_expr(then_expr, seen, out);
-            collect_extern_func_refs_in_expr(else_expr, seen, out);
-        }
-        Expr::PropertyGet { object, .. } => collect_extern_func_refs_in_expr(object, seen, out),
-        Expr::PropertySet { object, value, .. } => {
-            collect_extern_func_refs_in_expr(object, seen, out);
-            collect_extern_func_refs_in_expr(value, seen, out);
-        }
-        Expr::IndexGet { object, index } => {
-            collect_extern_func_refs_in_expr(object, seen, out);
-            collect_extern_func_refs_in_expr(index, seen, out);
-        }
-        Expr::IndexSet { object, index, value } => {
-            collect_extern_func_refs_in_expr(object, seen, out);
-            collect_extern_func_refs_in_expr(index, seen, out);
-            collect_extern_func_refs_in_expr(value, seen, out);
-        }
-        Expr::Array(elements) => {
-            for el in elements {
-                collect_extern_func_refs_in_expr(el, seen, out);
-            }
-        }
-        Expr::Object(props) => {
-            for (_, v) in props {
-                collect_extern_func_refs_in_expr(v, seen, out);
-            }
-        }
-        Expr::New { args, .. } => {
-            for a in args {
-                collect_extern_func_refs_in_expr(a, seen, out);
-            }
-        }
-        Expr::LocalSet(_, value) => collect_extern_func_refs_in_expr(value, seen, out),
-        _ => {}
-    }
-}
+// NOTE: `collect_extern_func_refs_in_*` previously lived here as a
+// pre-walker that scanned the HIR for cross-module Call sites and
+// added a `declare` for each one to the LLVM module. It missed any
+// Expr::ExternFuncRef hidden inside an Expr variant the walker didn't
+// recurse into (Closure body, ArrayMap callback, Stmt::Try, etc.),
+// which produced clang "use of undefined value @perry_fn_*" errors.
+// Replaced by lazy declares emitted from `lower_call.rs` directly via
+// `FnCtx.pending_declares`, drained back into the module after each
+// compile_function/method/closure/static call returns.
 
 /// Walk a sequence of statements and collect all LocalIds defined by
 /// `Stmt::Let` (function-local declarations). Used by the module-globals
@@ -1021,3 +953,498 @@ fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
         _ => {}
     }
 }
+
+// ---------------------------------------------------------------------------
+// Integer-valued local detection
+// ---------------------------------------------------------------------------
+
+/// Collect LocalIds that are provably integer-valued for the lifetime of the
+/// function. Used by `BinaryOp::Mod` lowering to emit integer modulo
+/// (`fptosi → srem → sitofp`) instead of `frem double`, which lowers to a
+/// libm `fmod()` call on ARM (no hardware instruction) and costs ~15ns per
+/// iteration.
+///
+/// A local qualifies iff:
+///   1. It's declared with `Let { init: Some(Expr::Integer(_)) }` — i.e. it
+///      starts as a whole number, not a fraction.
+///   2. It has NO `Expr::LocalSet(id, _)` anywhere in the function body.
+///      The only permitted mutation is `Expr::Update { id, .. }` (++/--),
+///      which by definition preserves the integer invariant.
+///
+/// Rule 2 is strict: any `LocalSet` (even one storing an integer literal)
+/// excludes the local, because proving the rhs is also integer-valued would
+/// require a recursive analysis we don't have. Rule 2 naturally covers the
+/// common case — for-loop counters — without any type inference machinery.
+///
+/// Closure captures are handled correctly: writes from inside a closure body
+/// go through `LocalSet` in the HIR, so rule 2 excludes any local that's
+/// captured mutably. Read-only captures are fine and remain qualified.
+pub(crate) fn collect_integer_locals(stmts: &[perry_hir::Stmt]) -> HashSet<u32> {
+    let mut candidates: HashSet<u32> = HashSet::new();
+    collect_integer_let_ids(stmts, &mut candidates);
+    let mut ever_localset: HashSet<u32> = HashSet::new();
+    collect_localset_ids_in_stmts(stmts, &mut ever_localset);
+    candidates.retain(|id| !ever_localset.contains(id));
+    candidates
+}
+
+fn collect_integer_let_ids(stmts: &[perry_hir::Stmt], out: &mut HashSet<u32>) {
+    use perry_hir::{Expr, Stmt};
+    for s in stmts {
+        match s {
+            Stmt::Let { id, init: Some(Expr::Integer(_)), .. } => {
+                out.insert(*id);
+            }
+            Stmt::If { then_branch, else_branch, .. } => {
+                collect_integer_let_ids(then_branch, out);
+                if let Some(eb) = else_branch {
+                    collect_integer_let_ids(eb, out);
+                }
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(init_stmt) = init {
+                    collect_integer_let_ids(std::slice::from_ref(init_stmt), out);
+                }
+                collect_integer_let_ids(body, out);
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                collect_integer_let_ids(body, out);
+            }
+            Stmt::Try { body, catch, finally } => {
+                collect_integer_let_ids(body, out);
+                if let Some(c) = catch {
+                    collect_integer_let_ids(&c.body, out);
+                }
+                if let Some(f) = finally {
+                    collect_integer_let_ids(f, out);
+                }
+            }
+            Stmt::Switch { cases, .. } => {
+                for c in cases {
+                    collect_integer_let_ids(&c.body, out);
+                }
+            }
+            Stmt::Labeled { body, .. } => {
+                collect_integer_let_ids(std::slice::from_ref(body.as_ref()), out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Exhaustive walker mirroring `collect_ref_ids_in_expr` but only recording
+/// targets of `LocalSet`. Update (++/--) and LocalGet are intentionally NOT
+/// recorded — they preserve integer-ness. Keep this in sync with
+/// `collect_ref_ids_in_expr`: any new HIR Expr variant must recurse into its
+/// sub-expressions here, or the walker may miss a LocalSet hidden inside it
+/// and wrongly mark its target as integer-valued.
+fn collect_localset_ids_in_stmts(stmts: &[perry_hir::Stmt], out: &mut HashSet<u32>) {
+    use perry_hir::Stmt;
+    for s in stmts {
+        match s {
+            Stmt::Expr(e) | Stmt::Throw(e) => collect_localset_ids_in_expr(e, out),
+            Stmt::Return(opt) => {
+                if let Some(e) = opt {
+                    collect_localset_ids_in_expr(e, out);
+                }
+            }
+            Stmt::Let { init, .. } => {
+                if let Some(e) = init {
+                    collect_localset_ids_in_expr(e, out);
+                }
+            }
+            Stmt::If { condition, then_branch, else_branch } => {
+                collect_localset_ids_in_expr(condition, out);
+                collect_localset_ids_in_stmts(then_branch, out);
+                if let Some(eb) = else_branch {
+                    collect_localset_ids_in_stmts(eb, out);
+                }
+            }
+            Stmt::While { condition, body } => {
+                collect_localset_ids_in_expr(condition, out);
+                collect_localset_ids_in_stmts(body, out);
+            }
+            Stmt::DoWhile { body, condition } => {
+                collect_localset_ids_in_stmts(body, out);
+                collect_localset_ids_in_expr(condition, out);
+            }
+            Stmt::For { init, condition, update, body } => {
+                if let Some(init_stmt) = init {
+                    collect_localset_ids_in_stmts(std::slice::from_ref(init_stmt), out);
+                }
+                if let Some(cond) = condition {
+                    collect_localset_ids_in_expr(cond, out);
+                }
+                if let Some(upd) = update {
+                    collect_localset_ids_in_expr(upd, out);
+                }
+                collect_localset_ids_in_stmts(body, out);
+            }
+            Stmt::Try { body, catch, finally } => {
+                collect_localset_ids_in_stmts(body, out);
+                if let Some(c) = catch {
+                    collect_localset_ids_in_stmts(&c.body, out);
+                }
+                if let Some(f) = finally {
+                    collect_localset_ids_in_stmts(f, out);
+                }
+            }
+            Stmt::Switch { discriminant, cases } => {
+                collect_localset_ids_in_expr(discriminant, out);
+                for c in cases {
+                    if let Some(t) = &c.test {
+                        collect_localset_ids_in_expr(t, out);
+                    }
+                    collect_localset_ids_in_stmts(&c.body, out);
+                }
+            }
+            Stmt::Labeled { body, .. } => {
+                collect_localset_ids_in_stmts(std::slice::from_ref(body.as_ref()), out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_localset_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
+    use perry_hir::{ArrayElement, CallArg, Expr};
+    let mut walk = |sub: &Expr, out: &mut HashSet<u32>| {
+        collect_localset_ids_in_expr(sub, out);
+    };
+    match e {
+        Expr::LocalSet(id, value) => {
+            out.insert(*id);
+            walk(value, out);
+        }
+        // Intentionally NOT recorded — these preserve integer-ness.
+        Expr::LocalGet(_) | Expr::Update { .. } => {}
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            walk(left, out);
+            walk(right, out);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::Void(operand)
+        | Expr::TypeOf(operand)
+        | Expr::Await(operand)
+        | Expr::Delete(operand)
+        | Expr::StringCoerce(operand)
+        | Expr::BooleanCoerce(operand)
+        | Expr::NumberCoerce(operand)
+        | Expr::IsFinite(operand)
+        | Expr::IsNaN(operand)
+        | Expr::NumberIsNaN(operand)
+        | Expr::NumberIsFinite(operand)
+        | Expr::NumberIsInteger(operand)
+        | Expr::IsUndefinedOrBareNan(operand)
+        | Expr::ParseFloat(operand)
+        | Expr::ObjectKeys(operand)
+        | Expr::ObjectValues(operand)
+        | Expr::ObjectEntries(operand)
+        | Expr::ObjectFromEntries(operand)
+        | Expr::ObjectIsFrozen(operand)
+        | Expr::ObjectIsSealed(operand)
+        | Expr::ObjectIsExtensible(operand)
+        | Expr::ObjectCreate(operand)
+        | Expr::SetSize(operand)
+        | Expr::SetClear(operand)
+        | Expr::ArrayFrom(operand)
+        | Expr::Uint8ArrayFrom(operand)
+        | Expr::IteratorToArray(operand)
+        | Expr::WeakRefNew(operand)
+        | Expr::WeakRefDeref(operand)
+        | Expr::StructuredClone(operand)
+        | Expr::QueueMicrotask(operand)
+        | Expr::ProcessNextTick(operand)
+        | Expr::FsExistsSync(operand)
+        | Expr::FsReadFileSync(operand)
+        | Expr::FsReadFileBinary(operand)
+        | Expr::FsUnlinkSync(operand)
+        | Expr::FsMkdirSync(operand)
+        | Expr::PathDirname(operand)
+        | Expr::PathBasename(operand)
+        | Expr::PathExtname(operand)
+        | Expr::PathResolve(operand)
+        | Expr::PathNormalize(operand)
+        | Expr::PathFormat(operand)
+        | Expr::PathParse(operand)
+        | Expr::DateToISOString(operand)
+        | Expr::DateParse(operand)
+        | Expr::EnvGetDynamic(operand)
+        | Expr::ErrorNew(Some(operand))
+        | Expr::FinalizationRegistryNew(operand)
+        | Expr::Uint8ArrayNew(Some(operand))
+        | Expr::Uint8ArrayLength(operand)
+        | Expr::JsonParse(operand)
+        | Expr::MathSqrt(operand)
+        | Expr::MathFloor(operand)
+        | Expr::MathCeil(operand)
+        | Expr::MathRound(operand)
+        | Expr::MathAbs(operand)
+        | Expr::MathLog(operand)
+        | Expr::MathLog2(operand)
+        | Expr::MathLog10(operand)
+        | Expr::MathLog1p(operand)
+        | Expr::MathClz32(operand)
+        | Expr::MathMinSpread(operand)
+        | Expr::MathMaxSpread(operand) => {
+            walk(operand, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            walk(callee, out);
+            for a in args {
+                walk(a, out);
+            }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            walk(callee, out);
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => walk(e, out),
+                }
+            }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(o) = object {
+                walk(o, out);
+            }
+            for a in args {
+                walk(a, out);
+            }
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            walk(condition, out);
+            walk(then_expr, out);
+            walk(else_expr, out);
+        }
+        Expr::PropertyGet { object, .. } => walk(object, out),
+        Expr::PropertySet { object, value, .. } => {
+            walk(object, out);
+            walk(value, out);
+        }
+        Expr::PropertyUpdate { object, .. } => walk(object, out),
+        Expr::IndexGet { object, index } => {
+            walk(object, out);
+            walk(index, out);
+        }
+        Expr::IndexSet { object, index, value } => {
+            walk(object, out);
+            walk(index, out);
+            walk(value, out);
+        }
+        Expr::ArrayPush { value, .. } => walk(value, out),
+        Expr::ArraySplice { start, delete_count, items, .. } => {
+            walk(start, out);
+            if let Some(d) = delete_count {
+                walk(d, out);
+            }
+            for it in items {
+                walk(it, out);
+            }
+        }
+        Expr::Array(elements) => {
+            for el in elements {
+                walk(el, out);
+            }
+        }
+        Expr::ArraySpread(elements) => {
+            for el in elements {
+                match el {
+                    ArrayElement::Expr(e) | ArrayElement::Spread(e) => walk(e, out),
+                }
+            }
+        }
+        Expr::ArrayMap { array, callback }
+        | Expr::ArrayFilter { array, callback }
+        | Expr::ArraySort { array, comparator: callback }
+        | Expr::ArrayFind { array, callback }
+        | Expr::ArrayFindIndex { array, callback }
+        | Expr::ArrayFindLast { array, callback }
+        | Expr::ArrayFindLastIndex { array, callback }
+        | Expr::ArrayForEach { array, callback }
+        | Expr::ArrayFlatMap { array, callback } => {
+            walk(array, out);
+            walk(callback, out);
+        }
+        Expr::ArrayReduce { array, callback, initial }
+        | Expr::ArrayReduceRight { array, callback, initial } => {
+            walk(array, out);
+            walk(callback, out);
+            if let Some(init) = initial {
+                walk(init, out);
+            }
+        }
+        Expr::ArrayJoin { array, separator } => {
+            walk(array, out);
+            if let Some(sep) = separator {
+                walk(sep, out);
+            }
+        }
+        Expr::ArraySlice { array, start, end } => {
+            walk(array, out);
+            walk(start, out);
+            if let Some(e) = end {
+                walk(e, out);
+            }
+        }
+        Expr::ArrayIncludes { array, value } => {
+            walk(array, out);
+            walk(value, out);
+        }
+        Expr::Object(props) => {
+            for (_, v) in props {
+                walk(v, out);
+            }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, e) in parts {
+                walk(e, out);
+            }
+        }
+        Expr::ObjectRest { object, .. } => walk(object, out),
+        Expr::ObjectIs(a, b) | Expr::ObjectHasOwn(a, b) => {
+            walk(a, out);
+            walk(b, out);
+        }
+        Expr::New { args, .. } => {
+            for a in args {
+                walk(a, out);
+            }
+        }
+        Expr::MapNew | Expr::SetNew => {}
+        Expr::SetNewFromArray(arr) => walk(arr, out),
+        Expr::MapSet { map, key, value } => {
+            walk(map, out);
+            walk(key, out);
+            walk(value, out);
+        }
+        Expr::MapGet { map, key } | Expr::MapHas { map, key } | Expr::MapDelete { map, key } => {
+            walk(map, out);
+            walk(key, out);
+        }
+        Expr::MapClear(map) => walk(map, out),
+        Expr::SetAdd { value, .. } => walk(value, out),
+        Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
+            walk(set, out);
+            walk(value, out);
+        }
+        Expr::MathMin(values) | Expr::MathMax(values) => {
+            for v in values {
+                walk(v, out);
+            }
+        }
+        Expr::MathPow(a, b) | Expr::PathJoin(a, b) | Expr::PathRelative(a, b) => {
+            walk(a, out);
+            walk(b, out);
+        }
+        Expr::PathBasenameExt(a, b) => {
+            walk(a, out);
+            walk(b, out);
+        }
+        Expr::JsonStringifyFull(value, replacer, indent) => {
+            walk(value, out);
+            walk(replacer, out);
+            walk(indent, out);
+        }
+        Expr::JsonParseReviver { text, reviver } => {
+            walk(text, out);
+            walk(reviver, out);
+        }
+        Expr::JsonParseWithReviver(a, b) => {
+            walk(a, out);
+            walk(b, out);
+        }
+        Expr::Closure { body, .. } => {
+            collect_localset_ids_in_stmts(body, out);
+        }
+        Expr::ParseInt { string, radix } => {
+            walk(string, out);
+            if let Some(r) = radix {
+                walk(r, out);
+            }
+        }
+        Expr::Sequence(es) => {
+            for e in es {
+                walk(e, out);
+            }
+        }
+        Expr::InstanceOf { expr, .. } => walk(expr, out),
+        Expr::In { property, object } => {
+            walk(property, out);
+            walk(object, out);
+        }
+        Expr::SuperCall(args)
+        | Expr::SuperMethodCall { args, .. }
+        | Expr::StaticMethodCall { args, .. } => {
+            for a in args {
+                walk(a, out);
+            }
+        }
+        Expr::FsWriteFileSync(p, c) => {
+            walk(p, out);
+            walk(c, out);
+        }
+        Expr::ErrorNewWithCause { message, cause } => {
+            walk(message, out);
+            walk(cause, out);
+        }
+        Expr::DateNew(Some(arg)) => walk(arg, out),
+        Expr::Uint8ArrayGet { array, index } => {
+            walk(array, out);
+            walk(index, out);
+        }
+        Expr::Uint8ArraySet { array, index, value } => {
+            walk(array, out);
+            walk(index, out);
+            walk(value, out);
+        }
+        Expr::TypedArrayNew { arg, .. } => {
+            if let Some(a) = arg { walk(a, out); }
+        }
+        Expr::ObjectGroupBy { items, key_fn } => {
+            walk(items, out);
+            walk(key_fn, out);
+        }
+        Expr::ArrayFromMapped { iterable, map_fn } => {
+            walk(iterable, out);
+            walk(map_fn, out);
+        }
+        Expr::RegExpTest { regex, string }
+        | Expr::RegExpExec { regex, string } => {
+            walk(regex, out);
+            walk(string, out);
+        }
+        Expr::StringMatch { string, regex } => {
+            walk(string, out);
+            walk(regex, out);
+        }
+        Expr::BufferFrom { data, encoding } => {
+            walk(data, out);
+            if let Some(e) = encoding {
+                walk(e, out);
+            }
+        }
+        Expr::BufferAlloc { size, fill } => {
+            walk(size, out);
+            if let Some(f) = fill {
+                walk(f, out);
+            }
+        }
+        Expr::FinalizationRegistryRegister { registry, target, held, token } => {
+            walk(registry, out);
+            walk(target, out);
+            walk(held, out);
+            if let Some(t) = token {
+                walk(t, out);
+            }
+        }
+        Expr::FinalizationRegistryUnregister { registry, token } => {
+            walk(registry, out);
+            walk(token, out);
+        }
+        Expr::StaticFieldSet { value, .. } => walk(value, out),
+        _ => {}
+    }
+}
+

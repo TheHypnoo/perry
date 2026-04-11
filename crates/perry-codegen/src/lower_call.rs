@@ -217,6 +217,16 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             return Ok(double_literal(0.0));
         };
         let fname = format!("perry_fn_{}__{}", source_prefix, name);
+        // Record the cross-module call so the caller can add a `declare`
+        // line for it after the &mut LlFunction borrow is released. The
+        // module dedupes by name, so duplicates are harmless. Without
+        // this, clang errors with `use of undefined value @perry_fn_*`
+        // for any cross-module call hidden inside a closure body, try
+        // block, switch, etc. — the old pre-walker missed those shapes.
+        let param_types: Vec<crate::types::LlvmType> =
+            std::iter::repeat(DOUBLE).take(args.len()).collect();
+        ctx.pending_declares
+            .push((fname.clone(), DOUBLE, param_types));
         let mut lowered: Vec<String> = Vec::with_capacity(args.len());
         for a in args {
             lowered.push(lower_expr(ctx, a)?);
@@ -1319,7 +1329,7 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
     //
     // The runtime checks the closure header on its own — if the value
     // isn't actually a closure, js_closure_call<N> handles the error.
-    if args.len() <= 5 {
+    if args.len() <= 16 {
         let recv_box = lower_expr(ctx, callee)?;
         let mut lowered_args: Vec<String> = Vec::with_capacity(args.len());
         for a in args {
@@ -1694,20 +1704,30 @@ pub(crate) fn lower_native_method_call(
     let _ = (module, method); // shut up unused warnings on the early-out path
 
     if module == "array" && (method == "push_single" || method == "push") {
-        if args.len() != 1 {
-            bail!("array.push expects 1 arg, got {}", args.len());
+        if args.is_empty() {
+            bail!("array.push expects ≥1 arg, got 0");
         }
-        let v = lower_expr(ctx, &args[0])?;
-        // Lower the receiver once. We'll use the resulting box for both
-        // the (Get → push → re-Set) cycle.
+        // Lower every argument first so closures and string literals get
+        // collected, then lower the receiver once. js_array_push_f64 may
+        // realloc on each call, so we thread the returned pointer through
+        // and write the final pointer back to the receiver.
+        let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+        for a in args {
+            lowered.push(lower_expr(ctx, a)?);
+        }
         let arr_box = lower_expr(ctx, recv)?;
         let blk = ctx.block();
-        let arr_handle = unbox_to_i64(blk, &arr_box);
-        let new_handle = blk.call(
-            I64,
-            "js_array_push_f64",
-            &[(I64, &arr_handle), (DOUBLE, &v)],
-        );
+        let mut arr_handle = unbox_to_i64(blk, &arr_box);
+        for v in &lowered {
+            let blk = ctx.block();
+            arr_handle = blk.call(
+                I64,
+                "js_array_push_f64",
+                &[(I64, &arr_handle), (DOUBLE, v)],
+            );
+        }
+        let blk = ctx.block();
+        let new_handle = arr_handle;
         let new_box = nanbox_pointer_inline(blk, &new_handle);
         // Write the (possibly-realloc'd) pointer back to the receiver.
         // Two cases:

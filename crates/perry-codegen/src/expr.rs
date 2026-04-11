@@ -219,6 +219,33 @@ pub(crate) struct FnCtx<'a> {
     /// Imported function return types, keyed by local function name.
     /// Used for type-aware dispatch on cross-module call results.
     pub imported_func_return_types: &'a std::collections::HashMap<String, perry_types::Type>,
+
+    /// Cross-module function declarations to add to `LlModule` after
+    /// lowering finishes. Each entry is `(llvm_name, return_type, param_types)`.
+    /// Pushed by `lower_call` whenever it emits a `call @perry_fn_<src>__<name>`,
+    /// drained by the caller (compile_function/method/closure/module_entry)
+    /// once the `&mut LlFunction` borrow on `LlModule` is released.
+    ///
+    /// This replaces the old pre-walker (`collect_extern_func_refs_in_*`)
+    /// which had to mirror the entire HIR Expr/Stmt grammar to find every
+    /// cross-module call. Lazy emission tracks declares at the actual
+    /// emission point so any path the lowering reaches automatically gets
+    /// its declare — no walker to keep in sync.
+    pub pending_declares: Vec<(String, crate::types::LlvmType, Vec<crate::types::LlvmType>)>,
+
+    /// LocalIds that are provably integer-valued — i.e., initialized from
+    /// an integer literal and never the target of a `LocalSet` (only the
+    /// `Update` expression and reads are allowed). Populated once per
+    /// function by `crate::collectors::collect_integer_locals` at each
+    /// `compile_*` entry point.
+    ///
+    /// Used by `BinaryOp::Mod` lowering to emit integer modulo via
+    /// `fptosi → srem → sitofp` instead of `frem double`. `frem` lowers to
+    /// a libm `fmod()` call on ARM (no hardware instruction), costing
+    /// ~15ns per iteration — integer modulo is a single `msub` after
+    /// LLVM's SCEV hoists the conversions. Turned factorial
+    /// (`sum += i % 1000` in a 100M loop) from 1550ms → ~150ms on ARM.
+    pub integer_locals: &'a std::collections::HashSet<u32>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -549,6 +576,35 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     return lower_string_coerce_concat(ctx, left, right, l_is_str, r_is_str);
                 }
             }
+            // Fast path: `<integer-valued> % <integer literal>` (the
+            // factorial / `i % 1000` loop shape). `frem double` lowers
+            // to a libm `fmod()` call on ARM — no hardware instruction
+            // — at ~15ns per iteration. Emitting `fptosi → srem →
+            // sitofp` lets LLVM's SCEV hoist the float↔int conversions
+            // out of the loop and replace the div with a reciprocal-
+            // multiplication trick. On the factorial benchmark this
+            // takes the inner loop from 1550ms → ~150ms.
+            //
+            // Safety: both operands must be provably integer-valued.
+            // A fractional LHS would lose its fraction bits through
+            // fptosi, producing the wrong result. `is_integer_valued_expr`
+            // only returns true when we can prove the value is a whole
+            // number (integer literals, integer loop counters, or nested
+            // integer arithmetic). For everything else we fall through
+            // to the `frem` path.
+            if matches!(op, BinaryOp::Mod)
+                && crate::type_analysis::is_integer_valued_expr(ctx, left)
+                && crate::type_analysis::is_integer_valued_expr(ctx, right)
+            {
+                let l_raw = lower_expr(ctx, left)?;
+                let r_raw = lower_expr(ctx, right)?;
+                let blk = ctx.block();
+                let li = blk.fptosi(DOUBLE, &l_raw, I64);
+                let ri = blk.fptosi(DOUBLE, &r_raw, I64);
+                let m = blk.srem(I64, &li, &ri);
+                return Ok(blk.sitofp(I64, &m, DOUBLE));
+            }
+
             let l_raw = lower_expr(ctx, left)?;
             let r_raw = lower_expr(ctx, right)?;
             // Coerce non-numeric operands to numbers for arithmetic.
@@ -1870,6 +1926,35 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // assignments.
         Expr::New { class_name, args, .. } => lower_new(ctx, class_name, args),
 
+        // `new <expr>(args…)` where the callee isn't a bare identifier.
+        // Two common shapes:
+        //   1. `new globalThis.WebSocket(url)` — the parser emits this as
+        //      `NewDynamic { callee: PropertyGet { GlobalGet(0), "WebSocket" }, args }`.
+        //      Reroute to the static path so the existing built-in/runtime
+        //      class handling kicks in.
+        //   2. Anything else (`new (cond ? A : B)()`, `new someVar()`) —
+        //      lower the callee + args for side effects (closures, string
+        //      literal interning) and return an empty object placeholder.
+        //      The runtime won't dispatch correctly here, but the binary
+        //      compiles and links instead of failing the whole module.
+        Expr::NewDynamic { callee, args } => {
+            if let Expr::PropertyGet { object, property } = callee.as_ref() {
+                if matches!(object.as_ref(), Expr::GlobalGet(_)) {
+                    return lower_new(ctx, property, args);
+                }
+            }
+            let _ = lower_expr(ctx, callee)?;
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let class_id = "0".to_string();
+            let count = "0".to_string();
+            let handle = ctx
+                .block()
+                .call(I64, "js_object_alloc", &[(I32, &class_id), (I32, &count)]);
+            Ok(nanbox_pointer_inline(ctx.block(), &handle))
+        }
+
         // `this` — load from the topmost `this` slot in the constructor
         // stack. Returns undefined sentinel outside any constructor
         // body so compile succeeds for stray top-level `this` (which
@@ -2239,6 +2324,90 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let cb_handle = unbox_to_i64(blk, &cb_box);
             let result = blk.call(I64, "js_array_filter", &[(I64, &arr_handle), (I64, &cb_handle)]);
             Ok(nanbox_pointer_inline(blk, &result))
+        }
+
+        // -------- fetch(url, { method, body, headers }) --------
+        // Build a runtime headers object from the static (key, dynamic-value)
+        // pairs, JSON-stringify it, and pass everything to
+        // `js_fetch_with_options(url, method, body, headers_json)` which
+        // returns a `*mut Promise`. The result is NaN-boxed with POINTER_TAG
+        // so the rest of the await/then machinery sees a normal Promise.
+        Expr::FetchWithOptions { url, method, body, headers } => {
+            let url_box = lower_expr(ctx, url)?;
+            let method_box = lower_expr(ctx, method)?;
+            let body_box = lower_expr(ctx, body)?;
+
+            // Build the headers object: js_object_alloc(0, N) followed by
+            // js_object_set_field_by_name for each (interned key, value).
+            let n_str = (headers.len() as u32).to_string();
+            let zero_str = "0".to_string();
+            let headers_handle = ctx
+                .block()
+                .call(I64, "js_object_alloc", &[(I32, &zero_str), (I32, &n_str)]);
+            for (key, val_expr) in headers {
+                let key_idx = ctx.strings.intern(key);
+                let key_handle_global =
+                    format!("@{}", ctx.strings.entry(key_idx).handle_global);
+                let v_box = lower_expr(ctx, val_expr)?;
+                let blk = ctx.block();
+                let key_box = blk.load(DOUBLE, &key_handle_global);
+                let key_bits = blk.bitcast_double_to_i64(&key_box);
+                let key_raw = blk.and(I64, &key_bits, POINTER_MASK_I64);
+                blk.call_void(
+                    "js_object_set_field_by_name",
+                    &[(I64, &headers_handle), (I64, &key_raw), (DOUBLE, &v_box)],
+                );
+            }
+
+            let blk = ctx.block();
+            let headers_obj_box = nanbox_pointer_inline(blk, &headers_handle);
+            // js_json_stringify(value: f64, indent: i32) -> i64 string handle.
+            let zero_i = "0".to_string();
+            let headers_str = blk.call(
+                I64,
+                "js_json_stringify",
+                &[(DOUBLE, &headers_obj_box), (I32, &zero_i)],
+            );
+
+            // The runtime takes raw StringHeader pointers (i64). Unbox each
+            // input string. `body` may be undefined → unbox produces 0 which
+            // the runtime treats as "no body" via string_from_header().
+            let url_handle = unbox_to_i64(blk, &url_box);
+            let method_handle = unbox_to_i64(blk, &method_box);
+            let body_handle = unbox_to_i64(blk, &body_box);
+            let promise = blk.call(
+                I64,
+                "js_fetch_with_options",
+                &[
+                    (I64, &url_handle),
+                    (I64, &method_handle),
+                    (I64, &body_handle),
+                    (I64, &headers_str),
+                ],
+            );
+            Ok(nanbox_pointer_inline(blk, &promise))
+        }
+
+        // -------- arr.some(callback) -> boolean --------
+        // js_array_some returns a NaN-tagged TAG_TRUE/TAG_FALSE as f64,
+        // so we forward it directly without conversion.
+        Expr::ArraySome { array, callback } => {
+            let arr_box = lower_expr(ctx, array)?;
+            let cb_box = lower_expr(ctx, callback)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            Ok(blk.call(DOUBLE, "js_array_some", &[(I64, &arr_handle), (I64, &cb_handle)]))
+        }
+
+        // -------- arr.every(callback) -> boolean --------
+        Expr::ArrayEvery { array, callback } => {
+            let arr_box = lower_expr(ctx, array)?;
+            let cb_box = lower_expr(ctx, callback)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            Ok(blk.call(DOUBLE, "js_array_every", &[(I64, &arr_handle), (I64, &cb_handle)]))
         }
 
         // -------- arr.join(separator?) -> string --------
@@ -5734,6 +5903,45 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // Pragmatic: the test only checks `=== Dog.prototype`, which
             // the compiler folds to a compile-time bool. Return target.
             lower_expr(ctx, target)
+        }
+
+        // -------- ExternFuncRef as a value --------
+        // The Call path in `lower_call.rs` knows how to dispatch
+        // `Expr::Call { callee: ExternFuncRef, .. }` directly to the
+        // cross-module symbol. But when an imported function appears as
+        // a STANDALONE value — `if (this.ffi.setCursors)` truthiness
+        // checks, equality comparisons, or being passed as a callback —
+        // we still need *some* JSValue to thread through. Pragmatic:
+        // return TAG_TRUE so truthiness checks succeed (which is the
+        // overwhelmingly common case for capability-detection code).
+        // Calling an extern fn via a stored value is NOT supported and
+        // will misbehave at runtime; emit the declare anyway in case a
+        // direct call to the same name appears elsewhere in the body.
+        Expr::ExternFuncRef { name, param_types, .. } => {
+            if let Some(source_prefix) = ctx.import_function_prefixes.get(name).cloned() {
+                let llvm_name = format!("perry_fn_{}__{}", source_prefix, name);
+                let pts: Vec<crate::types::LlvmType> =
+                    std::iter::repeat(DOUBLE).take(param_types.len()).collect();
+                ctx.pending_declares.push((llvm_name, DOUBLE, pts));
+            }
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_TRUE)))
+        }
+
+        // -------- I18nString — locale-keyed string literal --------
+        // Pragmatic: i18n resolution requires either a runtime key
+        // lookup (with locale + plural categorization) or a compile-time
+        // pre-resolution against the active locale. Until that's wired
+        // up properly, fall back to the verbatim key string so the
+        // binary builds and the user sees the source text. Walks any
+        // interpolation params for side effects (closure collection,
+        // string interning).
+        Expr::I18nString { key, params, .. } => {
+            for (_, v) in params {
+                let _ = lower_expr(ctx, v)?;
+            }
+            let key_idx = ctx.strings.intern(key);
+            let handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
+            Ok(ctx.block().load(DOUBLE, &handle_global))
         }
 
         // -------- Unsupported (clear error) --------

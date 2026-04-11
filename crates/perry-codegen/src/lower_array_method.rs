@@ -303,13 +303,18 @@ pub(crate) fn lower_array_method(
             Ok(blk.call(DOUBLE, "js_array_at", &[(I64, &recv_handle), (DOUBLE, &idx_box)]))
         }
         "slice" => {
-            if args.is_empty() || args.len() > 2 {
-                bail!("perry-codegen: Array.slice expects 1-2 args, got {}", args.len());
+            if args.len() > 2 {
+                bail!("perry-codegen: Array.slice expects 0-2 args, got {}", args.len());
             }
-            let start_box = lower_expr(ctx, &args[0])?;
-            let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
-            let start_i32 = blk.fptosi(DOUBLE, &start_box, I32);
+            // Zero-arg `.slice()` is the JS shallow-copy idiom: same as
+            // `.slice(0)`. Lower it to start=0, end=i32::MAX.
+            let start_i32 = if args.is_empty() {
+                "0".to_string()
+            } else {
+                let start_box = lower_expr(ctx, &args[0])?;
+                let blk = ctx.block();
+                blk.fptosi(DOUBLE, &start_box, I32)
+            };
             let end_i32 = if args.len() == 2 {
                 let end_box = lower_expr(ctx, &args[1])?;
                 let blk = ctx.block();
@@ -318,6 +323,7 @@ pub(crate) fn lower_array_method(
                 "2147483647".to_string()
             };
             let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
             let result = blk.call(
                 I64,
                 "js_array_slice",

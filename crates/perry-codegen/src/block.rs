@@ -312,6 +312,15 @@ impl LlBlock {
         r
     }
 
+    /// Signed integer remainder. Emitted by the `BinaryOp::Mod` integer
+    /// fast path for `<int> % <int>` — avoids the libm `fmod()` call that
+    /// `frem double` lowers to on ARM.
+    pub fn srem(&mut self, ty: LlvmType, a: &str, b: &str) -> String {
+        let r = self.reg();
+        self.emit(format!("{} = srem {} {}, {}", r, ty, a, b));
+        r
+    }
+
     pub fn and(&mut self, ty: LlvmType, a: &str, b: &str) -> String {
         let r = self.reg();
         self.emit(format!("{} = and {} {}, {}", r, ty, a, b));

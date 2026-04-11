@@ -132,10 +132,13 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     //     space for `capture_count` captured-value slots.
     // - js_closure_set/get_capture_f64(closure, idx, value)
     //     Read/write a captured value (NaN-boxed double) at slot `idx`.
-    // - js_closure_call0..call5(closure, args…) -> double
+    // - js_closure_call0..call16(closure, args…) -> double
     //     Invoke the closure with N args. The runtime extracts the
     //     function pointer from the closure header and calls it with
     //     the closure as the first argument followed by the user args.
+    //     The runtime exports js_closure_call0 through js_closure_call16
+    //     (see crates/perry-runtime/src/closure.rs); the call site cap in
+    //     lower_call.rs matches.
     module.declare_function("js_closure_alloc", I64, &[PTR, I32]);
     module.declare_function("js_closure_set_capture_f64", VOID, &[I64, I32, DOUBLE]);
     module.declare_function("js_closure_get_capture_f64", DOUBLE, &[I64, I32]);
@@ -145,6 +148,17 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_closure_call3", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE]);
     module.declare_function("js_closure_call4", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
     module.declare_function("js_closure_call5", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call6", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call7", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call8", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call9", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call10", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call11", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call12", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call13", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call14", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call15", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call16", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
 
     // Phase B.16 / D follow-ups: more runtime functions discovered
     // by the test-files sweep histogram.

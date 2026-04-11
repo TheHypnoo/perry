@@ -664,6 +664,15 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         for m in &c.methods {
             module_boxed_vars.extend(collect_boxed_vars(&m.body));
         }
+        for (_, getter_fn) in &c.getters {
+            module_boxed_vars.extend(collect_boxed_vars(&getter_fn.body));
+        }
+        for (_, setter_fn) in &c.setters {
+            module_boxed_vars.extend(collect_boxed_vars(&setter_fn.body));
+        }
+        for sm in &c.static_methods {
+            module_boxed_vars.extend(collect_boxed_vars(&sm.body));
+        }
         if let Some(ctor) = &c.constructor {
             module_boxed_vars.extend(collect_boxed_vars(&ctor.body));
         }
@@ -689,6 +698,18 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             }
             collect_let_types_in_stmts(&m.body, &mut module_local_types);
         }
+        for (_, getter_fn) in &c.getters {
+            for p in &getter_fn.params {
+                module_local_types.insert(p.id, p.ty.clone());
+            }
+            collect_let_types_in_stmts(&getter_fn.body, &mut module_local_types);
+        }
+        for (_, setter_fn) in &c.setters {
+            for p in &setter_fn.params {
+                module_local_types.insert(p.id, p.ty.clone());
+            }
+            collect_let_types_in_stmts(&setter_fn.body, &mut module_local_types);
+        }
         if let Some(ctor) = &c.constructor {
             for p in &ctor.params {
                 module_local_types.insert(p.id, p.ty.clone());
@@ -703,44 +724,27 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         }
     }
 
-    // Pre-declare each imported function as an extern. Cross-module
-    // calls in lower_call need a `declare` line at the top of the IR
-    // for the symbol to be referenceable; without this, clang errors
-    // with "use of undefined value @perry_fn_<src>__<name>".
-    //
-    // We walk hir.functions/methods/init for `Expr::ExternFuncRef` and
-    // for each unique (name, source_prefix) emit a declare with the
-    // right number of double parameters from the carried param_types.
-    {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut collected: Vec<(String, usize)> = Vec::new();
-        for f in &hir.functions {
-            collect_extern_func_refs_in_stmts(&f.body, &mut seen, &mut collected);
-        }
-        for c in &hir.classes {
-            for m in &c.methods {
-                collect_extern_func_refs_in_stmts(&m.body, &mut seen, &mut collected);
-            }
-            if let Some(ctor) = &c.constructor {
-                collect_extern_func_refs_in_stmts(&ctor.body, &mut seen, &mut collected);
-            }
-        }
-        collect_extern_func_refs_in_stmts(&hir.init, &mut seen, &mut collected);
-
-        for (name, param_count) in collected {
-            if let Some(source_prefix) = opts.import_function_prefixes.get(&name) {
-                let llvm_name = format!("perry_fn_{}__{}", source_prefix, name);
-                let param_types: Vec<crate::types::LlvmType> =
-                    std::iter::repeat(DOUBLE).take(param_count).collect();
-                llmod.declare_function(&llvm_name, DOUBLE, &param_types);
-            }
-        }
-    }
+    // Cross-module function declares are emitted lazily by `lower_call`
+    // via `FnCtx.pending_declares` (drained back into `llmod` at the
+    // end of each compile_function/closure/method/static call). The
+    // previous pre-walker (`collect_extern_func_refs_in_*`) had to
+    // mirror the entire HIR Expr/Stmt grammar to find every cross-module
+    // call shape — it missed `Expr::Closure` bodies, `Stmt::Try`/`Switch`,
+    // and many other containers, which produced clang
+    // "use of undefined value @perry_fn_*" errors when a call was hidden
+    // inside an arrow callback. Lazy emission tracks declares at the
+    // actual emission point so any path the lowering reaches is covered.
 
     // Pre-walk for closures: every `Expr::Closure` in the program needs
     // its body emitted as a top-level LLVM function so the closure
     // creation site can take its address. Collect them all first, then
     // emit each via `compile_closure` (Phase D.1).
+    //
+    // We must walk every container that the compile loop below also
+    // compiles — methods, ctors, getters, setters, static_methods —
+    // otherwise a closure body in (say) a `get size() { return arr.filter(...).length }`
+    // ends up referenced by `js_closure_alloc(@perry_closure_*)` but
+    // never defined, and clang errors with "use of undefined value".
     let mut closures: Vec<(perry_types::FuncId, perry_hir::Expr)> = Vec::new();
     {
         let mut seen: std::collections::HashSet<perry_types::FuncId> = std::collections::HashSet::new();
@@ -750,6 +754,15 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         for c in &hir.classes {
             for m in &c.methods {
                 collect_closures_in_stmts(&m.body, &mut seen, &mut closures);
+            }
+            for (_, getter_fn) in &c.getters {
+                collect_closures_in_stmts(&getter_fn.body, &mut seen, &mut closures);
+            }
+            for (_, setter_fn) in &c.setters {
+                collect_closures_in_stmts(&setter_fn.body, &mut seen, &mut closures);
+            }
+            for sm in &c.static_methods {
+                collect_closures_in_stmts(&sm.body, &mut seen, &mut closures);
             }
             if let Some(ctor) = &c.constructor {
                 collect_closures_in_stmts(&ctor.body, &mut seen, &mut closures);
@@ -1000,6 +1013,10 @@ fn compile_function(
     // `let x = 0; return { get: () => x, set: (n) => x = n }` pattern.
     let boxed_vars = module_boxed_vars.clone();
 
+    // Pre-walk: which locals are provably integer-valued? Used by
+    // `BinaryOp::Mod` to emit integer modulo instead of libm `fmod()`.
+    let integer_locals = crate::collectors::collect_integer_locals(&f.body);
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
@@ -1033,6 +1050,8 @@ fn compile_function(
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
+        pending_declares: Vec::new(),
+        integer_locals: &integer_locals,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -1051,6 +1070,11 @@ fn compile_function(
         } else {
             ctx.block().ret(DOUBLE, "0.0");
         }
+    }
+    let pending = std::mem::take(&mut ctx.pending_declares);
+    drop(ctx); // releases &mut LlFunction borrow on llmod
+    for (name, ret, params) in pending {
+        llmod.declare_function(&name, ret, &params);
     }
     Ok(())
 }
@@ -1213,6 +1237,8 @@ fn compile_closure(
     // the closure body just sees them via the capture mechanism.
     let closure_boxed_vars = module_boxed_vars.clone();
 
+    let integer_locals = crate::collectors::collect_integer_locals(body);
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
@@ -1250,6 +1276,8 @@ fn compile_closure(
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
+        pending_declares: Vec::new(),
+        integer_locals: &integer_locals,
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -1257,6 +1285,11 @@ fn compile_closure(
 
     if !ctx.block().is_terminated() {
         ctx.block().ret(DOUBLE, "0.0");
+    }
+    let pending = std::mem::take(&mut ctx.pending_declares);
+    drop(ctx);
+    for (name, ret, params) in pending {
+        llmod.declare_function(&name, ret, &params);
     }
     Ok(())
 }
@@ -1328,6 +1361,8 @@ fn compile_method(
 
     let method_boxed_vars = module_boxed_vars.clone();
 
+    let integer_locals = crate::collectors::collect_integer_locals(&method.body);
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
@@ -1361,6 +1396,8 @@ fn compile_method(
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
+        pending_declares: Vec::new(),
+        integer_locals: &integer_locals,
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -1368,6 +1405,11 @@ fn compile_method(
 
     if !ctx.block().is_terminated() {
         ctx.block().ret(DOUBLE, "0.0");
+    }
+    let pending = std::mem::take(&mut ctx.pending_declares);
+    drop(ctx);
+    for (name, ret, params) in pending {
+        llmod.declare_function(&name, ret, &params);
     }
     Ok(())
 }
@@ -1435,6 +1477,7 @@ fn compile_module_entry(
         }
 
         let main_boxed_vars = module_boxed_vars.clone();
+        let main_integer_locals = crate::collectors::collect_integer_locals(&hir.init);
         let mut ctx = FnCtx {
             func: main,
             locals: HashMap::new(),
@@ -1468,6 +1511,8 @@ fn compile_module_entry(
             type_aliases: &cross_module.type_aliases,
             imported_func_param_counts: &cross_module.imported_func_param_counts,
             imported_func_return_types: &cross_module.imported_func_return_types,
+            pending_declares: Vec::new(),
+            integer_locals: &main_integer_locals,
         };
         // Initialize static class fields with their declared init
         // expressions. Runs once at the top of main, before user code.
@@ -1491,6 +1536,11 @@ fn compile_module_entry(
             }
             ctx.block().ret(I32, "0");
         }
+        let pending = std::mem::take(&mut ctx.pending_declares);
+        drop(ctx);
+        for (name, ret, params) in pending {
+            llmod.declare_function(&name, ret, &params);
+        }
     } else {
         let init_name = format!("{}__init", module_prefix);
         let init_fn = llmod.define_function(&init_name, VOID, vec![]);
@@ -1506,6 +1556,7 @@ fn compile_module_entry(
         }
 
         let init_boxed_vars = module_boxed_vars.clone();
+        let init_integer_locals = crate::collectors::collect_integer_locals(&hir.init);
         let mut ctx = FnCtx {
             func: init_fn,
             locals: HashMap::new(),
@@ -1539,6 +1590,8 @@ fn compile_module_entry(
             type_aliases: &cross_module.type_aliases,
             imported_func_param_counts: &cross_module.imported_func_param_counts,
             imported_func_return_types: &cross_module.imported_func_return_types,
+            pending_declares: Vec::new(),
+            integer_locals: &init_integer_locals,
         };
         init_static_fields(&mut ctx, hir)?;
         stmt::lower_stmts(&mut ctx, &hir.init)
@@ -1546,6 +1599,11 @@ fn compile_module_entry(
 
         if !ctx.block().is_terminated() {
             ctx.block().ret_void();
+        }
+        let pending = std::mem::take(&mut ctx.pending_declares);
+        drop(ctx);
+        for (name, ret, params) in pending {
+            llmod.declare_function(&name, ret, &params);
         }
     }
     Ok(())
@@ -1718,6 +1776,8 @@ fn compile_static_method(
         .map(|p| (p.id, p.ty.clone()))
         .collect();
 
+    let integer_locals = crate::collectors::collect_integer_locals(&f.body);
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
@@ -1755,6 +1815,8 @@ fn compile_static_method(
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
+        pending_declares: Vec::new(),
+        integer_locals: &integer_locals,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;
@@ -1768,6 +1830,11 @@ fn compile_static_method(
         } else {
             ctx.block().ret(DOUBLE, "0.0");
         }
+    }
+    let pending = std::mem::take(&mut ctx.pending_declares);
+    drop(ctx);
+    for (name, ret, params) in pending {
+        llmod.declare_function(&name, ret, &params);
     }
     Ok(())
 }
@@ -1892,8 +1959,7 @@ fn init_static_fields(
 
 // Collector and boxing-analysis walkers live in dedicated modules.
 use crate::collectors::{
-    collect_closures_in_stmts, collect_extern_func_refs_in_stmts,
-    collect_let_ids, collect_ref_ids_in_stmts,
+    collect_closures_in_stmts, collect_let_ids, collect_ref_ids_in_stmts,
 };
 use crate::boxed_vars::{collect_boxed_vars, collect_let_types_in_stmts};
 
