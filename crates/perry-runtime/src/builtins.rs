@@ -2074,9 +2074,31 @@ pub extern "C" fn js_structured_clone(value: f64) -> f64 {
             value
         }
         0x7FFD => {
-            // POINTER_TAG — could be array or object. Deep clone recursively.
+            // POINTER_TAG — could be array/object/Map/Set/RegExp. Deep clone recursively.
             let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const u8;
             if (ptr as usize) < 0x10000 { return value; }
+            // Set is tracked in SET_REGISTRY (not GC_TYPE_SET since it has
+            // no GC header). Check the registry BEFORE touching the GC
+            // header bytes — they'd be garbage for raw-allocated sets.
+            if crate::set::is_registered_set(ptr as usize) {
+                unsafe {
+                    let src = ptr as *const crate::set::SetHeader;
+                    let size = crate::set::js_set_size(src);
+                    let new_set = crate::set::js_set_alloc(size.max(8));
+                    let arr = crate::set::js_set_to_array(src);
+                    let len = (*arr).length as usize;
+                    let data = (arr as *const u8)
+                        .add(std::mem::size_of::<crate::array::ArrayHeader>())
+                        as *const f64;
+                    for i in 0..len {
+                        let v = js_structured_clone(*data.add(i));
+                        crate::set::js_set_add(new_set, v);
+                    }
+                    let new_bits = 0x7FFD_0000_0000_0000u64
+                        | (new_set as u64 & 0x0000_FFFF_FFFF_FFFF);
+                    return f64::from_bits(new_bits);
+                }
+            }
             unsafe {
                 // GcHeader is stored BEFORE the user pointer (at ptr - GC_HEADER_SIZE)
                 let gc_header_ptr = (ptr as *const u8).sub(crate::gc::GC_HEADER_SIZE);
@@ -2094,6 +2116,19 @@ pub extern "C" fn js_structured_clone(value: f64) -> f64 {
                     let new_bits = 0x7FFD_0000_0000_0000u64 | (new_arr as u64 & 0x0000_FFFF_FFFF_FFFF);
                     f64::from_bits(new_bits)
                 } else if gc_type == crate::gc::GC_TYPE_OBJECT {
+                    // Check if this is a RegExp (the RegExpHeader lives in an
+                    // arena slot with GC_TYPE_OBJECT but tracked in
+                    // REGEX_POINTERS). Clone by reading source/flags and
+                    // building a fresh one via js_regexp_new.
+                    if crate::regex::is_regex_pointer(ptr as *const u8) {
+                        let re_ptr = ptr as *const crate::regex::RegExpHeader;
+                        let src = crate::regex::js_regexp_get_source(re_ptr);
+                        let flg = crate::regex::js_regexp_get_flags(re_ptr);
+                        let new_re = crate::regex::js_regexp_new(src, flg);
+                        let new_bits = 0x7FFD_0000_0000_0000u64
+                            | (new_re as u64 & 0x0000_FFFF_FFFF_FFFF);
+                        return f64::from_bits(new_bits);
+                    }
                     // Clone object using clone_with_extra (0 extra fields, no static keys)
                     let cloned_obj = crate::object::js_object_clone_with_extra(value, 0, std::ptr::null(), 0);
                     if !cloned_obj.is_null() && (cloned_obj as usize) > 0x10000 {
@@ -2106,6 +2141,38 @@ pub extern "C" fn js_structured_clone(value: f64) -> f64 {
                     }
                     // NaN-box with POINTER_TAG
                     let new_bits = 0x7FFD_0000_0000_0000u64 | (cloned_obj as u64 & 0x0000_FFFF_FFFF_FFFF);
+                    f64::from_bits(new_bits)
+                } else if gc_type == crate::gc::GC_TYPE_MAP {
+                    // Deep-clone a Map by building a fresh one and copying
+                    // entries through js_map_set (which handles the hash
+                    // bucket + entries array layout).
+                    let map = ptr as *const crate::map::MapHeader;
+                    let size = crate::map::js_map_size(map);
+                    let new_map = crate::map::js_map_alloc(size.max(8));
+                    // Walk entries via js_map_entries which returns an
+                    // Array<[key, value]> pair array.
+                    let entries_arr = crate::map::js_map_entries(map);
+                    let entries_len = (*entries_arr).length as usize;
+                    let entries_data = (entries_arr as *const u8)
+                        .add(std::mem::size_of::<crate::array::ArrayHeader>())
+                        as *const f64;
+                    for i in 0..entries_len {
+                        let pair_box = *entries_data.add(i);
+                        let pair_bits = pair_box.to_bits();
+                        let pair_ptr = (pair_bits & 0x0000_FFFF_FFFF_FFFF)
+                            as *const crate::array::ArrayHeader;
+                        if pair_ptr.is_null() {
+                            continue;
+                        }
+                        let pair_data = (pair_ptr as *const u8)
+                            .add(std::mem::size_of::<crate::array::ArrayHeader>())
+                            as *const f64;
+                        let k = js_structured_clone(*pair_data);
+                        let v = js_structured_clone(*pair_data.add(1));
+                        crate::map::js_map_set(new_map, k, v);
+                    }
+                    let new_bits = 0x7FFD_0000_0000_0000u64
+                        | (new_map as u64 & 0x0000_FFFF_FFFF_FFFF);
                     f64::from_bits(new_bits)
                 } else {
                     // Unknown pointer type — pass through
