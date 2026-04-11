@@ -372,7 +372,21 @@ pub extern "C" fn js_buffer_byte_length(str_ptr: *const StringHeader) -> i32 {
 /// encoding: 0 = utf8 (default), 1 = hex, 2 = base64
 #[no_mangle]
 pub extern "C" fn js_buffer_to_string(buf_ptr: *const BufferHeader, encoding: i32) -> *mut StringHeader {
-    if buf_ptr.is_null() {
+    // Strip NaN-boxing tags if present so callers can pass an i64 that came
+    // from `bitcast double → i64` without unboxing first. The LLVM backend
+    // NaN-boxes Buffer pointers with POINTER_TAG (0x7FFD), and the dispatch
+    // path in `js_value_to_string_with_encoding` below passes the raw bits
+    // straight through.
+    let buf_ptr = {
+        let bits = buf_ptr as u64;
+        let top16 = bits >> 48;
+        if top16 >= 0x7FF8 {
+            (bits & 0x0000_FFFF_FFFF_FFFF) as *const BufferHeader
+        } else {
+            buf_ptr
+        }
+    };
+    if buf_ptr.is_null() || (buf_ptr as usize) < 0x1000 {
         return js_string_from_bytes(ptr::null(), 0);
     }
 
@@ -398,6 +412,37 @@ pub extern "C" fn js_buffer_to_string(buf_ptr: *const BufferHeader, encoding: i3
             }
         }
     }
+}
+
+/// Universal `.toString(encoding?)` dispatch used by the LLVM backend's
+/// `lower_call.rs` for chained `.toString(arg)` calls where the receiver
+/// type is not statically known.
+///
+/// - If the receiver is a registered Buffer (POINTER_TAG-boxed or raw),
+///   route to `js_buffer_to_string` with the encoding tag.
+/// - Otherwise fall through to `js_jsvalue_to_string` (encoding ignored,
+///   matches Node behavior for non-Buffer values like numbers/objects).
+///
+/// `enc_tag` is the i32 produced by `js_encoding_tag_from_value` (or a
+/// compile-time-folded literal): 0 = utf8, 1 = hex, 2 = base64.
+#[no_mangle]
+pub extern "C" fn js_value_to_string_with_encoding(value: f64, enc_tag: i32) -> *mut StringHeader {
+    let bits = value.to_bits();
+    let top16 = bits >> 48;
+    // Extract the underlying pointer regardless of NaN-box presence:
+    //   - POINTER_TAG (0x7FFD) → strip top 16 bits
+    //   - raw pointer bitcast to f64 → use bits directly (top16 == 0)
+    let ptr_addr = if top16 >= 0x7FF8 {
+        (bits & 0x0000_FFFF_FFFF_FFFF) as usize
+    } else if top16 == 0 && bits >= 0x1000 {
+        bits as usize
+    } else {
+        0
+    };
+    if ptr_addr != 0 && is_registered_buffer(ptr_addr) {
+        return js_buffer_to_string(ptr_addr as *const BufferHeader, enc_tag);
+    }
+    crate::value::js_jsvalue_to_string(value)
 }
 
 /// Print a buffer in Node.js `<Buffer xx xx ...>` format to stdout
@@ -429,7 +474,17 @@ pub extern "C" fn js_buffer_print(buf_ptr: *const BufferHeader) {
 /// Get the length of a buffer
 #[no_mangle]
 pub extern "C" fn js_buffer_length(buf_ptr: *const BufferHeader) -> i32 {
-    if buf_ptr.is_null() {
+    // Strip NaN-boxing tags if present (POINTER_TAG-boxed buffer pointers).
+    let buf_ptr = {
+        let bits = buf_ptr as u64;
+        let top16 = bits >> 48;
+        if top16 >= 0x7FF8 {
+            (bits & 0x0000_FFFF_FFFF_FFFF) as *const BufferHeader
+        } else {
+            buf_ptr
+        }
+    };
+    if buf_ptr.is_null() || (buf_ptr as usize) < 0x1000 {
         return 0;
     }
     unsafe { (*buf_ptr).length as i32 }

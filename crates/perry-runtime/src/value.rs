@@ -852,6 +852,16 @@ pub extern "C" fn js_jsvalue_to_string(value: f64) -> *mut crate::string::String
         // objects fall back to "[object Object]".
         let ptr: *const u8 = jsval.as_pointer();
         if !ptr.is_null() && (ptr as usize) >= 0x10000 {
+            // Buffers: BufferHeader has no GC header, so we must detect via
+            // BUFFER_REGISTRY before computing gc_header (which would read
+            // garbage one word before the buffer). `Buffer.toString()` with
+            // no arg defaults to UTF-8 — Node prints the raw bytes.
+            if crate::buffer::is_registered_buffer(ptr as usize) {
+                return crate::buffer::js_buffer_to_string(
+                    ptr as *const crate::buffer::BufferHeader,
+                    0,
+                );
+            }
             unsafe {
                 let gc_header = ptr.sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
                 if (*gc_header).obj_type == crate::gc::GC_TYPE_ARRAY {

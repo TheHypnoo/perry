@@ -11,7 +11,7 @@ use crate::lower_array_method::lower_array_method;
 use crate::lower_string_method::lower_string_method;
 use crate::nanbox::{double_literal, POINTER_MASK_I64};
 use crate::type_analysis::{is_array_expr, is_map_expr, is_promise_expr, is_set_expr, is_string_expr, receiver_class_name};
-use crate::types::{DOUBLE, I32, I64};
+use crate::types::{DOUBLE, I32, I64, PTR};
 
 /// Lower a `Call` expression. Two shapes are supported:
 /// 1. `FuncRef(id)(args...)` — direct call to a user function by HIR id.
@@ -274,6 +274,57 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             let handle =
                 blk.call(I64, "js_number_to_exponential", &[(DOUBLE, &v), (DOUBLE, &dec)]);
             return Ok(nanbox_string_inline(blk, &handle));
+        }
+        // Buffer.prototype.toString(encoding) — handled BEFORE the radix
+        // path because the encoding arg is a STRING ('utf8'/'hex'/'base64'),
+        // not a number. Routing a string arg through `fptosi` produces
+        // garbage and the runtime defaults to UTF-8 (the original v0.4.131
+        // bug that this test pins). We dispatch via the runtime helper
+        // `js_value_to_string_with_encoding` which checks BUFFER_REGISTRY
+        // at runtime and falls back to `js_jsvalue_to_string` for
+        // non-buffer values.
+        if property == "toString"
+            && args.len() == 1
+            && !is_string_expr(ctx, object)
+            && !is_array_expr(ctx, object)
+            && is_string_expr(ctx, &args[0])
+        {
+            let has_user_toString = receiver_class_name(ctx, object)
+                .map(|cls| {
+                    let mut cur = Some(cls);
+                    while let Some(c) = cur {
+                        if ctx.methods.contains_key(&(c.clone(), "toString".to_string())) {
+                            return true;
+                        }
+                        cur = ctx.classes.get(&c).and_then(|cd| cd.extends_name.clone());
+                    }
+                    false
+                })
+                .unwrap_or(false);
+            if !has_user_toString {
+                let v = lower_expr(ctx, object)?;
+                let enc_tag_i32 = if let Expr::String(s) = &args[0] {
+                    let lower = s.to_ascii_lowercase();
+                    let tag: i32 = match lower.as_str() {
+                        "utf8" | "utf-8" | "ascii" | "latin1" | "binary" => 0,
+                        "hex" => 1,
+                        "base64" | "base64url" => 2,
+                        _ => 0,
+                    };
+                    tag.to_string()
+                } else {
+                    let enc_box = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    blk.call(I32, "js_encoding_tag_from_value", &[(DOUBLE, &enc_box)])
+                };
+                let blk = ctx.block();
+                let handle = blk.call(
+                    I64,
+                    "js_value_to_string_with_encoding",
+                    &[(DOUBLE, &v), (I32, &enc_tag_i32)],
+                );
+                return Ok(nanbox_string_inline(blk, &handle));
+            }
         }
         // Number.prototype.toString(radix) — special case where the
         // single arg is the radix (2..36). Routes through
@@ -1098,6 +1149,66 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 }
                 _ => {}
             }
+        }
+    }
+
+    // -------- PropertyGet method dispatch via js_native_call_method --------
+    //
+    // For `recv.method(args)` where the static dispatch above didn't fire
+    // and the receiver isn't a known class instance, route through the
+    // runtime's universal `js_native_call_method` dispatcher. This is the
+    // path that catches Map/Set/RegExp methods on plain object fields
+    // (e.g. `wrap.m.get(k)` where `wrap: { m: Map }`) — the runtime
+    // detects the registry and dispatches to `js_map_get` etc. directly.
+    //
+    // The signature is `js_native_call_method(obj: f64, name_ptr: ptr,
+    // name_len: i64, args_ptr: ptr, args_len: i64) -> f64`. We pass the
+    // method name as a raw rodata byte pointer (the StringPool already
+    // emits the bytes as `[N+1 x i8]` for every interned string), and
+    // materialize the args into a stack `[N x double]` slot.
+    if let Expr::PropertyGet { object, property } = callee {
+        // Skip when the receiver is a global module access (e.g. `console.log`,
+        // `JSON.parse`) — those are handled by the spread/closure paths above
+        // or have dedicated lowerings. Skip when the receiver is a known class
+        // instance — those have static method dispatch handled earlier.
+        let skip_native = matches!(object.as_ref(), Expr::GlobalGet(_))
+            || receiver_class_name(ctx, object).is_some();
+        if !skip_native {
+            let recv_box = lower_expr(ctx, object)?;
+            let mut lowered_args: Vec<String> = Vec::with_capacity(args.len());
+            for a in args {
+                lowered_args.push(lower_expr(ctx, a)?);
+            }
+            // Intern the method name and reference its rodata byte global.
+            let key_idx = ctx.strings.intern(property);
+            let entry = ctx.strings.entry(key_idx);
+            let bytes_global = format!("@{}", entry.bytes_global);
+            let name_len_str = entry.byte_len.to_string();
+            let blk = ctx.block();
+            // Stack-allocate the args array if any.
+            let (args_ptr, args_len_str) = if lowered_args.is_empty() {
+                ("null".to_string(), "0".to_string())
+            } else {
+                let n = lowered_args.len();
+                let buf_reg = blk.next_reg();
+                blk.emit_raw(format!("{} = alloca [{} x double]", buf_reg, n));
+                for (i, v) in lowered_args.iter().enumerate() {
+                    let slot = blk.gep(DOUBLE, &buf_reg, &[(I64, &format!("{}", i))]);
+                    blk.store(DOUBLE, v, &slot);
+                }
+                (buf_reg, n.to_string())
+            };
+            return Ok(blk.call(
+                DOUBLE,
+                "js_native_call_method",
+                &[
+                    (DOUBLE, &recv_box),
+                    (PTR, &bytes_global),
+                    (I64, &name_len_str),
+                    (PTR, &args_ptr),
+                    (I64, &args_len_str),
+                ],
+            ));
         }
     }
 

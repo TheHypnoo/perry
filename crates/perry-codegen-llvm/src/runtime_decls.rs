@@ -187,12 +187,21 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_fs_copy_file_sync", I32, &[DOUBLE, DOUBLE]);
     // fs.accessSync(path) — returns i32 status (1=ok, 0=error).
     module.declare_function("js_fs_access_sync", I32, &[DOUBLE]);
+    // fs.accessSync(path) — Node-compatible variant that throws on
+    // failure (via js_throw → setjmp longjmp). Returns NaN-boxed undefined.
+    module.declare_function("js_fs_access_sync_throw", DOUBLE, &[DOUBLE]);
     // fs.realpathSync(path) — returns raw *mut StringHeader i64.
     module.declare_function("js_fs_realpath_sync", I64, &[DOUBLE]);
     // fs.mkdtempSync(prefix) — returns raw *mut StringHeader i64.
     module.declare_function("js_fs_mkdtemp_sync", I64, &[DOUBLE]);
     // fs.rmdirSync(path) — returns i32 status.
     module.declare_function("js_fs_rmdir_sync", I32, &[DOUBLE]);
+    // fs.createWriteStream(path) — returns NaN-boxed stream object.
+    module.declare_function("js_fs_create_write_stream", DOUBLE, &[DOUBLE]);
+    // fs.createReadStream(path[, options]) — returns NaN-boxed stream object.
+    module.declare_function("js_fs_create_read_stream", DOUBLE, &[DOUBLE]);
+    // fs.readFile(path, encoding, callback) — Node-compatible callback variant.
+    module.declare_function("js_fs_read_file_callback", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
     // Stats helper: method dispatcher called from the LLVM dispatch fast path.
     module.declare_function("js_fs_stats_is_file", DOUBLE, &[DOUBLE]);
     module.declare_function("js_fs_stats_is_directory", DOUBLE, &[DOUBLE]);
@@ -355,6 +364,9 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // Buffer.from(str, encoding) runtime helpers.
     module.declare_function("js_buffer_from_string", I64, &[I64, I32]);
     module.declare_function("js_encoding_tag_from_value", I32, &[DOUBLE]);
+    // Universal `.toString(encoding)` dispatch — branches on
+    // is_registered_buffer at runtime, falls back to js_jsvalue_to_string.
+    module.declare_function("js_value_to_string_with_encoding", I64, &[DOUBLE, I32]);
     module.declare_function("js_fs_unlink_sync", I32, &[DOUBLE]);
     module.declare_function("js_object_values", I64, &[I64]);
     module.declare_function("js_object_entries", I64, &[I64]);
@@ -448,6 +460,8 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_symbol_equals", I32, &[DOUBLE, DOUBLE]);
     module.declare_function("js_is_symbol", I32, &[DOUBLE]);
     module.declare_function("js_object_get_own_property_symbols", I64, &[DOUBLE]);
+    module.declare_function("js_object_set_symbol_property", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_object_get_symbol_property", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_object_create", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_freeze", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_seal", DOUBLE, &[DOUBLE]);

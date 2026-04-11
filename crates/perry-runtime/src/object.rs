@@ -1254,6 +1254,42 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         return JSValue::undefined();
     }
     unsafe {
+        // Buffers: BufferHeader is allocated via raw `alloc()` (no GcHeader)
+        // and tracked in BUFFER_REGISTRY. Detect first so the GC header check
+        // below doesn't read garbage one word before the BufferHeader.
+        // Route `.length` to `js_buffer_length` (matches the codegen path that
+        // routes through PropertyGet for chained `Buffer.from(...).length`
+        // expressions where the static type isn't recognized as Buffer).
+        if crate::buffer::is_registered_buffer(obj as usize) {
+            if !key.is_null() {
+                let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                let key_len = (*key).length as usize;
+                let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
+                if key_bytes == b"length" || key_bytes == b"byteLength" {
+                    let b = obj as *const crate::buffer::BufferHeader;
+                    return JSValue::number(crate::buffer::js_buffer_length(b) as f64);
+                }
+            }
+            return JSValue::undefined();
+        }
+        // Sets: SetHeader is allocated via raw `alloc()` (no GcHeader),
+        // so we can't safely read the byte preceding the pointer to
+        // determine its type. Detect via the SET_REGISTRY first and
+        // route `.size` to `js_set_size`. Other property accesses on a
+        // Set return undefined (matching Node behavior — Sets only have
+        // a `size` getter property).
+        if crate::set::is_registered_set(obj as usize) {
+            if !key.is_null() {
+                let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                let key_len = (*key).length as usize;
+                let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
+                if key_bytes == b"size" {
+                    let s = obj as *const crate::set::SetHeader;
+                    return JSValue::number(crate::set::js_set_size(s) as f64);
+                }
+            }
+            return JSValue::undefined();
+        }
         // Validate this is an ObjectHeader, not some other heap type.
         // Check GcHeader first (reliable for heap objects), then fallback to ObjectHeader.object_type
         // for static/const objects that don't have GcHeaders.
@@ -1333,6 +1369,62 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
                 if key_bytes == b"length" {
                     let s = obj as *const crate::StringHeader;
                     return JSValue::number((*s).length as f64);
+                }
+            }
+            return JSValue::undefined();
+        }
+        // Maps: handle `.size` for `obj.m.size` style access where m is
+        // a Map field stored in a plain object literal. Without this
+        // the dynamic property dispatch returns undefined.
+        if gc_type == crate::gc::GC_TYPE_MAP {
+            if !key.is_null() {
+                let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                let key_len = (*key).length as usize;
+                let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
+                if key_bytes == b"size" {
+                    let m = obj as *const crate::map::MapHeader;
+                    return JSValue::number(crate::map::js_map_size(m) as f64);
+                }
+            }
+            return JSValue::undefined();
+        }
+        // RegExp: RegExpHeader is allocated via GC_TYPE_OBJECT but tracked
+        // in REGEX_POINTERS. Detect and route `.source`, `.flags`,
+        // `.lastIndex`, `.global`, `.ignoreCase`, `.multiline`, `.sticky`,
+        // `.unicode`, `.dotAll` to the regex header fields. Must run
+        // before the generic object-field path so the keys_array lookup
+        // doesn't try to read the regex header bytes as ObjectHeader.
+        if gc_type == crate::gc::GC_TYPE_OBJECT && crate::regex::is_regex_pointer(obj as *const u8) {
+            if !key.is_null() {
+                let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                let key_len = (*key).length as usize;
+                let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
+                let re = obj as *const crate::regex::RegExpHeader;
+                match key_bytes {
+                    b"source" => {
+                        let s = crate::regex::js_regexp_get_source(re);
+                        return JSValue::from_bits(crate::js_nanbox_string(s as i64).to_bits());
+                    }
+                    b"flags" => {
+                        let s = crate::regex::js_regexp_get_flags(re);
+                        return JSValue::from_bits(crate::js_nanbox_string(s as i64).to_bits());
+                    }
+                    b"lastIndex" => {
+                        return JSValue::number((*re).last_index as f64);
+                    }
+                    b"global" => {
+                        return JSValue::bool((*re).global);
+                    }
+                    b"ignoreCase" => {
+                        return JSValue::bool((*re).case_insensitive);
+                    }
+                    b"multiline" => {
+                        return JSValue::bool((*re).multiline);
+                    }
+                    b"sticky" | b"unicode" | b"dotAll" | b"hasIndices" => {
+                        return JSValue::bool(false);
+                    }
+                    _ => return JSValue::undefined(),
                 }
             }
             return JSValue::undefined();
@@ -1920,6 +2012,51 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
         return false_val;
     }
 
+    // Built-in JS types Map / Set / RegExp / Date — Perry doesn't define
+    // user classes for these, so we use reserved class IDs and detect via
+    // the per-type registries (MAP_REGISTRY / SET_REGISTRY / REGEX_POINTERS)
+    // or, for Date, by checking that the value is a finite f64 timestamp.
+    const CLASS_ID_DATE: u32 = 0xFFFF0020;
+    const CLASS_ID_REGEXP: u32 = 0xFFFF0021;
+    const CLASS_ID_MAP: u32 = 0xFFFF0022;
+    const CLASS_ID_SET: u32 = 0xFFFF0023;
+    if class_id == CLASS_ID_DATE {
+        // A Perry Date is a raw f64 timestamp (no NaN-box tag, real f64).
+        // Accept any finite number that's not NaN. This is approximate
+        // but matches the only way Date values flow through Perry.
+        if !value.is_nan() && value.is_finite() {
+            return true_val;
+        }
+        return false_val;
+    }
+    if class_id == CLASS_ID_MAP {
+        if jsval.is_pointer() {
+            let addr = (bits & 0x0000_FFFF_FFFF_FFFF) as usize;
+            if crate::map::is_registered_map(addr) {
+                return true_val;
+            }
+        }
+        return false_val;
+    }
+    if class_id == CLASS_ID_SET {
+        if jsval.is_pointer() {
+            let addr = (bits & 0x0000_FFFF_FFFF_FFFF) as usize;
+            if crate::set::is_registered_set(addr) {
+                return true_val;
+            }
+        }
+        return false_val;
+    }
+    if class_id == CLASS_ID_REGEXP {
+        if jsval.is_pointer() {
+            let addr = (bits & 0x0000_FFFF_FFFF_FFFF) as usize;
+            if crate::regex::is_regex_pointer(addr as *const u8) {
+                return true_val;
+            }
+        }
+        return false_val;
+    }
+
     // Only objects (pointers) can be instances of classes
     if !jsval.is_pointer() {
         return false_val;
@@ -2213,8 +2350,14 @@ pub unsafe extern "C" fn js_native_call_method(
                         let result = crate::map::js_map_set(map, args[0], args[1]);
                         f64::from_bits(JSValue::pointer(result as *mut u8).bits())
                     }
-                    "has" if !args.is_empty() => crate::map::js_map_has(map, args[0]) as f64,
-                    "delete" if !args.is_empty() => crate::map::js_map_delete(map, args[0]) as f64,
+                    "has" if !args.is_empty() => {
+                        let r = crate::map::js_map_has(map, args[0]);
+                        f64::from_bits(JSValue::bool(r != 0).bits())
+                    }
+                    "delete" if !args.is_empty() => {
+                        let r = crate::map::js_map_delete(map, args[0]);
+                        f64::from_bits(JSValue::bool(r != 0).bits())
+                    }
                     "clear" => { crate::map::js_map_clear(map); f64::from_bits(crate::value::TAG_UNDEFINED) }
                     "size" => crate::map::js_map_size(map) as f64,
                     "entries" => f64::from_bits(JSValue::pointer(crate::map::js_map_entries(map) as *mut u8).bits()),
@@ -2236,8 +2379,14 @@ pub unsafe extern "C" fn js_native_call_method(
                         let result = crate::set::js_set_add(set, args[0]);
                         f64::from_bits(JSValue::pointer(result as *mut u8).bits())
                     }
-                    "has" if !args.is_empty() => crate::set::js_set_has(set, args[0]) as f64,
-                    "delete" if !args.is_empty() => crate::set::js_set_delete(set, args[0]) as f64,
+                    "has" if !args.is_empty() => {
+                        let r = crate::set::js_set_has(set, args[0]);
+                        f64::from_bits(JSValue::bool(r != 0).bits())
+                    }
+                    "delete" if !args.is_empty() => {
+                        let r = crate::set::js_set_delete(set, args[0]);
+                        f64::from_bits(JSValue::bool(r != 0).bits())
+                    }
                     "clear" => { crate::set::js_set_clear(set); f64::from_bits(crate::value::TAG_UNDEFINED) }
                     "size" => crate::set::js_set_size(set) as f64,
                     _ => f64::from_bits(crate::value::TAG_UNDEFINED),

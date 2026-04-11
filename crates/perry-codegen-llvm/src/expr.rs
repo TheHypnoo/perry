@@ -1364,27 +1364,53 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 return Ok(val_double);
             }
             // Fallback with runtime STRING_TAG check, matching IndexGet.
+            // Layout: first runtime-check whether the index is a Symbol
+            // (POINTER_TAG with SYMBOL_MAGIC). If so, dispatch to the
+            // symbol-property side table. Otherwise fall through to the
+            // string/numeric dispatch.
             let obj_box = lower_expr(ctx, object)?;
             let idx_box = lower_expr(ctx, index)?;
             let val_double = lower_expr(ctx, value)?;
             let blk = ctx.block();
             let obj_handle = unbox_to_i64(blk, &obj_box);
+            // Symbol check: js_is_symbol returns 1 if idx_box is a Symbol.
+            let is_sym_i32 = blk.call(I32, "js_is_symbol", &[(DOUBLE, &idx_box)]);
+            let is_sym_bit = blk.icmp_ne(I32, &is_sym_i32, "0");
+            let sym_set = ctx.new_block("iset.sym");
+            let nonsym_set = ctx.new_block("iset.nonsym");
+            let str_set = ctx.new_block("iset.str");
+            let num_set = ctx.new_block("iset.num");
+            let set_merge = ctx.new_block("iset.merge");
+            let sym_lbl = ctx.block_label(sym_set);
+            let nonsym_lbl = ctx.block_label(nonsym_set);
+            let str_lbl = ctx.block_label(str_set);
+            let num_lbl = ctx.block_label(num_set);
+            let merge_lbl = ctx.block_label(set_merge);
+            ctx.block().cond_br(&is_sym_bit, &sym_lbl, &nonsym_lbl);
+            // Symbol key → side-table set.
+            ctx.current_block = sym_set;
+            ctx.block().call(
+                DOUBLE,
+                "js_object_set_symbol_property",
+                &[(DOUBLE, &obj_box), (DOUBLE, &idx_box), (DOUBLE, &val_double)],
+            );
+            ctx.block().br(&merge_lbl);
+            // Not a symbol — recompute idx_bits in this block (LLVM SSA, no
+            // dominance issue: each branch starts fresh).
+            ctx.current_block = nonsym_set;
+            let blk = ctx.block();
             let idx_bits = blk.bitcast_double_to_i64(&idx_box);
             let top16 = blk.lshr(I64, &idx_bits, "48");
             let is_str_tag = blk.icmp_eq(I64, &top16, "32767");
             let lower48 = blk.and(I64, &idx_bits, POINTER_MASK_I64);
             let is_valid_ptr = blk.icmp_ugt(I64, &lower48, "4095");
             let is_str = blk.and(crate::types::I1, &is_str_tag, &is_valid_ptr);
-            let str_set = ctx.new_block("iset.str");
-            let num_set = ctx.new_block("iset.num");
-            let set_merge = ctx.new_block("iset.merge");
-            let str_lbl = ctx.block_label(str_set);
-            let num_lbl = ctx.block_label(num_set);
-            let merge_lbl = ctx.block_label(set_merge);
             ctx.block().cond_br(&is_str, &str_lbl, &num_lbl);
             // String key → object field set.
             ctx.current_block = str_set;
-            let key_handle = ctx.block().and(I64, &idx_bits, POINTER_MASK_I64);
+            let blk = ctx.block();
+            let idx_bits2 = blk.bitcast_double_to_i64(&idx_box);
+            let key_handle = blk.and(I64, &idx_bits2, POINTER_MASK_I64);
             ctx.block().call_void(
                 "js_object_set_field_by_name",
                 &[(I64, &obj_handle), (I64, &key_handle), (DOUBLE, &val_double)],
@@ -2420,6 +2446,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // registry and emit a direct call. Static methods don't take
         // a `this` parameter (unlike instance methods).
         Expr::StaticMethodCall { class_name, method_name, args } => {
+            // Built-in static methods that the runtime provides directly.
+            if class_name == "AbortSignal" && method_name == "timeout" {
+                let ms = if !args.is_empty() {
+                    lower_expr(ctx, &args[0])?
+                } else {
+                    double_literal(0.0)
+                };
+                let blk = ctx.block();
+                let signal_handle = blk.call(I64, "js_abort_signal_timeout", &[(DOUBLE, &ms)]);
+                return Ok(nanbox_pointer_inline(blk, &signal_handle));
+            }
             let key = (class_name.clone(), method_name.clone());
             if let Some(fn_name) = ctx.methods.get(&key).cloned() {
                 let mut lowered: Vec<String> = Vec::with_capacity(args.len());
@@ -2530,6 +2567,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 // in that same registry so `encoded instanceof Uint8Array`
                 // returns true.
                 "Uint8Array" | "Buffer" => 0xFFFF0004u32,
+                // Built-in JS types: Date, RegExp, Map, Set. The runtime
+                // detects these via per-type registries (or, for Date,
+                // by checking that the value is a finite f64 timestamp).
+                "Date" => 0xFFFF0020u32,
+                "RegExp" => 0xFFFF0021u32,
+                "Map" => 0xFFFF0022u32,
+                "Set" => 0xFFFF0023u32,
                 _ => ctx.class_ids.get(ty).copied().unwrap_or(0),
             };
             let cid_str = cid.to_string();
@@ -3900,10 +3944,14 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_string_inline(blk, &h))
         }
         Expr::ObjectGetOwnPropertySymbols(obj) => {
+            // Runtime takes a NaN-boxed f64 (the runtime decl is `[DOUBLE]`),
+            // returns a raw `*mut ArrayHeader` as i64. Pass the boxed value
+            // directly — do NOT unbox to i64, that would put the raw pointer
+            // in an integer register while the runtime expects it in a float
+            // register.
             let o_box = lower_expr(ctx, obj)?;
             let blk = ctx.block();
-            let o_handle = unbox_to_i64(blk, &o_box);
-            let arr = blk.call(I64, "js_object_get_own_property_symbols", &[(I64, &o_handle)]);
+            let arr = blk.call(I64, "js_object_get_own_property_symbols", &[(DOUBLE, &o_box)]);
             Ok(nanbox_pointer_inline(blk, &arr))
         }
         Expr::TextEncoderNew => {
@@ -4389,7 +4437,55 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let h = blk.call(I64, "js_os_eol", &[]);
             Ok(nanbox_string_inline(blk, &h))
         }
-        Expr::BufferFrom { data, .. } => lower_expr(ctx, data),
+        Expr::BufferFrom { data, encoding } => {
+            // Phase H buffer: call js_buffer_from_string(str_handle_i64, enc_i32)
+            // which returns a raw *mut BufferHeader (i64). NaN-box the result
+            // with POINTER_TAG so the chained `.toString()` / `.length` paths
+            // (which dispatch via `is_registered_buffer` after stripping the
+            // tag) recognize the receiver as a buffer.
+            //
+            // The encoding argument in JS/TS is a STRING ('utf8'/'hex'/'base64'),
+            // never a number. Compile-time fold string literals; for non-literal
+            // encoding values (e.g. `Buffer.from(b64, enc)` where `enc: string`)
+            // call the runtime helper `js_encoding_tag_from_value`.
+            let data_box = lower_expr(ctx, data)?;
+            let enc_tag_i32 = if let Some(enc_expr) = encoding {
+                if let Expr::String(s) = enc_expr.as_ref() {
+                    let lower = s.to_ascii_lowercase();
+                    let tag: i32 = match lower.as_str() {
+                        "utf8" | "utf-8" | "ascii" | "latin1" | "binary" => 0,
+                        "hex" => 1,
+                        "base64" | "base64url" => 2,
+                        _ => bail!(
+                            "perry-codegen-llvm: unknown Buffer encoding \"{}\": expected one of utf8, utf-8, hex, base64, base64url, ascii, latin1, binary",
+                            s
+                        ),
+                    };
+                    tag.to_string()
+                } else {
+                    let enc_box = lower_expr(ctx, enc_expr)?;
+                    let blk = ctx.block();
+                    blk.call(I32, "js_encoding_tag_from_value", &[(DOUBLE, &enc_box)])
+                }
+            } else {
+                "0".to_string()
+            };
+            let blk = ctx.block();
+            // Extract the raw string pointer from the (NaN-boxed) data value.
+            // `js_get_string_pointer_unified` handles both STRING_TAG-boxed
+            // strings and bare pointers, returning a clean i64.
+            let str_handle = blk.call(
+                I64,
+                "js_get_string_pointer_unified",
+                &[(DOUBLE, &data_box)],
+            );
+            let buf_handle = blk.call(
+                I64,
+                "js_buffer_from_string",
+                &[(I64, &str_handle), (I32, &enc_tag_i32)],
+            );
+            Ok(nanbox_pointer_inline(blk, &buf_handle))
+        }
         Expr::BufferAlloc { size, fill } => {
             // Phase H: call js_buffer_alloc(size, fill) which returns
             // a raw *mut BufferHeader i64. NaN-box with POINTER_TAG
@@ -5171,18 +5267,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
                 }
                 "accessSync" if args.len() >= 1 => {
-                    // Node throws on inaccessible paths; Perry's LLVM
-                    // backend doesn't have a clean path to throw from
-                    // runtime helpers yet, so we return undefined
-                    // unconditionally. The test's missing-path case in
-                    // a try/catch will still see `accessBad = false`.
+                    // Node throws on inaccessible paths. We dispatch
+                    // through `js_fs_access_sync_throw` which calls
+                    // `js_throw` on failure, longjmping into the
+                    // nearest enclosing try/catch. Returns NaN-boxed
+                    // undefined on success.
                     let p = lower_expr(ctx, &args[0])?;
-                    let _ = ctx.block().call(
-                        I32,
-                        "js_fs_access_sync",
+                    Ok(ctx.block().call(
+                        DOUBLE,
+                        "js_fs_access_sync_throw",
                         &[(DOUBLE, &p)],
-                    );
-                    Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+                    ))
                 }
                 "realpathSync" if args.len() >= 1 => {
                     let p = lower_expr(ctx, &args[0])?;
@@ -5212,6 +5307,53 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         &[(DOUBLE, &p)],
                     );
                     Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+                }
+                "createWriteStream" if args.len() >= 1 => {
+                    // Lower the options arg (if any) for side effects
+                    // but ignore it — the runtime defaults to utf-8.
+                    let p = lower_expr(ctx, &args[0])?;
+                    if args.len() >= 2 {
+                        let _ = lower_expr(ctx, &args[1])?;
+                    }
+                    Ok(ctx.block().call(
+                        DOUBLE,
+                        "js_fs_create_write_stream",
+                        &[(DOUBLE, &p)],
+                    ))
+                }
+                "createReadStream" if args.len() >= 1 => {
+                    let p = lower_expr(ctx, &args[0])?;
+                    if args.len() >= 2 {
+                        let _ = lower_expr(ctx, &args[1])?;
+                    }
+                    Ok(ctx.block().call(
+                        DOUBLE,
+                        "js_fs_create_read_stream",
+                        &[(DOUBLE, &p)],
+                    ))
+                }
+                "readFile" if args.len() >= 3 => {
+                    // Node `fs.readFile(path, encoding, callback)` —
+                    // sync read + immediate callback invocation.
+                    let p = lower_expr(ctx, &args[0])?;
+                    let enc = lower_expr(ctx, &args[1])?;
+                    let cb = lower_expr(ctx, &args[2])?;
+                    Ok(ctx.block().call(
+                        DOUBLE,
+                        "js_fs_read_file_callback",
+                        &[(DOUBLE, &p), (DOUBLE, &enc), (DOUBLE, &cb)],
+                    ))
+                }
+                "readFile" if args.len() >= 2 => {
+                    // Node `fs.readFile(path, callback)` (no encoding).
+                    let p = lower_expr(ctx, &args[0])?;
+                    let cb = lower_expr(ctx, &args[1])?;
+                    let undef = double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED));
+                    Ok(ctx.block().call(
+                        DOUBLE,
+                        "js_fs_read_file_callback",
+                        &[(DOUBLE, &p), (DOUBLE, &undef), (DOUBLE, &cb)],
+                    ))
                 }
                 _ => lower_call(ctx, callee, args),
             }
