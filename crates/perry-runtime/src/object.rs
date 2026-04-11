@@ -852,7 +852,15 @@ pub extern "C" fn js_build_class_keys_array(
 /// Allocate a class instance with a shape-cached keys array for field names.
 /// This allows dynamic property access (obj.field1) to work on class instances,
 /// not just object literals. Uses class_id as the shape_id for caching.
+///
+/// Marked `#[inline]` so the LLVM bitcode-link path
+/// (`PERRY_LLVM_BITCODE_LINK=1`) can inline the body into hot
+/// allocation loops, eliminating the function-call overhead and
+/// letting LLVM constant-fold the SHAPE_INLINE_CACHE slot index when
+/// `class_id` is a compile-time constant (which it always is at the
+/// `new ClassName()` call site).
 #[no_mangle]
+#[inline]
 pub extern "C" fn js_object_alloc_class_with_keys(
     class_id: u32,
     parent_class_id: u32,

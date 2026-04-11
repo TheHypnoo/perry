@@ -1271,6 +1271,7 @@ pub extern "C" fn js_jsvalue_compare(a: f64, b: f64) -> i32 {
 /// Everything else is truthy.
 /// Returns 1 if truthy, 0 if falsy.
 #[no_mangle]
+#[inline]
 pub extern "C" fn js_is_truthy(value: f64) -> i32 {
     let bits = value.to_bits();
 
