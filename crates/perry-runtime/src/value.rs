@@ -859,6 +859,15 @@ pub extern "C" fn js_jsvalue_to_string(value: f64) -> *mut crate::string::String
                         as *mut crate::string::StringHeader
                 };
             }
+            // Consult `[Symbol.toPrimitive]("string")` if the object has a
+            // custom toPrimitive method registered in the symbol side-table.
+            // A changed result means the user-defined method produced a
+            // string-hint primitive — recurse so strings pass through as-is
+            // and numbers get js_number_to_string.
+            let primitive = unsafe { crate::symbol::js_to_primitive(value, 2) };
+            if primitive.to_bits() != value.to_bits() {
+                return js_jsvalue_to_string(primitive);
+            }
             // Buffers: BufferHeader has no GC header, so we must detect via
             // BUFFER_REGISTRY before computing gc_header (which would read
             // garbage one word before the buffer). `Buffer.toString()` with

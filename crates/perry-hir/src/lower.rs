@@ -9056,9 +9056,19 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             let mut props = Vec::new();
             // Computed keys whose value can't be folded to a string at HIR time
             // (typically symbol-typed locals like `{ [symProp]: 42 }`). Deferred
-            // and emitted as IndexSet stmts inside an IIFE wrapper after the
+            // and emitted as statements inside an IIFE wrapper after the
             // static-key Object literal is built.
-            let mut computed_post_init: Vec<(Expr, Expr)> = Vec::new();
+            //
+            // For `Prop::Method` with a computed key whose body uses `this`
+            // (e.g. `{ [Symbol.toPrimitive](hint) { return this.value; } }`),
+            // we emit a dedicated `js_object_set_symbol_method` runtime call
+            // that BOTH stores the closure in the symbol side-table AND
+            // patches the closure's reserved `this` slot with the object.
+            enum PostInit {
+                SetValue { key: Expr, value: Expr },
+                SetMethodWithThis { key: Expr, closure: Expr },
+            }
+            let mut computed_post_init: Vec<PostInit> = Vec::new();
             for prop in &obj.props {
                 match prop {
                     ast::PropOrSpread::Prop(prop) => {
@@ -9122,7 +9132,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     }
                                     KeyResolution::Dynamic(key_expr) => {
                                         let value = lower_expr(ctx, &kv.value)?;
-                                        computed_post_init.push((key_expr, value));
+                                        computed_post_init.push(PostInit::SetValue { key: key_expr, value });
                                     }
                                 }
                             }
@@ -9142,11 +9152,35 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             }
                             ast::Prop::Method(method) => {
                                 // Inline method: { help(): string { ... } }
-                                let key = match &method.key {
-                                    ast::PropName::Ident(ident) => ident.sym.to_string(),
-                                    ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                // Computed keys (e.g. `[Symbol.toPrimitive](hint) {}`)
+                                // get routed through the IIFE wrapper's
+                                // SetMethodWithThis post-init, which emits a
+                                // `js_object_set_symbol_method` call that also
+                                // patches the closure's reserved `this` slot.
+                                enum MethodKey {
+                                    Static(String),
+                                    Computed(Expr),
+                                }
+                                let method_key = match &method.key {
+                                    ast::PropName::Ident(ident) => {
+                                        MethodKey::Static(ident.sym.to_string())
+                                    }
+                                    ast::PropName::Str(s) => {
+                                        MethodKey::Static(s.value.as_str().unwrap_or("").to_string())
+                                    }
+                                    ast::PropName::Computed(computed) => {
+                                        match lower_expr(ctx, computed.expr.as_ref()) {
+                                            Ok(e) => MethodKey::Computed(e),
+                                            Err(_) => continue,
+                                        }
+                                    }
                                     _ => continue,
                                 };
+                                let key_label: String = match &method_key {
+                                    MethodKey::Static(s) => s.clone(),
+                                    MethodKey::Computed(_) => format!("computed_{}", ctx.next_func_id),
+                                };
+                                let key: String = key_label.clone();
                                 let func_id = ctx.fresh_func();
                                 // Use a unique synthetic name to avoid collisions
                                 let func_name = format!("__obj_method_{}_{}", key, func_id);
@@ -9206,7 +9240,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 // with the object pointer.
                                 let uses_this = closure_uses_this(&body);
 
-                                if captures.is_empty() && !uses_this {
+                                let value_expr: Expr = if captures.is_empty() && !uses_this {
                                     // No captures and no `this`: keep as standalone Function + FuncRef
                                     ctx.register_func(func_name.clone(), func_id);
                                     let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
@@ -9225,7 +9259,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         captures: Vec::new(),
                                         decorators: Vec::new(),
                                     });
-                                    props.push((key, Expr::FuncRef(func_id)));
+                                    Expr::FuncRef(func_id)
                                 } else {
                                     // Has captures: emit as Closure
                                     let mut all_assigned = Vec::new();
@@ -9237,13 +9271,13 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         .filter(|id| assigned_set.contains(id) || ctx.var_hoisted_ids.contains(id))
                                         .copied()
                                         .collect();
-                                    let captures_this = closure_uses_this(&body);
+                                    let captures_this = uses_this;
                                     let enclosing_class = if captures_this {
                                         ctx.current_class.clone()
                                     } else {
                                         None
                                     };
-                                    props.push((key, Expr::Closure {
+                                    Expr::Closure {
                                         func_id,
                                         params,
                                         return_type,
@@ -9253,7 +9287,25 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         captures_this,
                                         enclosing_class,
                                         is_async: method.function.is_async,
-                                    }));
+                                    }
+                                };
+                                match method_key {
+                                    MethodKey::Static(key_str) => {
+                                        props.push((key_str, value_expr));
+                                    }
+                                    MethodKey::Computed(key_expr) => {
+                                        if uses_this {
+                                            computed_post_init.push(PostInit::SetMethodWithThis {
+                                                key: key_expr,
+                                                closure: value_expr,
+                                            });
+                                        } else {
+                                            computed_post_init.push(PostInit::SetValue {
+                                                key: key_expr,
+                                                value: value_expr,
+                                            });
+                                        }
+                                    }
                                 }
                             }
                             _ => {}
@@ -9291,12 +9343,34 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 is_rest: false,
             };
             let mut body: Vec<Stmt> = Vec::with_capacity(computed_post_init.len() + 1);
-            for (key_expr, value_expr) in computed_post_init {
-                body.push(Stmt::Expr(Expr::IndexSet {
-                    object: Box::new(Expr::LocalGet(param_id)),
-                    index: Box::new(key_expr),
-                    value: Box::new(value_expr),
-                }));
+            for init in computed_post_init {
+                match init {
+                    PostInit::SetValue { key, value } => {
+                        body.push(Stmt::Expr(Expr::IndexSet {
+                            object: Box::new(Expr::LocalGet(param_id)),
+                            index: Box::new(key),
+                            value: Box::new(value),
+                        }));
+                    }
+                    PostInit::SetMethodWithThis { key, closure } => {
+                        // Emit a direct call to the runtime helper that
+                        // stores the closure in the symbol side-table AND
+                        // patches its reserved `this` slot with __o.
+                        body.push(Stmt::Expr(Expr::Call {
+                            callee: Box::new(Expr::ExternFuncRef {
+                                name: "js_object_set_symbol_method".to_string(),
+                                param_types: Vec::new(),
+                                return_type: Type::Any,
+                            }),
+                            args: vec![
+                                Expr::LocalGet(param_id),
+                                key,
+                                closure,
+                            ],
+                            type_args: Vec::new(),
+                        }));
+                    }
+                }
             }
             body.push(Stmt::Return(Some(Expr::LocalGet(param_id))));
             ctx.exit_scope(scope_mark);

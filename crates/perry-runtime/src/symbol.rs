@@ -61,6 +61,64 @@ static SYMBOL_REGISTRY: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None)
 // GcHeader byte.
 static SYMBOL_POINTERS: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
 
+// Pre-allocated well-known symbols (Symbol.toPrimitive, Symbol.hasInstance,
+// Symbol.toStringTag, Symbol.iterator, Symbol.asyncIterator). Allocated once
+// on first access and cached forever. These are distinct from the
+// `Symbol.for(key)` registry — `Symbol.keyFor(wk)` must return undefined
+// for spec compliance, so they live in their own map keyed by the
+// well-known name ("toPrimitive" etc.).
+//
+// HIR lowers `Symbol.toPrimitive` to `Expr::SymbolFor(Expr::String("@@__perry_wk_toPrimitive"))`
+// and the runtime's `js_symbol_for` sniffs the `@@__perry_wk_` prefix and
+// returns the cached pointer.
+pub(crate) const WK_PREFIX: &str = "@@__perry_wk_";
+static WELL_KNOWN_SYMBOLS: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
+
+/// Lazily allocate & cache a well-known symbol by its short name ("toPrimitive").
+/// Returns the pointer to the cached `SymbolHeader`. Registered in
+/// `SYMBOL_POINTERS` so `js_is_symbol` / `is_registered_symbol` recognize it.
+pub fn well_known_symbol(short_name: &str) -> *mut SymbolHeader {
+    let mut guard = WELL_KNOWN_SYMBOLS.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(HashMap::new());
+    }
+    let cache = guard.as_mut().unwrap();
+    if let Some(&ptr_usize) = cache.get(short_name) {
+        return ptr_usize as *mut SymbolHeader;
+    }
+    // First use: allocate a persistent (leaked) SymbolHeader with the short
+    // name as its description. `registered = 0` so `Symbol.keyFor` returns
+    // undefined.
+    let desc_bytes = short_name.as_bytes();
+    let desc_ptr = unsafe { js_string_from_bytes(desc_bytes.as_ptr(), desc_bytes.len() as u32) };
+    let boxed = Box::new(SymbolHeader {
+        magic: SYMBOL_MAGIC,
+        registered: 0,
+        description: desc_ptr,
+        id: next_id(),
+    });
+    let sym_ptr = Box::into_raw(boxed);
+    cache.insert(short_name.to_string(), sym_ptr as usize);
+    drop(guard);
+    register_symbol_pointer(sym_ptr as usize);
+    sym_ptr
+}
+
+/// O(1) check whether a raw pointer is a well-known symbol (Symbol.toPrimitive etc.).
+/// Used by `js_symbol_key_for` so the spec-mandated `undefined` return for
+/// well-known symbols is preserved.
+pub fn is_well_known_symbol(ptr: usize) -> bool {
+    let guard = WELL_KNOWN_SYMBOLS.lock().unwrap();
+    if let Some(cache) = guard.as_ref() {
+        for &p in cache.values() {
+            if p == ptr {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn register_symbol_pointer(ptr: usize) {
     let mut guard = SYMBOL_POINTERS.lock().unwrap();
     if guard.is_none() {
@@ -200,6 +258,16 @@ pub unsafe extern "C" fn js_symbol_for(key_f64: f64) -> f64 {
         None => return f64::from_bits(TAG_UNDEFINED),
     };
 
+    // Well-known symbol sentinel: HIR lowers `Symbol.toPrimitive` etc. to
+    // `SymbolFor(String("@@__perry_wk_toPrimitive"))`. Detect the prefix
+    // and delegate to the well-known cache instead of polluting the
+    // Symbol.for registry. These symbols have `registered=0` so
+    // `Symbol.keyFor()` returns undefined for them.
+    if let Some(short_name) = key.strip_prefix(WK_PREFIX) {
+        let wk_ptr = well_known_symbol(short_name);
+        return f64::from_bits(POINTER_TAG | (wk_ptr as u64 & POINTER_MASK));
+    }
+
     let mut guard = SYMBOL_REGISTRY.lock().unwrap();
     if guard.is_none() {
         *guard = Some(HashMap::new());
@@ -243,6 +311,10 @@ pub unsafe extern "C" fn js_symbol_key_for(sym_f64: f64) -> f64 {
         return f64::from_bits(TAG_UNDEFINED);
     }
     if (*sym_ptr).magic != SYMBOL_MAGIC {
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+    // Well-known symbols (Symbol.toPrimitive, etc.) are NOT in the registry.
+    if is_well_known_symbol(sym_ptr as usize) {
         return f64::from_bits(TAG_UNDEFINED);
     }
     if (*sym_ptr).registered == 0 {
@@ -415,6 +487,105 @@ pub unsafe extern "C" fn js_object_get_own_property_symbols(obj_f64: f64) -> i64
 pub unsafe extern "C" fn js_symbol_typeof() -> *mut StringHeader {
     let s = b"symbol";
     js_string_from_bytes(s.as_ptr(), s.len() as u32)
+}
+
+/// Set a method on an object keyed by a symbol. Mirrors
+/// `js_object_set_symbol_property` but ALSO binds the closure's reserved
+/// `this` slot to `obj_f64` so `[Symbol.toPrimitive](hint) { return this.value }`
+/// reads the container when called from `js_to_primitive` at runtime.
+///
+/// Layout assumption: the last capture slot is the reserved `this` slot
+/// (matches `lower_object_literal`'s patching for static-key methods).
+/// Only used by HIR for computed-key method props with `captures_this=true`.
+#[no_mangle]
+pub unsafe extern "C" fn js_object_set_symbol_method(
+    obj_f64: f64,
+    sym_f64: f64,
+    closure_f64: f64,
+) -> f64 {
+    let c_bits = closure_f64.to_bits();
+    let c_tag = c_bits & 0xFFFF_0000_0000_0000;
+    if c_tag == POINTER_TAG {
+        let c_ptr = (c_bits & POINTER_MASK) as *mut crate::closure::ClosureHeader;
+        if !c_ptr.is_null() && (c_ptr as usize) >= 0x1000 {
+            // Read the type_tag at offset 12 (layout: func_ptr u64, capture_count u32, type_tag u32).
+            let type_tag =
+                std::ptr::read_volatile((c_ptr as *const u8).add(12) as *const u32);
+            if type_tag == crate::closure::CLOSURE_MAGIC {
+                let raw_count = (*c_ptr).capture_count;
+                let real_count = crate::closure::real_capture_count(raw_count);
+                if real_count >= 1 {
+                    let captures_ptr = (c_ptr as *mut u8)
+                        .add(std::mem::size_of::<crate::closure::ClosureHeader>())
+                        as *mut f64;
+                    *captures_ptr.add((real_count - 1) as usize) = obj_f64;
+                }
+            }
+        }
+    }
+    js_object_set_symbol_property(obj_f64, sym_f64, closure_f64)
+}
+
+/// `ToPrimitive(value, hint)` — if `value` is an object with a
+/// `[Symbol.toPrimitive]` method registered in the symbol side-table, call
+/// it with the appropriate hint string ("number" / "string" / "default")
+/// and return the primitive result. Otherwise returns `value` unchanged.
+///
+/// `hint`: 0 = default, 1 = number, 2 = string.
+///
+/// Used by `js_number_coerce` (unary `+`, binary `+` numeric coercion),
+/// `js_jsvalue_to_string` (template literals, String(x)), and the
+/// lower_string_coerce_concat path.
+#[no_mangle]
+pub unsafe extern "C" fn js_to_primitive(value: f64, hint: i32) -> f64 {
+    let bits = value.to_bits();
+    let tag = bits & 0xFFFF_0000_0000_0000;
+    if tag != POINTER_TAG {
+        return value;
+    }
+    let obj_ptr = (bits & POINTER_MASK) as usize;
+    if obj_ptr < 0x1000 {
+        return value;
+    }
+    // Skip symbols / buffers / arrays — they have their own coercion rules.
+    if is_registered_symbol(obj_ptr) {
+        return value;
+    }
+    // Look up obj[Symbol.toPrimitive].
+    let wk_ptr = well_known_symbol("toPrimitive");
+    let sym_f64 = f64::from_bits(POINTER_TAG | (wk_ptr as u64 & POINTER_MASK));
+    let method = js_object_get_symbol_property(value, sym_f64);
+    if method.to_bits() == TAG_UNDEFINED {
+        return value;
+    }
+    // Method must be a closure pointer.
+    let method_bits = method.to_bits();
+    let method_tag = method_bits & 0xFFFF_0000_0000_0000;
+    if method_tag != POINTER_TAG {
+        return value;
+    }
+    let closure_ptr = (method_bits & POINTER_MASK) as *const crate::closure::ClosureHeader;
+    if closure_ptr.is_null() || (closure_ptr as usize) < 0x1000 {
+        return value;
+    }
+    // Validate CLOSURE_MAGIC before calling.
+    let type_tag =
+        std::ptr::read_volatile((closure_ptr as *const u8).add(12) as *const u32);
+    if type_tag != crate::closure::CLOSURE_MAGIC {
+        return value;
+    }
+    let hint_str: &[u8] = match hint {
+        1 => b"number",
+        2 => b"string",
+        _ => b"default",
+    };
+    let hint_ptr = js_string_from_bytes(hint_str.as_ptr(), hint_str.len() as u32);
+    let hint_f64 = f64::from_bits(STRING_TAG | (hint_ptr as u64 & POINTER_MASK));
+    let result = crate::closure::js_closure_call1(closure_ptr, hint_f64);
+    // Spec says the return value must be a primitive; if it's still an
+    // object pointer, that's a TypeError in JS, but we just return it
+    // as-is and let the caller fall back.
+    result
 }
 
 /// Compare two Symbol JSValues for equality. Two symbols are equal iff they

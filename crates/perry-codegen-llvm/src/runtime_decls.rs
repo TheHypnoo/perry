@@ -1422,4 +1422,22 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_new_from_handle", DOUBLE, &[DOUBLE, I64, I64]);
     module.declare_function("js_new_instance", DOUBLE, &[I64, I64, I64, I64, I64]);
     module.declare_function("js_runtime_init", VOID, &[]);
+
+    // ========== Well-known Symbol conversion hooks ==========
+    // Triggered by:
+    //   - `js_object_set_symbol_method`: HIR IIFE wrapper for object-literal
+    //     computed-key methods whose closure captures `this`
+    //     (e.g. `{ [Symbol.toPrimitive](hint) { return this.value; } }`).
+    //     Stores the closure AND patches its reserved `this` slot with obj.
+    //   - `js_to_primitive`: consulted by `js_number_coerce` and
+    //     `js_jsvalue_to_string` to route through a user-defined
+    //     `[Symbol.toPrimitive]` method when the value is an object. Called
+    //     indirectly from within the runtime; declared here so HIR
+    //     `Call(ExternFuncRef("js_to_primitive"), ...)` can also call it.
+    module.declare_function(
+        "js_object_set_symbol_method",
+        DOUBLE,
+        &[DOUBLE, DOUBLE, DOUBLE],
+    );
+    module.declare_function("js_to_primitive", DOUBLE, &[DOUBLE, I32]);
 }

@@ -1174,7 +1174,14 @@ pub extern "C" fn js_number_coerce(value: f64) -> f64 {
         let ptr = jsval.as_bigint_ptr();
         crate::bigint::js_bigint_to_f64(ptr)
     } else if jsval.is_pointer() {
-        // Object → NaN (can't convert object to number directly)
+        // Object → consult [Symbol.toPrimitive]("number") first; if the
+        // object has a custom toPrimitive method, recurse with the result.
+        // Otherwise returns NaN.
+        let primitive = unsafe { crate::symbol::js_to_primitive(value, 1) };
+        if primitive.to_bits() != value.to_bits() {
+            // toPrimitive returned something different — re-coerce.
+            return js_number_coerce(primitive);
+        }
         f64::NAN
     } else {
         // Already a number
