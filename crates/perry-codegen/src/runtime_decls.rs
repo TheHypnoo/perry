@@ -281,6 +281,21 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
         I64,
         &[I32, I32, I32, PTR, I32],
     );
+    // Fast class allocator that takes a pre-built keys_array pointer
+    // directly, bypassing the per-call SHAPE_CACHE lookup. The codegen
+    // emits one `js_build_class_keys_array` call at module init per
+    // class, stores the result in a per-class global, then uses this
+    // function on every `new ClassName()` call.
+    module.declare_function(
+        "js_object_alloc_class_inline_keys",
+        I64,
+        &[I32, I32, I32, I64],
+    );
+    module.declare_function(
+        "js_build_class_keys_array",
+        I64,
+        &[I32, I32, PTR, I32],
+    );
     module.declare_function("js_object_delete_field", I32, &[I64, I64]);
     // js_eq takes JSValue (#[repr(transparent)] u64) for both
     // params + return — i64 in the ABI, not double.
