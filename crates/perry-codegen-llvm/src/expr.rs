@@ -4494,15 +4494,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             ctx.block().cond_br(&is_pending, &wait_label, &settled_label);
 
             // === wait ===
-            // Note: Cranelift also calls `js_stdlib_process_pending`
-            // here for mysql2/pg/etc. async resolutions, but that
-            // symbol gets dead-stripped from libperry_stdlib.a when
-            // no other caller in the runtime uses it. Until Phase J
-            // bitcode-link mode lands, drop the call. Pure-Promise
-            // tests still work because js_promise_run_microtasks is
-            // not stripped (it's called from the CLI event loop).
+            // Drive microtasks AND pending timers on each tick so that
+            // `await new Promise(r => setTimeout(r, 1))` and similar
+            // patterns eventually resolve. Without the timer ticks the
+            // await loop busy-waits forever.
             ctx.current_block = wait_idx;
             ctx.block().call_void("js_promise_run_microtasks", &[]);
+            let _ = ctx.block().call(I32, "js_timer_tick", &[]);
+            let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
+            let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
             let one_ms = "1.0".to_string();
             ctx.block().call_void("js_sleep_ms", &[(DOUBLE, &one_ms)]);
             ctx.block().br(&check_label);

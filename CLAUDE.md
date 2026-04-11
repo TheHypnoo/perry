@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.130
+**Current Version:** 0.4.131
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.131 (llvm-backend)
+- feat: `setTimeout(cb, delay)` and `setInterval(cb, delay)` now wire through to the runtime's `js_set_timeout_callback` and `setInterval` extern functions instead of falling through the ExternFuncRef soft fallback (which returned 0.0). `lower_call.rs` intercepts the JS global names explicitly.
+- fix: `Expr::Await` busy-wait loop now calls `js_timer_tick`, `js_callback_timer_tick`, and `js_interval_timer_tick` in addition to `js_promise_run_microtasks` so that `await new Promise(r => setTimeout(r, 1))` eventually fires the timer and resolves the promise. Without this the setTimeout callback never ran and the await spun forever.
+- `test_gap_encoding_timers` CRASH → DIFF (12). `test_gap_node_fs` still hangs on another code path (down to 3 CRASH from 4).
 
 ### v0.4.130 (llvm-backend)
 - feat: `new Promise((resolve, reject) => {...})` now runs the executor via `js_promise_new_with_executor`. Previously `lower_builtin_new` had no Promise case, so `new Promise(...)` fell through to `js_object_alloc` which returned an empty object — the executor callback never ran, meaning `new Promise(r => { r(42); })` produced an unresolved promise. `test_gap_node_process` DIFF 2 → MATCH.

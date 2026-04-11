@@ -147,6 +147,38 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
     // direct LLVM call to its scoped name and the system linker
     // resolves the symbol when the .o files are linked together.
     if let Expr::ExternFuncRef { name, .. } = callee {
+        // Map JS global names (setTimeout, queueMicrotask, etc.) to the
+        // right runtime C functions. These aren't `js_*` prefixed in the
+        // HIR but need to call specific runtime entrypoints with the
+        // right signature. Handle them explicitly before the generic
+        // `js_*` pass-through and the import-map fallback.
+        match name.as_str() {
+            "setTimeout" if args.len() == 2 => {
+                let cb_box = lower_expr(ctx, &args[0])?;
+                let delay_box = lower_expr(ctx, &args[1])?;
+                let blk = ctx.block();
+                let cb_handle = unbox_to_i64(blk, &cb_box);
+                let id = blk.call(
+                    I64,
+                    "js_set_timeout_callback",
+                    &[(I64, &cb_handle), (DOUBLE, &delay_box)],
+                );
+                return Ok(nanbox_pointer_inline(blk, &id));
+            }
+            "setInterval" if args.len() == 2 => {
+                let cb_box = lower_expr(ctx, &args[0])?;
+                let delay_box = lower_expr(ctx, &args[1])?;
+                let blk = ctx.block();
+                let cb_handle = unbox_to_i64(blk, &cb_box);
+                let id = blk.call(
+                    I64,
+                    "setInterval",
+                    &[(I64, &cb_handle), (DOUBLE, &delay_box)],
+                );
+                return Ok(nanbox_pointer_inline(blk, &id));
+            }
+            _ => {}
+        }
         // Built-in runtime extern functions (`js_weakmap_set`,
         // `js_regexp_exec`, etc.) that start with `js_` are resolved
         // directly against the runtime library — bypass the import-
