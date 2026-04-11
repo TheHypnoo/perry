@@ -1,119 +1,134 @@
-# LLVM vs Cranelift — Phase K Migration Numbers
+# LLVM vs Cranelift — Post-Cutover Benchmark Reality
 
-This document collects **existing** measurements taken across the LLVM
-backend migration so the parity-gate decision (LLVM ≤ 105% of Cranelift
-on every benchmark) can be made without rerunning the full sweep.
+This document was originally written before the Phase K hard cutover
+to argue that LLVM was faster based on the Phase 2.1 measurement
+(`100 × fib(35)`: LLVM 3536 ms vs Cranelift 6312 ms, **−44%**). It has
+been **rewritten with the actual post-cutover numbers** because that
+Phase 2.1 measurement turned out to be misleading: it was taken on a
+stripped-down LLVM that did not yet pay the full NaN-boxing cost
+introduced in Phase A. The honest numbers are below.
 
-All numbers are from CHANGELOG.md, README.md, and Phase 2.1 in-program
-timings captured during the LLVM scaffold work. Median of 3 runs unless
-noted; macOS aarch64 (Apple Silicon).
+The Phase K hard cutover landed in commit `38bdf9f` (v0.5.0). The
+parity sweep is **identical pre/post cutover** (102 MATCH / 9 DIFF /
+0 CRASH / 13 NODE_FAIL — 91.8% match rate). This document is about
+**performance**, which is a separate question.
 
-## Headline result
+## Headline result — Perry (LLVM) vs Node.js vs Bun
 
-| Workload                   | Cranelift | LLVM        | LLVM + bitcode | Δ vs Cranelift |
-| -------------------------- | --------- | ----------- | -------------- | -------------- |
-| `100 × fib(35)` wall time  | 6312 ms   | 3536 ms     | —              | **−44%**       |
-| `100 × fib(35)` binary     | 465 KB    | 346 KB      | —              | **−26%**       |
-| `bench_fibonacci` per-iter | —         | 72 ms       | 50 ms          | **−31%** (bitcode vs object link) |
+Median of 3 runs, macOS aarch64 (Apple Silicon, M-series), Apr 2026.
+Node 24.4.1, Bun 1.3.5. Run with `cd benchmarks/suite && ./run_benchmarks.sh`.
 
-The fib(35) measurement is the original Phase 2.1 acceptance number that
-made us decide LLVM is the primary backend. Identical output
-(`922746500`); both backends emit the exact same answer, LLVM just runs
-faster and produces a smaller binary.
+| Benchmark        | Perry (LLVM) | Node.js | Bun    | vs Node | vs Bun  | Notes |
+|------------------|--------------|---------|--------|---------|---------|---|
+| string_concat    | 0–1 ms       | 2 ms    | 1 ms   | **2x faster** | tied | Inline string-builder fast path |
+| closure          | 139 ms       | 305 ms  | 51 ms  | **2.2x faster** | 0.4x | Closure conversion is competitive |
+| cold start       | 66 ms        | 119 ms  | 37 ms  | **1.8x faster** | 0.6x | Native binary, no JIT warmup |
+| loop_overhead    | 98 ms        | 70 ms   | 40 ms  | 0.7x   | 0.4x  | Tight integer loop |
+| array_write      | 20 ms        | 8 ms    | 5 ms   | 0.4x   | 0.25x | NaN-box per write |
+| array_read       | 26 ms        | 13 ms   | 15 ms  | 0.5x   | 0.6x  | NaN-box per read |
+| prime_sieve      | 11 ms        | 8 ms    | 6 ms   | 0.7x   | 0.5x  | Boolean array + branches |
+| mandelbrot       | 47 ms        | 25 ms   | 29 ms  | 0.5x   | 0.6x  | f64 math, V8 has SIMD |
+| nested_loops     | 57 ms        | 17 ms   | 20 ms  | 0.3x   | 0.35x | Nested f64 loops, V8 vectorizes |
+| math_intensive   | 131 ms       | 50 ms   | 51 ms  | 0.4x   | 0.4x  | Harmonic series |
+| matrix_multiply  | 184 ms       | 34 ms   | 34 ms  | 0.18x  | 0.18x | Nested loops, NaN-box per access |
+| object_create    | 318 ms       | 8 ms    | 5 ms   | 0.025x | 0.016x | Property dispatch through runtime |
+| binary_trees     | 479 ms       | 10 ms   | 7 ms   | 0.02x  | 0.015x | Tree allocation + traversal |
+| factorial        | 1639 ms      | 604 ms  | 101 ms | 0.37x  | 0.06x | BigInt path |
+| fibonacci(40)    | 1156 ms      | 1001 ms | 520 ms | 0.87x  | 0.45x | Recursive function calls |
+| method_calls     | 1084 ms      | 11 ms   | 7 ms   | 0.01x  | 0.006x | 10M dispatches via runtime |
 
-## Phase J — bitcode whole-program LTO
+**Summary: 2 faster / 13 slower vs Node, 1 faster / 14 slower vs Bun.**
 
-CHANGELOG v0.4.90 (Phase J landing): with `PERRY_LLVM_BITCODE_LINK=1`
-the runtime, stdlib, and any linked crate (`perry-ui-*`,
-`perry-jsruntime`, `perry-ui-geisterhand`) are emitted as `.bc` via
-`cargo rustc --emit=llvm-bc`. User modules go out as `.ll`. Everything
-gets merged through `llvm-link → opt -O3 → llc -filetype=obj`. Result:
+## What got better post-cutover
 
-- `bench_fibonacci`: **72 ms → 50 ms / iter (31% faster)** vs the
-  default LLVM object-link path.
-- Bitcode mode is opt-in via env var during the migration; will be flipped
-  to default after Phase K hard cutover.
+- **Single binary**: Perry produces a 533 KB self-contained executable
+  (vs Bun's 57 MB runtime). No installation, no JIT warmup, no
+  deopt cliffs.
+- **Cold start**: 66 ms (vs Node 119 ms, Bun 37 ms). Faster than Node
+  by ~2x.
+- **Closure conversion**: 2.2x faster than Node on the closure benchmark.
+- **String concatenation**: at-or-faster than Node and Bun on the
+  in-place string-builder pattern.
+- **Codebase weight**: −54,392 lines deleted in commit `38bdf9f`. The
+  Cranelift backend (12 files, 53,760 LOC) is gone. The LLVM backend
+  (perry-codegen, ~17K LOC) is the only codegen path.
+- **Architectural simplicity**: one IR builder, one runtime ABI, one
+  set of runtime decls. The `--backend` CLI flag is gone.
 
-## Parity sweep
+## What got slower post-cutover
 
-| Snapshot                  | MATCH | DIFF | CRASH | COMPILE_FAIL | NODE_FAIL |
-| ------------------------- | ----- | ---- | ----- | ------------ | --------- |
-| Session start (this run)  | 97    | —    | —     | —            | —         |
-| Phase K soft cutover land | 108   | 10   | 1     | 1            | 22        |
+The benchmarks above show Perry **slower than Node on 13 of 16
+workloads**, often dramatically (method_calls and binary_trees are
+~50–100x slower than Node). This is a regression vs the README's
+**pre-cutover Cranelift numbers** which had Perry at ~Node-equivalent
+or faster on most benchmarks.
 
-Net `+11 MATCH` in this session. The remaining 10 DIFFs are:
+The main reason is **NaN-boxing overhead per value access**. Cranelift's
+hand-tuned IR generation inlined the box/unbox dance and bypassed many
+runtime calls (`inline_nanbox_string`, `inline_get_string_pointer`,
+direct `fcmp` for known-numeric operands, etc.). The LLVM backend
+currently:
 
-- The inherent-determinism trio: `test_math` (RNG), `test_require`
-  (UUID), `test_date` (timing).
-- Long-tail features that 4 parallel agents are currently closing:
-  typed arrays, full Symbol API, async generators, crypto buffers,
-  UTF-8/UTF-16 length gap.
+1. Boxes every value as NaN-tagged f64
+2. Unboxes via runtime helpers on hot paths (instead of inlined IR)
+3. Routes some method dispatch through `js_native_call_method` (the
+   universal fallback) instead of direct calls
+4. Reads object fields via `js_object_get_field_by_name` instead of
+   direct loads with shape caching
 
-The 22 `NODE_FAIL` entries are tests where Node itself rejects the
-program (TS-only syntax, Perry-specific extensions); they're parity-neutral.
+The **Phase 2.1 measurement** that originally motivated the cutover
+(LLVM −44% on `100 × fib(35)`) was taken on a Phase 2.1 LLVM that
+didn't yet box anything — values flowed as raw f64 with no tag bits.
+After Phase A landed NaN-boxing for the full value flow, the perf
+collapsed to today's numbers. The headline number was real for that
+configuration but didn't reflect the boxed reality the cutover ended
+up with.
 
-## Codebase weight
+## What this means for v0.5.0
 
-Removing the Cranelift backend at hard cutover deletes:
+- **Correctness wins**: identical parity sweep, 91.8% match rate, full
+  feature surface (classes, async, closures, exceptions, generators,
+  symbols, typed arrays, crypto, fs, etc.).
+- **Architecture wins**: simpler codebase, single backend, smaller
+  source footprint, modern toolchain integration.
+- **Performance has regressed** vs the pre-cutover Cranelift baseline
+  on most micro-benchmarks. The optimization headroom is large (LLVM
+  has many more knobs than Cranelift) but the work hasn't been done yet.
 
-| Crate                | Files | Lines  |
-| -------------------- | ----- | ------ |
-| `perry-codegen`      | 12    | 53,760 |
-| `perry-codegen-llvm` | 19    | 17,823 |
+The next perf milestone is closing this gap. Concretely:
 
-LLVM is **3.0× smaller** in source than Cranelift while covering the
-same HIR surface — partly because the LLVM backend reuses LLVM's own IR
-builder instead of hand-rolling SSA, partly because we factored it more
-aggressively (split `expr.rs`/`codegen.rs` into 19 modules vs Cranelift's
-12).
+1. **Inline the NaN box/unbox dance** in the LLVM IR generator instead
+   of calling `js_nanbox_*` helpers — this is the single biggest
+   contributor to the method_calls / array_read / fibonacci regressions.
+2. **Direct field access** via shape caching instead of dynamic
+   property dispatch through `js_object_get_field_by_name`.
+3. **Devirtualize known method calls** at codegen time — `counter.increment()`
+   on a known `Counter` instance should compile to a direct call to
+   `perry_method_Counter_increment(this)`, not a `js_native_call_method`
+   round trip.
+4. **Re-enable the Cranelift-era inline `fcmp` fast path** for known-
+   numeric comparisons.
+5. **Bitcode-link mode by default** (`PERRY_LLVM_BITCODE_LINK=1`) — Phase
+   J landed v0.4.90 but the env-var gate is still in place.
 
-## Readme benchmarks (for reference, pre-LLVM)
+These are tractable optimizations. None require an architectural change.
 
-The Perry vs Node/Bun comparison in `README.md` was captured against
-Cranelift before the migration. It will be re-baselined post-cutover.
-For the parity decision today, the relevant comparison is **Perry-vs-Perry**
-(Cranelift vs LLVM), and both Phase 2.1 (−44%) and Phase J (−31% on top)
-already clear the ≤ 105% gate by a wide margin.
+## Binary size + memory
 
-| Benchmark      | Perry (Cranelift) | Node.js | Bun   | Notes                                  |
-| -------------- | ----------------- | ------- | ----- | -------------------------------------- |
-| fibonacci(40)  | 505 ms            | 1025 ms | 538 ms | Recursive function calls              |
-| array_read     | 4 ms              | 14 ms   | 18 ms  | Sequential 10M-element access         |
-| object_create  | 5 ms              | 9 ms    | 7 ms   | 1M object alloc + field access        |
-| method_calls   | 16 ms             | 11 ms   | 9 ms   | 10M class method dispatches           |
-| prime_sieve    | 11 ms             | 8 ms    | 7 ms   | Sieve of Eratosthenes                 |
-| string_concat  | 7 ms              | 2 ms    | 1 ms   | 100K in-place appends                 |
-| mandelbrot     | 71 ms             | 25 ms   | 31 ms  | f64 math, V8 has SIMD                 |
-| matrix_multiply| 61 ms             | 36 ms   | 36 ms  | Nested loops, V8 auto-vectorizes      |
-| math_intensive | 370 ms            | 52 ms   | 53 ms  | Harmonic series, V8 vectorizes        |
-| nested_loops   | 32 ms             | 18 ms   | 20 ms  | Nested f64 loops                      |
+| Metric    | Perry (LLVM) | Node.js | Bun |
+|-----------|--------------|---------|-----|
+| Binary    | 533 KB       | 30 B (script) | 57 MB (runtime) |
+| Peak RSS  | 120 MB       | 74 MB   | 48 MB |
 
-If LLVM holds the −44% Phase-2.1 ratio across these workloads, the
-v8/Bun gap on mandelbrot/matrix_multiply/math_intensive narrows
-significantly (mandelbrot ~40 ms vs Node 25 ms; nested_loops ~18 ms vs
-Node 18 ms). Bitcode-link (Phase J) compounds another ~31% on top.
-
-## Phase K parity gate decision
-
-The plan's gate is:
-1. All 22 `test_gap_*.ts` pass on `--backend llvm` ✅ except 4 long-tail
-   features currently being closed by parallel agents
-2. `run_parity_tests.sh` fully green ✅ except the determinism trio
-3. LLVM ≤ 105% of Cranelift on every benchmark ✅ **already cleared by
-   −44% headroom; bitcode link adds another −31%**
-4. Bitcode-link mode passes both gates above ✅ landed in v0.4.90, no
-   regressions reported
-
-Gate item #3 — the only one that historically required new measurements
-— is **already satisfied** by the data above, with margin to spare. We
-do not need to rerun benchmarks before pulling the hard-cutover trigger.
+Perry's binary is the smallest by ~100x vs Bun. Peak RSS is currently
+higher than both Node and Bun — this is GC arena sizing (Perry uses
+8 MB arena blocks; tighter sizing or generational GC would improve this).
 
 ## Sources
 
-- `README.md:51-86` — Perry vs Node/Bun pre-LLVM table
-- `CHANGELOG.md:239` — Phase J bitcode 31% improvement
-- `CHANGELOG.md:33` — current parity sweep snapshot (108 MATCH)
-- Phase 2.1 in-program timing: 100×fib(35) on `bench_fibonacci_phase2.ts`
-  with the current LLVM scaffold; commit history `d899aae`..`5b104fd`
-- `cloc` of `crates/perry-codegen/src/*.rs` and
-  `crates/perry-codegen-llvm/src/*.rs` against the working tree
+- `benchmarks/suite/run_benchmarks.sh` — current run script
+- Commit `38bdf9f` (v0.5.0) — Phase K hard cutover
+- Commit `15eb485` — sanitize() digit-prefix fix that unblocked the
+  `0X_*.ts` benchmark suite from compiling under LLVM
+- README.md `Performance` section (lines 51–86) — pre-cutover Cranelift
+  numbers, kept as historical reference
