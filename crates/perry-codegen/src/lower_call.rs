@@ -2194,12 +2194,15 @@ pub(crate) fn lower_native_method_call(
 
     // Receiver-less native method calls (e.g. plugin::setConfig(...)
     // as a static module function): lower args for side effects and
-    // return a sentinel. Compilation succeeds; runtime gets a NaN.
+    // return TAG_UNDEFINED. Using TAG_UNDEFINED (not 0.0) so that
+    // downstream .length reads return 0 instead of crashing (the
+    // inline .length guard checks ptr < 4096, and TAG_UNDEFINED's
+    // lower 48 bits = 1).
     let Some(recv) = object else {
         for a in args {
             let _ = lower_expr(ctx, a)?;
         }
-        return Ok(double_literal(0.0));
+        return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
     };
     let _ = (module, method); // shut up unused warnings on the early-out path
 
@@ -2277,7 +2280,7 @@ pub(crate) fn lower_native_method_call(
         for a in args {
             let _ = lower_expr(ctx, a)?;
         }
-        return Ok(double_literal(0.0));
+        return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
     }
 
     if module == "array" && (method == "push_single" || method == "push") {
