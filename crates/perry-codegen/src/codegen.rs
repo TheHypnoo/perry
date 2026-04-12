@@ -162,6 +162,8 @@ pub struct ImportedClass {
     pub method_names: Vec<String>,
     /// Parent class name, if any.
     pub parent_name: Option<String>,
+    /// Field names in declaration order (for allocation sizing and field index mapping).
+    pub field_names: Vec<String>,
 }
 
 /// Cross-module import context, bundled into a single struct to avoid
@@ -320,7 +322,13 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             extends: None,
             extends_name: ic.parent_name.clone(),
             native_extends: None,
-            fields: Vec::new(),
+            fields: ic.field_names.iter().map(|name| perry_hir::ClassField {
+                name: name.clone(),
+                ty: perry_types::Type::Any,
+                init: None,
+                is_private: false,
+                is_readonly: false,
+            }).collect(),
             constructor: None,
             methods: ic.method_names.iter().map(|m| perry_hir::Function {
                 id: 0,

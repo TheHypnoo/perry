@@ -1563,10 +1563,11 @@ pub(crate) fn lower_new(
     // The runtime allocates at least 8 inline slots regardless, so this
     // mostly matters for shapes >8 fields.
     let mut field_count = class.fields.len() as u32;
-    // Imported classes have fields: Vec::new() (stub). Use a generous
-    // minimum so the constructor has enough space to write fields.
+    // Imported classes now carry their real field_names from the source
+    // module. If the field count is still 0 (no fields info available),
+    // use a generous default as a safety net.
     if field_count == 0 && class.constructor.is_none() {
-        field_count = 48; // generous default for imported classes (EditorViewModel has 35)
+        field_count = 32;
     }
     let mut parent = class.extends_name.as_deref();
     while let Some(parent_name) = parent {
