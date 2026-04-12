@@ -359,6 +359,19 @@ pub(crate) struct FnCtx<'a> {
     /// IndexSet site can rely on `i < arr.length` without rechecking.
     pub bounded_index_pairs: Vec<(u32, u32)>,
 
+    /// Parallel i32 counter slots for integer loop counters that are
+    /// used as bounded array indices. When a for-loop counter is in
+    /// `integer_locals` AND appears in `bounded_index_pairs`, `lower_for`
+    /// allocates a parallel i32 alloca tracked here. The `Expr::Update`
+    /// lowering increments the i32 slot alongside the normal double slot,
+    /// and the IndexGet/IndexSet bounded fast-path loads the i32 directly
+    /// instead of emitting a `fptosi double → i32` on every iteration.
+    ///
+    /// Eliminates ~3 cycles per iteration on M-series (fcvtzs latency)
+    /// on hot array-walking loops like `for (let i = 0; i < arr.length;
+    /// i++) arr[i] = expr`.
+    pub i32_counter_slots: std::collections::HashMap<u32, String>,
+
     /// Compile-time i18n resolution context. When `Some`, the
     /// `Expr::I18nString` lowering looks up the translation for the
     /// default locale at compile time and emits the resolved string
@@ -708,6 +721,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 UpdateOp::Decrement => blk.fsub(&old, "1.0"),
             };
             blk.store(DOUBLE, &new, &storage);
+            // Keep the parallel i32 counter slot in sync (if active).
+            // This costs one `add i32, 1` per iteration but saves a
+            // `fptosi double → i32` on every IndexGet/IndexSet use.
+            if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
+                let blk = ctx.block();
+                let old_i32 = blk.load(I32, &i32_slot);
+                let delta = match op {
+                    UpdateOp::Increment => "1",
+                    UpdateOp::Decrement => "-1",
+                };
+                let new_i32 = blk.add(I32, &old_i32, delta);
+                blk.store(I32, &new_i32, &i32_slot);
+            }
             Ok(if *prefix { new } else { old })
         }
 
@@ -1327,11 +1353,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 {
                     if ctx.bounded_index_pairs.contains(&(*idx_id, *arr_id)) {
                         let arr_box = lower_expr(ctx, object)?;
-                        let idx_double = lower_expr(ctx, index)?;
+                        // Grab i32 slot name before mutably borrowing ctx for block().
+                        let i32_slot_opt = ctx.i32_counter_slots.get(idx_id).cloned();
+                        let idx_i32 = if let Some(ref i32_slot) = i32_slot_opt {
+                            ctx.block().load(I32, i32_slot)
+                        } else {
+                            let idx_double = lower_expr(ctx, index)?;
+                            ctx.block().fptosi(DOUBLE, &idx_double, I32)
+                        };
                         let blk = ctx.block();
                         let arr_bits = blk.bitcast_double_to_i64(&arr_box);
                         let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
-                        let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
                         let idx_i64 = blk.zext(I32, &idx_i32, I64);
                         let byte_offset = blk.shl(I64, &idx_i64, "3");
                         let with_header = blk.add(I64, &byte_offset, "8");
@@ -1625,12 +1657,18 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 {
                     if ctx.bounded_index_pairs.contains(&(*idx_id, *arr_id)) {
                         let arr_box = lower_expr(ctx, object)?;
-                        let idx_double = lower_expr(ctx, index)?;
                         let val_double = lower_expr(ctx, value)?;
+                        // Grab i32 slot name before mutably borrowing ctx for block().
+                        let i32_slot_opt = ctx.i32_counter_slots.get(idx_id).cloned();
+                        let idx_i32 = if let Some(ref i32_slot) = i32_slot_opt {
+                            ctx.block().load(I32, i32_slot)
+                        } else {
+                            let idx_double = lower_expr(ctx, index)?;
+                            ctx.block().fptosi(DOUBLE, &idx_double, I32)
+                        };
                         let blk = ctx.block();
                         let arr_bits = blk.bitcast_double_to_i64(&arr_box);
                         let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
-                        let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
                         // ptr = arr_handle + 8 + idx*8
                         let idx_i64 = blk.zext(I32, &idx_i32, I64);
                         let byte_offset = blk.shl(I64, &idx_i64, "3");

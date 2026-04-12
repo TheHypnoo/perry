@@ -9,7 +9,7 @@ use perry_hir::Stmt;
 
 use crate::expr::{lower_expr, FnCtx};
 use crate::lower_conditional::lower_truthy;
-use crate::types::DOUBLE;
+use crate::types::{DOUBLE, I32};
 
 /// Lower a sequence of statements into the current block of `ctx`. If any
 /// statement splits control flow, `ctx.current_block` is updated to the
@@ -559,10 +559,50 @@ fn lower_for(
         // `arr[counter_id]` is statically inbounds for this body, so
         // it can skip the runtime length-load + bound check.
         ctx.bounded_index_pairs.push((counter_id, arr_id));
+
+        // If the counter is provably integer-valued (initialized from
+        // an Integer literal, only mutated via Update ++/--), allocate
+        // a parallel i32 slot. The Update lowering will keep it in sync,
+        // and IndexGet/IndexSet will load the i32 directly instead of
+        // emitting a `fptosi double → i32` on every iteration.
+        if ctx.integer_locals.contains(&counter_id) {
+            if let Some(counter_slot) = ctx.locals.get(&counter_id).cloned() {
+                let i32_slot = ctx.func.alloca_entry(I32);
+                // Initialize from the current double value.
+                let cur_dbl = ctx.block().load(DOUBLE, &counter_slot);
+                let cur_i32 = ctx.block().fptosi(DOUBLE, &cur_dbl, I32);
+                ctx.block().store(I32, &cur_i32, &i32_slot);
+                ctx.i32_counter_slots.insert(counter_id, i32_slot);
+            }
+        }
+
         Some(slot)
     } else {
         None
     };
+
+    // If we have an i32 counter AND a hoisted length, pre-compute the
+    // length as i32 so the loop condition can use `icmp slt i32` instead
+    // of `fcmp olt double`. This eliminates the float counter fadd +
+    // fcmp per iteration — saves ~2 instructions on the inner loop of
+    // nested_loops and similar patterns.
+    let i32_length_slot: Option<String> =
+        if let Some((_, counter_id)) = hoist_classification {
+            if let (Some(_), Some(len_dbl_slot)) =
+                (ctx.i32_counter_slots.get(&counter_id).cloned(),
+                 hoisted_length_slot.as_ref())
+            {
+                let len_dbl = ctx.block().load(DOUBLE, len_dbl_slot);
+                let len_i32 = ctx.block().fptosi(DOUBLE, &len_dbl, I32);
+                let slot = ctx.func.alloca_entry(I32);
+                ctx.block().store(I32, &len_i32, &slot);
+                Some(slot)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
     let cond_idx = ctx.new_block("for.cond");
     let body_idx = ctx.new_block("for.body");
@@ -577,16 +617,33 @@ fn lower_for(
     // Branch from the block holding the init into the cond block.
     ctx.block().br(&cond_label);
 
-    // Cond block.
+    // Cond block — fast i32 path when both counter and length are i32.
     ctx.current_block = cond_idx;
-    if let Some(cond_expr) = condition {
-        let cv = lower_expr(ctx, cond_expr)?;
-        let i1 = lower_truthy(ctx, &cv, cond_expr);
-        ctx.block().cond_br(&i1, &body_label, &exit_label);
+    let used_i32_cond = if let (Some((_, counter_id)), Some(ref len_i32_slot)) =
+        (hoist_classification, &i32_length_slot)
+    {
+        if let Some(ctr_i32_slot) = ctx.i32_counter_slots.get(&counter_id).cloned() {
+            let ctr = ctx.block().load(I32, &ctr_i32_slot);
+            let len = ctx.block().load(I32, len_i32_slot);
+            let cmp = ctx.block().icmp_slt(I32, &ctr, &len);
+            ctx.block().cond_br(&cmp, &body_label, &exit_label);
+            true
+        } else {
+            false
+        }
     } else {
-        // `for (;;)` — unconditional jump into the body. May be an
-        // infinite loop unless the body contains a `break`.
-        ctx.block().br(&body_label);
+        false
+    };
+    if !used_i32_cond {
+        if let Some(cond_expr) = condition {
+            let cv = lower_expr(ctx, cond_expr)?;
+            let i1 = lower_truthy(ctx, &cv, cond_expr);
+            ctx.block().cond_br(&i1, &body_label, &exit_label);
+        } else {
+            // `for (;;)` — unconditional jump into the body. May be an
+            // infinite loop unless the body contains a `break`.
+            ctx.block().br(&body_label);
+        }
     }
 
     // Push break/continue targets so nested `break`/`continue` know where
@@ -620,6 +677,9 @@ fn lower_for(
 
     // Pop the hoisted-length entry so nested loops or sibling loops
     // don't see a stale slot.
+    if let Some((_, counter_id)) = hoist_classification {
+        ctx.i32_counter_slots.remove(&counter_id);
+    }
     if let Some(arr_id) = hoisted_length_arr_id {
         ctx.cached_lengths.remove(&arr_id);
         ctx.bounded_index_pairs.pop();
