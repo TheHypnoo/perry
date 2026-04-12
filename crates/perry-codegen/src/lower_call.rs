@@ -213,16 +213,32 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // Previously these were silently dropped (returned 0.0), which
         // caused Bloom Engine games to render blank windows.
         let Some(source_prefix) = ctx.import_function_prefixes.get(name).cloned() else {
+            // Determine per-arg types: string args need to be unboxed
+            // to raw `*const u8` pointers and passed as `ptr` so the
+            // ARM64 ABI puts them in x-registers (not d-registers).
+            // Without this, bloom_draw_text(text, x, y, ...) passes
+            // the NaN-boxed string in d0 but the native function reads
+            // x0 as a *const u8 → SIGSEGV.
             let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+            let mut arg_types: Vec<crate::types::LlvmType> = Vec::with_capacity(args.len());
             for a in args {
-                lowered.push(lower_expr(ctx, a)?);
+                let val = lower_expr(ctx, a)?;
+                if is_string_expr(ctx, a) {
+                    // Unbox NaN-boxed string to raw C string pointer.
+                    let blk = ctx.block();
+                    let raw_ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &val)]);
+                    let ptr_val = blk.inttoptr(I64, &raw_ptr);
+                    lowered.push(ptr_val);
+                    arg_types.push(PTR);
+                } else {
+                    lowered.push(val);
+                    arg_types.push(DOUBLE);
+                }
             }
             let arg_slices: Vec<(crate::types::LlvmType, &str)> =
-                lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
-            let param_types: Vec<crate::types::LlvmType> =
-                std::iter::repeat(DOUBLE).take(args.len()).collect();
+                arg_types.iter().zip(lowered.iter()).map(|(t, v)| (*t, v.as_str())).collect();
             ctx.pending_declares
-                .push((name.clone(), DOUBLE, param_types));
+                .push((name.clone(), DOUBLE, arg_types));
             return Ok(ctx.block().call(DOUBLE, name, &arg_slices));
         };
         let fname = format!("perry_fn_{}__{}", source_prefix, name);
