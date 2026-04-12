@@ -8,7 +8,7 @@ Best of 3 runs, macOS ARM64 (Apple Silicon M-series), April 2026.
 
 | Benchmark      | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |  Python |
 |----------------|-------|-------|-------|-------|-------|-------|-------|---------|
-| fibonacci      |   936 |   315 |   308 |   446 |   399 |   279 |   991 |   15935 |
+| fibonacci      |   401 |   315 |   308 |   446 |   399 |   279 |   991 |   15935 |
 | loop_overhead  |    12 |    95 |    96 |    96 |    95 |    97 |    53 |    2979 |
 | array_write    |     2 |     6 |     2 |     8 |     2 |     6 |     8 |     392 |
 | array_read     |     4 |     9 |     9 |    10 |     9 |    11 |    13 |     330 |
@@ -64,9 +64,9 @@ The other languages use `double` array indices (to match TS semantics), paying a
 
 ## Where Perry loses — and why
 
-### fibonacci (3x slower than C++)
+### fibonacci (1.3x slower than C++)
 
-Recursive `fib(40)` is dominated by function call overhead. Perry passes all arguments as `f64` (NaN-boxed values), while C++/Rust use native `int` parameters. The f64 calling convention is inherently heavier: values move through floating-point registers, and the recursive call tree is ~2 billion calls deep.
+Recursive `fib(40)` is dominated by function call overhead. Perry at 401ms (down from 936ms after eliminating redundant `js_number_coerce` calls) is now competitive with Go (446ms) and Swift (399ms). The remaining gap vs C++ (308ms) and Rust (315ms) is the f64 calling convention: Perry passes arguments through floating-point registers (`d0-d7`) while C++/Rust use integer registers (`x0-x7`). Integer `sub`/`add`/`cmp` are 1 cycle each vs f64 `fsub`/`fadd`/`fcmp` at 2-3 cycles.
 
 ### object_create (Rust/C++/Go/Swift show 0ms)
 
