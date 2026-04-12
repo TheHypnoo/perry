@@ -2141,6 +2141,82 @@ pub(crate) fn lower_native_method_call(
     };
     let _ = (module, method); // shut up unused warnings on the early-out path
 
+    // perry/ui instance method calls: `windowHandle.show()`, `windowHandle.setBody(w)`, etc.
+    // The HIR produces these with `object: Some(handle)` and `module: "perry/ui"`.
+    // Lower the receiver to get the widget/window handle, then dispatch.
+    if module == "perry/ui" {
+        let recv_val = lower_expr(ctx, recv)?;
+        let blk = ctx.block();
+        let handle = unbox_to_i64(blk, &recv_val);
+        if let Some(sig) = perry_ui_instance_method_lookup(method) {
+            // Build args: handle is the first arg, then the call args.
+            let mut llvm_args: Vec<(crate::types::LlvmType, String)> = Vec::with_capacity(1 + args.len());
+            let mut runtime_param_types: Vec<crate::types::LlvmType> = Vec::with_capacity(1 + args.len());
+            llvm_args.push((I64, handle));
+            runtime_param_types.push(I64);
+            for (kind, arg) in sig.args.iter().zip(args.iter()) {
+                match kind {
+                    UiArgKind::Widget => {
+                        let v = lower_expr(ctx, arg)?;
+                        let blk = ctx.block();
+                        let h = unbox_to_i64(blk, &v);
+                        llvm_args.push((I64, h));
+                        runtime_param_types.push(I64);
+                    }
+                    UiArgKind::Str => {
+                        let h = get_raw_string_ptr(ctx, arg)?;
+                        llvm_args.push((I64, h));
+                        runtime_param_types.push(I64);
+                    }
+                    UiArgKind::F64 => {
+                        let v = lower_expr(ctx, arg)?;
+                        llvm_args.push((DOUBLE, v));
+                        runtime_param_types.push(DOUBLE);
+                    }
+                    UiArgKind::Closure => {
+                        let v = lower_expr(ctx, arg)?;
+                        llvm_args.push((DOUBLE, v));
+                        runtime_param_types.push(DOUBLE);
+                    }
+                    UiArgKind::I64Raw => {
+                        let v = lower_expr(ctx, arg)?;
+                        let blk = ctx.block();
+                        let i = blk.fptosi(DOUBLE, &v, I64);
+                        llvm_args.push((I64, i));
+                        runtime_param_types.push(I64);
+                    }
+                }
+            }
+            let return_type = match sig.ret {
+                UiReturnKind::Widget => I64,
+                UiReturnKind::F64 => DOUBLE,
+                UiReturnKind::Void => crate::types::VOID,
+            };
+            ctx.pending_declares.push((sig.runtime.to_string(), return_type, runtime_param_types));
+            let ref_args: Vec<(crate::types::LlvmType, &str)> =
+                llvm_args.iter().map(|(t, s)| (*t, s.as_str())).collect();
+            let blk = ctx.block();
+            return match sig.ret {
+                UiReturnKind::Void => {
+                    blk.call_void(sig.runtime, &ref_args);
+                    Ok(double_literal(0.0))
+                }
+                UiReturnKind::Widget => {
+                    let raw = blk.call(I64, sig.runtime, &ref_args);
+                    Ok(crate::expr::nanbox_pointer_inline(blk, &raw))
+                }
+                UiReturnKind::F64 => {
+                    Ok(blk.call(DOUBLE, sig.runtime, &ref_args))
+                }
+            };
+        }
+        // Unknown instance method — lower args for side effects.
+        for a in args {
+            let _ = lower_expr(ctx, a)?;
+        }
+        return Ok(double_literal(0.0));
+    }
+
     if module == "array" && (method == "push_single" || method == "push") {
         if args.is_empty() {
             bail!("array.push expects ≥1 arg, got 0");
@@ -3161,10 +3237,37 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     // ---- Alert ----
     UiSig { method: "alert", runtime: "perry_ui_alert",
             args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Void },
+
+    // ---- Window (constructor — receiver-less) ----
+    UiSig { method: "Window", runtime: "perry_ui_window_create",
+            args: &[UiArgKind::Str, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Widget },
+];
+
+/// Instance method table for perry/ui receiver-based calls.
+/// These methods are called on a widget/window handle: `handle.method(args)`.
+/// The handle is automatically prepended as the first i64 arg.
+const PERRY_UI_INSTANCE_TABLE: &[UiSig] = &[
+    // ---- Window instance methods ----
+    UiSig { method: "show", runtime: "perry_ui_window_show",
+            args: &[], ret: UiReturnKind::Void },
+    UiSig { method: "hide", runtime: "perry_ui_window_hide",
+            args: &[], ret: UiReturnKind::Void },
+    UiSig { method: "close", runtime: "perry_ui_window_close",
+            args: &[], ret: UiReturnKind::Void },
+    UiSig { method: "setBody", runtime: "perry_ui_window_set_body",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "setSize", runtime: "perry_ui_window_set_size",
+            args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
+    UiSig { method: "onFocusLost", runtime: "perry_ui_window_on_focus_lost",
+            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
 ];
 
 fn perry_ui_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_UI_TABLE.iter().find(|s| s.method == method)
+}
+
+fn perry_ui_instance_method_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_UI_INSTANCE_TABLE.iter().find(|s| s.method == method)
 }
 
 /// Lower a perry/ui call described by `sig`. Walks each arg, applies
