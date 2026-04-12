@@ -207,14 +207,23 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
             return Ok(ctx.block().call(DOUBLE, name, &arg_slices));
         }
-        // Soft fallback: built-in extern functions (setTimeout,
-        // etc.) that aren't in the import map.
-        // Lower args for side effects and return undefined.
+        // Native library functions (bloom_draw_rect, bloom_init_window,
+        // etc.) that aren't in the import map — emit a direct call so
+        // the linker resolves them against the linked native .a library.
+        // Previously these were silently dropped (returned 0.0), which
+        // caused Bloom Engine games to render blank windows.
         let Some(source_prefix) = ctx.import_function_prefixes.get(name).cloned() else {
+            let mut lowered: Vec<String> = Vec::with_capacity(args.len());
             for a in args {
-                let _ = lower_expr(ctx, a)?;
+                lowered.push(lower_expr(ctx, a)?);
             }
-            return Ok(double_literal(0.0));
+            let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+                lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
+            let param_types: Vec<crate::types::LlvmType> =
+                std::iter::repeat(DOUBLE).take(args.len()).collect();
+            ctx.pending_declares
+                .push((name.clone(), DOUBLE, param_types));
+            return Ok(ctx.block().call(DOUBLE, name, &arg_slices));
         };
         let fname = format!("perry_fn_{}__{}", source_prefix, name);
         // Record the cross-module call so the caller can add a `declare`
@@ -2055,6 +2064,10 @@ pub(crate) fn lower_native_method_call(
         if let Some(sig) = perry_ui_table_lookup(method) {
             return lower_perry_ui_table_call(ctx, sig, args);
         }
+        // Warn at compile time so missing methods are visible instead
+        // of silently returning 0.0 (which causes null-pointer crashes
+        // when the caller expects a widget handle).
+        eprintln!("perry/ui warning: method '{}' not in dispatch table (args: {})", method, args.len());
     }
 
     if module == "perry/ui" && method == "App" && object.is_none() && args.len() == 1 {
@@ -2210,7 +2223,8 @@ pub(crate) fn lower_native_method_call(
                 }
             };
         }
-        // Unknown instance method — lower args for side effects.
+        // Unknown instance method — warn and lower args for side effects.
+        eprintln!("perry/ui warning: instance method '{}' not in dispatch table (args: {})", method, args.len());
         for a in args {
             let _ = lower_expr(ctx, a)?;
         }
@@ -2983,6 +2997,14 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     // ---- ScrollView ----
     UiSig { method: "scrollviewSetChild", runtime: "perry_ui_scrollview_set_child",
             args: &[UiArgKind::Widget, UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "scrollViewSetChild", runtime: "perry_ui_scrollview_set_child",
+            args: &[UiArgKind::Widget, UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "scrollViewGetOffset", runtime: "perry_ui_scrollview_get_offset",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::F64 },
+    UiSig { method: "scrollViewSetOffset", runtime: "perry_ui_scrollview_set_offset",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
+    UiSig { method: "scrollViewScrollTo", runtime: "perry_ui_scrollview_scroll_to",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
 
     // ---- Stack layout ----
     UiSig { method: "stackSetAlignment", runtime: "perry_ui_stack_set_alignment",
@@ -3241,6 +3263,73 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     // ---- Window (constructor — receiver-less) ----
     UiSig { method: "Window", runtime: "perry_ui_window_create",
             args: &[UiArgKind::Str, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Widget },
+
+    // ---- VStack/HStack with built-in insets (no children array — children added via widgetAddChild) ----
+    UiSig { method: "VStackWithInsets", runtime: "perry_ui_vstack_create_with_insets",
+            args: &[UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64],
+            ret: UiReturnKind::Widget },
+    UiSig { method: "HStackWithInsets", runtime: "perry_ui_hstack_create_with_insets",
+            args: &[UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64],
+            ret: UiReturnKind::Widget },
+
+    // ---- Embed external NSView ----
+    UiSig { method: "embedNSView", runtime: "perry_ui_embed_nsview",
+            args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+
+    // ---- File dialogs ----
+    UiSig { method: "openFileDialog", runtime: "perry_ui_open_file_dialog",
+            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
+    UiSig { method: "openFolderDialog", runtime: "perry_ui_open_folder_dialog",
+            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
+    UiSig { method: "saveFileDialog", runtime: "perry_ui_save_file_dialog",
+            args: &[UiArgKind::Closure, UiArgKind::Str, UiArgKind::Str],
+            ret: UiReturnKind::Void },
+
+    // ---- Widget overlay frame ----
+    UiSig { method: "widgetSetOverlayFrame", runtime: "perry_ui_widget_set_overlay_frame",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64],
+            ret: UiReturnKind::Void },
+
+    // ---- Toolbar ----
+    UiSig { method: "toolbarCreate", runtime: "perry_ui_toolbar_create",
+            args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "toolbarAddItem", runtime: "perry_ui_toolbar_add_item",
+            args: &[UiArgKind::Widget, UiArgKind::Str, UiArgKind::Str, UiArgKind::Closure],
+            ret: UiReturnKind::Void },
+    UiSig { method: "toolbarAttach", runtime: "perry_ui_toolbar_attach",
+            args: &[UiArgKind::Widget, UiArgKind::Widget], ret: UiReturnKind::Void },
+
+    // ---- SplitView ----
+    UiSig { method: "SplitView", runtime: "perry_ui_splitview_create",
+            args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "splitViewAddChild", runtime: "perry_ui_splitview_add_child",
+            args: &[UiArgKind::Widget, UiArgKind::Widget], ret: UiReturnKind::Void },
+
+    // ---- Sheet ----
+    UiSig { method: "sheetCreate", runtime: "perry_ui_sheet_create",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Widget },
+    UiSig { method: "sheetPresent", runtime: "perry_ui_sheet_present",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "sheetDismiss", runtime: "perry_ui_sheet_dismiss",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
+
+    // ---- FrameSplit (NSSplitView wrapper) ----
+    UiSig { method: "frameSplitCreate", runtime: "perry_ui_frame_split_create",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Widget },
+    UiSig { method: "frameSplitAddChild", runtime: "perry_ui_frame_split_add_child",
+            args: &[UiArgKind::Widget, UiArgKind::Widget], ret: UiReturnKind::Void },
+
+    // ---- File dialog polling ----
+    UiSig { method: "pollOpenFile", runtime: "perry_ui_poll_open_file",
+            args: &[], ret: UiReturnKind::F64 },
+
+    // ---- Keyboard shortcuts ----
+    UiSig { method: "addKeyboardShortcut", runtime: "perry_ui_add_keyboard_shortcut",
+            args: &[UiArgKind::Str, UiArgKind::Closure], ret: UiReturnKind::Void },
+
+    // ---- App extras ----
+    UiSig { method: "appSetTimer", runtime: "perry_ui_app_set_timer",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::Closure], ret: UiReturnKind::Void },
 ];
 
 /// Instance method table for perry/ui receiver-based calls.
