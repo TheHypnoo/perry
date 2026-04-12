@@ -199,6 +199,10 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     let triple = opts.target.clone().unwrap_or_else(default_target_triple);
 
     let mut llmod = LlModule::new(&triple);
+    // Null guard global: a zeroed i32 used as a safe dereference target
+    // when a NaN-unboxed pointer is null/invalid. Prevents segfaults from
+    // uninitialized locals or unhandled expressions producing 0.0/TAG_UNDEFINED.
+    llmod.add_internal_global("perry_null_guard_zero", crate::types::I32, "0");
     runtime_decls::declare_phase1(&mut llmod);
 
     // Derive a per-module symbol prefix from the HIR module name:

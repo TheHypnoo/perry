@@ -1379,10 +1379,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let arr_bits = blk.bitcast_double_to_i64(&arr_box);
                 let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
                 let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
-                // Bounds check: load length (u32 at offset 0),
-                // compare index. OOB returns TAG_UNDEFINED (JS spec).
-                let len_ptr = blk.inttoptr(I64, &arr_handle);
-                let len_i32 = blk.load(I32, &len_ptr);
+                // Bounds check: load length (null-guarded).
+                let len_i32 = blk.safe_load_i32_from_ptr(&arr_handle);
                 let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
                 let ok_idx = ctx.new_block("arr.ok");
                 let oob_idx = ctx.new_block("arr.oob");
@@ -1542,8 +1540,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let blk = ctx.block();
             let recv_bits = blk.bitcast_double_to_i64(&recv_box);
             let recv_handle = blk.and(I64, &recv_bits, POINTER_MASK_I64);
-            let len_ptr = blk.inttoptr(I64, &recv_handle);
-            let len_i32 = blk.load(I32, &len_ptr);
+            let len_i32 = blk.safe_load_i32_from_ptr(&recv_handle);
             Ok(blk.sitofp(I32, &len_i32, DOUBLE))
         }
 
@@ -1596,8 +1593,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let blk = ctx.block();
             let recv_bits = blk.bitcast_double_to_i64(&recv_box);
             let recv_handle = blk.and(I64, &recv_bits, POINTER_MASK_I64);
-            let len_ptr = blk.inttoptr(I64, &recv_handle);
-            let len_i32 = blk.load(I32, &len_ptr);
+            let len_i32 = blk.safe_load_i32_from_ptr(&recv_handle);
             Ok(blk.sitofp(I32, &len_i32, DOUBLE))
         }
 
@@ -4295,9 +4291,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let blk = ctx.block();
             let arr_handle = unbox_to_i64(blk, &arr_box);
             let cb_handle = unbox_to_i64(blk, &cb_box);
-            // Load length.
-            let len_ptr = blk.inttoptr(I64, &arr_handle);
-            let len_i32 = blk.load(I32, &len_ptr);
+            // Load length (null-guarded).
+            let len_i32 = blk.safe_load_i32_from_ptr(&arr_handle);
             // Loop: for i = 0; i < len; i++
             let cond_idx = ctx.new_block("foreach.cond");
             let body_idx = ctx.new_block("foreach.body");
@@ -6898,9 +6893,8 @@ fn lower_index_set_fast(
     let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
     let idx_i32 = blk.fptosi(DOUBLE, idx_double, I32);
 
-    // Load length from offset 0. We need a ptr typed value, so inttoptr.
-    let arr_ptr = blk.inttoptr(I64, &arr_handle);
-    let length = blk.load(I32, &arr_ptr);
+    // Load length from offset 0 (null-guarded).
+    let length = blk.safe_load_i32_from_ptr(&arr_handle);
     let in_bounds = blk.icmp_ult(I32, &idx_i32, &length);
 
     let inbounds_idx = ctx.new_block("idxset.inbounds");

@@ -318,6 +318,26 @@ impl LlBlock {
         r
     }
 
+    /// Load i32 from a NaN-unboxed pointer, with a null guard.
+    /// If the pointer is < 4096 (null, TAG_UNDEFINED lower bits, or
+    /// a small handle), returns 0 instead of dereferencing.
+    /// Used for .length reads and bounds checks on arrays/strings.
+    ///
+    /// Uses `@perry_null_guard_zero` — a module-global i32 initialized
+    /// to 0 that serves as a safe dereference target.
+    pub fn safe_load_i32_from_ptr(&mut self, handle: &str) -> String {
+        use crate::types::{I32, I64};
+        let is_bad = self.icmp_ult(I64, handle, "4096");
+        let handle_ptr = self.inttoptr(I64, handle);
+        // Map bad pointers to a known-safe global that contains 0.
+        let safe_ptr = {
+            let r = self.reg();
+            self.emit(format!("{} = select i1 {}, ptr @perry_null_guard_zero, ptr {}", r, is_bad, handle_ptr));
+            r
+        };
+        self.load(I32, &safe_ptr)
+    }
+
     pub fn ptrtoint(&mut self, val: &str, to_ty: LlvmType) -> String {
         let r = self.reg();
         self.emit(format!("{} = ptrtoint ptr {} to {}", r, val, to_ty));
