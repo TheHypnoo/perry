@@ -142,6 +142,11 @@ impl DependencyResolver {
             return;
         }
 
+        // Perry built-in modules don't need resolution
+        if is_perry_builtin(import_source) {
+            return;
+        }
+
         // Try to resolve the package
         if self.resolve_package(import_source).is_none() {
             self.unresolved_imports
@@ -182,7 +187,7 @@ impl DependencyResolver {
         let packages: HashSet<String> = self
             .all_imports
             .iter()
-            .filter(|s| !s.starts_with('.') && !is_node_builtin(s))
+            .filter(|s| !s.starts_with('.') && !is_node_builtin(s) && !is_perry_builtin(s))
             .map(|s| {
                 // Extract base package name
                 if s.starts_with('@') {
@@ -218,6 +223,11 @@ fn is_node_builtin(name: &str) -> bool {
     let base = name.split('/').next().unwrap_or(name);
     let base = base.strip_prefix("node:").unwrap_or(base);
     builtins.contains(&base)
+}
+
+/// Check if an import is a Perry built-in module (perry/ui, perry/thread, perry/i18n, perry/system)
+fn is_perry_builtin(name: &str) -> bool {
+    name.starts_with("perry/")
 }
 
 /// Check a package for compatibility issues
@@ -434,7 +444,7 @@ pub fn check_node_builtin_imports(
     let mut diagnostics = Diagnostics::new();
 
     for import in all_imports {
-        if is_node_builtin(import) {
+        if is_node_builtin(import) && !is_perry_builtin(import) {
             let files = import_locations
                 .get(import)
                 .map(|f| {

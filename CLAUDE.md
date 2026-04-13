@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.14
+**Current Version:** 0.5.15
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.15 (llvm-backend) — perry/ui State dispatch + check-deps fix (closes #24, #25)
+- **fix**: `State(0)` constructor and `.value`/`.set()` instance methods were missing from the LLVM codegen dispatch tables, producing "not in dispatch table" warnings and silently returning `undefined`. Added `State` → `perry_ui_state_create` to `PERRY_UI_TABLE` and `value` → `perry_ui_state_get` / `set` → `perry_ui_state_set` to `PERRY_UI_INSTANCE_TABLE`.
+- **fix**: `perry check --check-deps` flagged `perry/ui`, `perry/thread`, `perry/i18n` as missing npm packages (R003) and as unsupported Node.js built-ins (U006). New `is_perry_builtin()` guard skips resolution and diagnostics for all `perry/*` imports.
 
 ### v0.5.14 (llvm-backend) — Windows build fix: date.rs POSIX-only APIs
 - **fix**: `timestamp_to_local_components` used `libc::localtime_r` and `tm_gmtoff`, both POSIX-only — broke the Windows CI build. Split into `#[cfg(unix)]` (keeps `localtime_r` + `tm_gmtoff`) and `#[cfg(windows)]` (uses `libc::localtime_s` / `libc::gmtime_s`, derives tz offset by comparing local vs UTC breakdowns).

@@ -3361,6 +3361,8 @@ const PERRY_UI_TABLE: &[UiSig] = &[
             ret: UiReturnKind::Void },
 
     // ---- State ----
+    UiSig { method: "State", runtime: "perry_ui_state_create",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Widget },
     UiSig { method: "stateCreate", runtime: "perry_ui_state_create",
             args: &[UiArgKind::F64], ret: UiReturnKind::Widget },
     UiSig { method: "stateGet", runtime: "perry_ui_state_get",
@@ -3620,6 +3622,12 @@ const PERRY_UI_INSTANCE_TABLE: &[UiSig] = &[
             args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
     UiSig { method: "onFocusLost", runtime: "perry_ui_window_on_focus_lost",
             args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
+
+    // ---- State instance methods ----
+    UiSig { method: "value", runtime: "perry_ui_state_get",
+            args: &[], ret: UiReturnKind::F64 },
+    UiSig { method: "set", runtime: "perry_ui_state_set",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Void },
 ];
 
 fn perry_ui_table_lookup(method: &str) -> Option<&'static UiSig> {
