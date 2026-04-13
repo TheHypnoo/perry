@@ -1895,6 +1895,13 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                 result.extend(stmts);
             }
         }
+        ast::Stmt::Decl(ast::Decl::Using(using_decl)) => {
+            // `using` / `await using` — lower as const bindings.
+            for decl in &using_decl.decls {
+                let stmts = lower_var_decl_with_destructuring(ctx, decl, false)?;
+                result.extend(stmts);
+            }
+        }
         ast::Stmt::Decl(ast::Decl::Class(class_decl)) => {
             // Class declared inside a function body (e.g., noble-curves' Point class)
             let class_name = class_decl.ident.sym.to_string();
