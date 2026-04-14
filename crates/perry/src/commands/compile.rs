@@ -1034,6 +1034,7 @@ fn build_optimized_libs(
     ctx: &CompilationContext,
     target: Option<&str>,
     format: OutputFormat,
+    verbose: u8,
 ) -> OptimizedLibs {
     use super::stdlib_features::{compute_required_features, features_to_cargo_arg};
 
@@ -1066,7 +1067,7 @@ fn build_optimized_libs(
     let workspace_root = match find_perry_workspace_root() {
         Some(p) => p,
         None => {
-            if matches!(format, OutputFormat::Text) {
+            if matches!(format, OutputFormat::Text) && verbose > 0 {
                 eprintln!(
                     "  auto-optimize: Perry workspace source not found, \
                      using prebuilt libperry_runtime.a + libperry_stdlib.a"
@@ -3067,7 +3068,7 @@ fn compile_for_wasm(ctx: &CompilationContext, args: &CompileArgs, format: Output
     })
 }
 
-pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u8) -> Result<CompileResult> {
+pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8) -> Result<CompileResult> {
     match format {
         OutputFormat::Text => println!("Collecting modules..."),
         OutputFormat::Json => {}
@@ -3624,8 +3625,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
         sorted
     };
 
-    // Debug: print init order for crash diagnosis
-    if let OutputFormat::Text = format {
+    if matches!(format, OutputFormat::Text) && verbose > 0 {
         eprintln!("\nModule init order ({} modules):", non_entry_module_names.len());
         for (i, name) in non_entry_module_names.iter().enumerate() {
             eprintln!("  [{}] {}", i, name);
@@ -4616,7 +4616,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     let optimized_libs: OptimizedLibs = if args.no_auto_optimize {
         OptimizedLibs::empty()
     } else {
-        build_optimized_libs(&ctx, target.as_deref(), format)
+        build_optimized_libs(&ctx, target.as_deref(), format, verbose)
     };
     let stdlib_lib_resolved: Option<PathBuf> = optimized_libs.stdlib.clone()
         .or_else(|| find_stdlib_library(target.as_deref()));

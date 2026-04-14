@@ -32,6 +32,13 @@ jobs:
             artifact: perry-windows-x86_64
 
     runs-on: ${{ matrix.os }}
+    env:
+      # Pin the macOS deployment target so bottle object files carry a
+      # stable LC_VERSION_MIN / LC_BUILD_VERSION tag regardless of which
+      # GitHub runner OS built them. Otherwise users linking against the
+      # bottle on macOS 14 see `ld: warning: ... was built for newer 'macOS'
+      # version (15.x) than being linked (14.x)` across every stdlib .o.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
 

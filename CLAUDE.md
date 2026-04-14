@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.21
+**Current Version:** 0.5.22
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.22 — doc example URLs + compile output noise cleanup (refs #26)
+- **docs**: fetch/axios quickstart examples in `docs/src/stdlib/http.md` and `docs/native-libraries.md` swapped from `https://api.example.com/data` (IANA-reserved placeholder that never resolves) to `https://jsonplaceholder.typicode.com/posts/1` (public JSON test API) so copy-paste-and-run works for first-time users. In-widget scaffolding examples left alone — those are snippets inside larger user apps.
+- **compile**: `Module init order (0 modules):` (leftover debug aid from a past crash diagnosis) and `auto-optimize: Perry workspace source not found, using prebuilt libperry_runtime.a + libperry_stdlib.a` (fires 100% of the time for Homebrew/apt users since they don't have the workspace) are now gated behind `--verbose`. The rest of the compile output (`Collecting modules...`, `Generating code...`, `Wrote object file`, `Linking (with stdlib)...`, `Wrote executable`, `Binary size`) stays — those are legit progress markers. Threaded `verbose: u8` through `compile::run()` → `build_optimized_libs()` (previously `_verbose`, unused).
+- **ci**: `.github/workflows/release-packages.yml` now pins `MACOSX_DEPLOYMENT_TARGET=13.0` for the macOS bottle builds. The `macos-15` runner was stamping `LC_BUILD_VERSION` on every stdlib `.o` with the host's 15.x version, so any user linking on macOS 14 or earlier saw `ld: warning: ... was built for newer 'macOS' version (15.5) than being linked (14.x)` across dozens of object files in libperry_stdlib.a. Functionally harmless, visually ugly. Will take effect on the next release cut — users on existing bottles still see the warnings until then.
 
 ### v0.5.21 — fastify header dispatch + gc() safety in servers (closes #30, #31)
 - **fix**: `request.header('X')` / `request.headers['X']` returned undefined/null in Fastify handlers because the handler param was typed `any`, so the HIR didn't tag it as `FastifyRequest` → property access fell through to generic object lookup instead of the fastify FFI. New `pre_scan_fastify_handler_params()` in the HIR pre-registers the first two params of `app.get|post|put|delete|patch|head|options|all|addHook|setErrorHandler` arrow handlers as fastify Request/Reply native instances. Also added `NA_JSV` (pass NaN-boxed bits as i64) and `NR_STR` (NaN-box string return with STRING_TAG) arg/return kinds so the receiver methods `js_fastify_req_header(ctx, name: i64)` etc. get the right ABI shape; without this the bitcast was wrong and `JSON.stringify` on the returned string segfaulted.
