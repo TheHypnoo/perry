@@ -1943,19 +1943,60 @@ fn compile_module_entry(
             .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
 
         if !ctx.block().is_terminated() {
-            // Final microtask drain: top-level `promise.then(cb)` calls
-            // (without an awaiting parent) need to flush before main exits,
-            // otherwise their callbacks silently never run. Drain in a
-            // bounded straight-line sequence — sufficient to flush the
-            // typical handful of tail microtasks left behind by
-            // `Array.fromAsync(...).then(...)` and similar fire-and-forget
-            // patterns.
-            for _ in 0..16 {
+            // Event loop: keep running while there are active event
+            // sources (timers, intervals, WS servers, pending stdlib
+            // async ops). Without this, event-driven servers (WS,
+            // setInterval-based) exit immediately after init.
+            //
+            // Structure:
+            //   loop_header: check if any source is active → body or exit
+            //   loop_body:   tick all queues, sleep 10ms, jump to header
+            //   loop_exit:   ret 0
+            let header_idx = ctx.new_block("event_loop.header");
+            let body_idx = ctx.new_block("event_loop.body");
+            let exit_idx = ctx.new_block("event_loop.exit");
+            let header_label = ctx.block_label(header_idx);
+            let body_label = ctx.block_label(body_idx);
+            let exit_label = ctx.block_label(exit_idx);
+
+            // Initial microtask flush (4 rounds) before entering the
+            // event loop — handles fire-and-forget .then() chains that
+            // don't need the full event loop.
+            for _ in 0..4 {
                 let _ = ctx.block().call(I32, "js_promise_run_microtasks", &[]);
                 let _ = ctx.block().call(I32, "js_timer_tick", &[]);
                 let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
                 let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
             }
+            ctx.block().call_void("js_run_stdlib_pump", &[]);
+            ctx.block().br(&header_label);
+
+            // loop_header: check if there's any reason to keep running
+            ctx.current_block = header_idx;
+            let has_timers = ctx.block().call(I32, "js_timer_has_pending", &[]);
+            let has_callbacks = ctx.block().call(I32, "js_callback_timer_has_pending", &[]);
+            let has_intervals = ctx.block().call(I32, "js_interval_timer_has_pending", &[]);
+            let has_stdlib = ctx.block().call(I32, "js_stdlib_has_active_handles", &[]);
+            let any1 = ctx.block().or(I32, &has_timers, &has_callbacks);
+            let any2 = ctx.block().or(I32, &has_intervals, &has_stdlib);
+            let any = ctx.block().or(I32, &any1, &any2);
+            let zero = "0".to_string();
+            let cmp = ctx.block().icmp_ne(I32, &any, &zero);
+            ctx.block().cond_br(&cmp, &body_label, &exit_label);
+
+            // loop_body: tick everything, sleep, loop
+            ctx.current_block = body_idx;
+            let _ = ctx.block().call(I32, "js_promise_run_microtasks", &[]);
+            let _ = ctx.block().call(I32, "js_timer_tick", &[]);
+            let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
+            let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
+            ctx.block().call_void("js_run_stdlib_pump", &[]);
+            let ten_ms = "10.0".to_string();
+            ctx.block().call_void("js_sleep_ms", &[(DOUBLE, &ten_ms)]);
+            ctx.block().br(&header_label);
+
+            // loop_exit: done
+            ctx.current_block = exit_idx;
             ctx.block().ret(I32, "0");
         }
         let pending = std::mem::take(&mut ctx.pending_declares);

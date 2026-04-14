@@ -51,6 +51,9 @@ lazy_static::lazy_static! {
     static ref WS_PENDING_EVENTS: Mutex<Vec<PendingWsEvent>> = Mutex::new(Vec::new());
 }
 
+/// Number of active WS servers — keeps the event loop alive.
+static WS_ACTIVE_SERVERS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
 #[cfg(not(target_os = "ios"))]
 struct WsConnection {
     sender: mpsc::UnboundedSender<WsCommand>,
@@ -737,6 +740,7 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
         client_ids: Vec::new(),
         shutdown_tx: Some(shutdown_tx),
     });
+    WS_ACTIVE_SERVERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Spawn the accept loop
     let handle_id = server_handle;
     spawn(async move {
@@ -913,6 +917,7 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
 #[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_server_close(handle: i64) {
+    WS_ACTIVE_SERVERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     if let Some(server) = get_handle_mut::<WsServerHandle>(handle) {
         server.is_listening = false;
 
@@ -930,6 +935,32 @@ pub unsafe extern "C" fn js_ws_server_close(handle: i64) {
             }
         }
     }
+}
+
+/// Returns 1 if there are active WS servers or connections that need
+/// the event loop to keep running.
+#[cfg(not(target_os = "ios"))]
+pub fn js_ws_has_active_handles() -> i32 {
+    // Check the active-server counter (set in js_ws_server_new)
+    if WS_ACTIVE_SERVERS.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        return 1;
+    }
+    // Check for active connections
+    let conns = WS_CONNECTIONS.lock().unwrap();
+    if !conns.is_empty() {
+        return 1;
+    }
+    // Check for pending events
+    let pending = WS_PENDING_EVENTS.lock().unwrap();
+    if !pending.is_empty() {
+        return 1;
+    }
+    0
+}
+
+#[cfg(target_os = "ios")]
+pub fn js_ws_has_active_handles() -> i32 {
+    0
 }
 
 /// Process pending WebSocket events (called from js_stdlib_process_pending)

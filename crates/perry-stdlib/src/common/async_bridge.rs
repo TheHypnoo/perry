@@ -122,8 +122,14 @@ fn ensure_pump_registered() {
     use std::sync::Once;
     static REGISTER: Once = Once::new();
     REGISTER.call_once(|| {
-        extern "C" { fn js_register_stdlib_pump(f: extern "C" fn() -> i32); }
-        unsafe { js_register_stdlib_pump(js_stdlib_process_pending); }
+        extern "C" {
+            fn js_register_stdlib_pump(f: extern "C" fn() -> i32);
+            fn js_register_stdlib_has_active(f: extern "C" fn() -> i32);
+        }
+        unsafe {
+            js_register_stdlib_pump(js_stdlib_process_pending);
+            js_register_stdlib_has_active(js_stdlib_has_active_handles);
+        }
     });
 }
 
@@ -202,6 +208,40 @@ pub extern "C" fn js_stdlib_process_pending() -> i32 {
     count += crate::worker_threads::js_worker_threads_process_pending();
 
     count
+}
+
+/// Returns 1 if the stdlib has active event sources that need the event
+/// loop to keep running (active WS servers, pending events, etc.).
+/// Registered with perry-runtime via js_register_stdlib_has_active()
+/// so the runtime's trampoline calls this when perry-stdlib is linked.
+pub extern "C" fn js_stdlib_has_active_handles() -> i32 {
+    // Check for pending stdlib resolutions
+    {
+        let pending = PENDING_RESOLUTIONS.lock().unwrap();
+        if !pending.is_empty() {
+            return 1;
+        }
+    }
+    {
+        let pending = PENDING_DEFERRED.lock().unwrap();
+        if !pending.is_empty() {
+            return 1;
+        }
+    }
+    // Check for active WebSocket servers/connections
+    #[cfg(feature = "websocket")]
+    {
+        extern "C" {
+            fn js_ws_process_pending() -> i32;
+        }
+        // If there are pending WS events, keep running
+        // (we don't drain here — just check)
+        let has_ws = crate::ws::js_ws_has_active_handles();
+        if has_ws != 0 {
+            return 1;
+        }
+    }
+    0
 }
 
 /// Spawn an async operation that will resolve a Promise when complete

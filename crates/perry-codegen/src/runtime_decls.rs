@@ -660,6 +660,14 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_timer_tick", I32, &[]);
     module.declare_function("js_callback_timer_tick", I32, &[]);
     module.declare_function("js_interval_timer_tick", I32, &[]);
+    // Timer has-pending checks — called from the main event loop to
+    // decide whether to keep ticking or exit.
+    module.declare_function("js_timer_has_pending", I32, &[]);
+    module.declare_function("js_callback_timer_has_pending", I32, &[]);
+    module.declare_function("js_interval_timer_has_pending", I32, &[]);
+    // Stdlib has-active-handles — returns 1 if WS servers, pending
+    // HTTP events, etc. need the loop to keep running.
+    module.declare_function("js_stdlib_has_active_handles", I32, &[]);
     module.declare_function("js_set_timeout_callback", I64, &[I64, DOUBLE]);
     module.declare_function("setInterval", I64, &[I64, DOUBLE]);
     module.declare_function("clearTimeout", VOID, &[I64]);

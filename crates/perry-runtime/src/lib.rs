@@ -106,6 +106,30 @@ mod stdlib_pump {
             }
         }
     }
+
+    static STDLIB_HAS_ACTIVE_FN: AtomicPtr<()> = AtomicPtr::new(null_mut());
+
+    /// Register the stdlib's has_active_handles function pointer.
+    /// Called by perry-stdlib during initialization.
+    #[no_mangle]
+    pub extern "C" fn js_register_stdlib_has_active(f: extern "C" fn() -> i32) {
+        STDLIB_HAS_ACTIVE_FN.store(f as *mut (), Ordering::Release);
+    }
+
+    /// Check if the stdlib has active event sources (WS servers, pending
+    /// async ops, etc.). Returns 0 if perry-stdlib is not linked.
+    #[no_mangle]
+    pub extern "C" fn js_stdlib_has_active_handles() -> i32 {
+        let f = STDLIB_HAS_ACTIVE_FN.load(Ordering::Acquire);
+        if !f.is_null() {
+            unsafe {
+                let func: extern "C" fn() -> i32 = std::mem::transmute(f);
+                func()
+            }
+        } else {
+            0
+        }
+    }
 }
 
 // Module init guard for preventing circular dependency stack overflow.
