@@ -101,6 +101,45 @@ lazy_static::lazy_static! {
     static ref NEXT_NET_ID: Mutex<i64> = Mutex::new(1);
 }
 
+static NET_GC_REGISTERED: std::sync::Once = std::sync::Once::new();
+
+/// Register the net GC root scanner exactly once. Safe to call from any
+/// `js_net_*` entry point on the main thread. Mirrors the pattern in
+/// `cron.rs::ensure_gc_scanner_registered`.
+fn ensure_gc_scanner_registered() {
+    NET_GC_REGISTERED.call_once(|| {
+        perry_runtime::gc::gc_register_root_scanner(scan_net_roots);
+    });
+}
+
+/// GC root scanner for net.Socket event listener closures.
+///
+/// Socket event listeners (`sock.on('data', cb)` etc.) are closures that
+/// may be garbage-collectible from the user's perspective after the call
+/// to `.on()` returns — the closure literal is only referenced by the
+/// native-side `NET_LISTENERS` map. Without this scanner, any GC cycle
+/// between `.on()` and the next dispatch would sweep the closure; the
+/// next `js_closure_call1` would dereference freed memory. This was a
+/// latent bug until v0.5.25 made GC fire during synchronous decode
+/// loops (issue #35).
+fn scan_net_roots(mark: &mut dyn FnMut(f64)) {
+    if let Ok(listeners) = NET_LISTENERS.lock() {
+        for per_socket in listeners.values() {
+            for cb_vec in per_socket.values() {
+                for &cb in cb_vec.iter() {
+                    if cb != 0 {
+                        let boxed = f64::from_bits(
+                            0x7FFD_0000_0000_0000
+                                | (cb as u64 & 0x0000_FFFF_FFFF_FFFF),
+                        );
+                        mark(boxed);
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct SocketState {
     cmd_tx: mpsc::UnboundedSender<SocketCommand>,
     is_open: bool,
@@ -296,6 +335,7 @@ pub unsafe extern "C" fn js_tls_connect(
 /// `direct_tls` = Some((servername, verify)) runs a TLS handshake before
 /// firing 'connect'; None keeps the socket in plain TCP mode.
 fn spawn_socket_task(host: String, port: u16, direct_tls: Option<(String, bool)>) -> i64 {
+    ensure_gc_scanner_registered();
     let id = next_id();
     let (tx, mut rx) = mpsc::unbounded_channel::<SocketCommand>();
 
@@ -509,6 +549,7 @@ pub unsafe extern "C" fn js_net_socket_destroy(handle: i64) {
 /// Signature matches `{ has_receiver: true, method: "on", args: &[NA_STR, NA_PTR], ret: NR_VOID }`.
 #[no_mangle]
 pub unsafe extern "C" fn js_net_socket_on(handle: i64, event_ptr: i64, cb: i64) {
+    ensure_gc_scanner_registered();
     let event = match string_from_header_i64(event_ptr) {
         Some(e) => e,
         None => return,

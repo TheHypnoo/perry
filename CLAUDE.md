@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.25
+**Current Version:** 0.5.26
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.26 — GC root scanner for `net.Socket` listener closures (closes #35)
+- **fix**: `sock.on('data', cb)` stored the closure pointer in `NET_LISTENERS: Mutex<HashMap<i64, HashMap<String, Vec<i64>>>>` as a bare `i64`, with no root scanner registered — so GC's mark phase couldn't see it. Before v0.5.25 this was a latent bug: GC only fired on arena block overflow, and event-driven code (like `@perry/postgres`'s data listener) rarely tripped it. Once v0.5.25 made `gc_malloc` trigger GC, any wrapper-heavy synchronous work (row decode, JSON parse, allocation burst between events) would fire a sweep with the listener unmarked — the sweep freed the closure, and the next dispatched `'data'` event called `js_closure_call1` on freed memory. In the pg driver the result was: iter 0 fired echoes fine (no GC yet), iter 1+ called a dead closure, the driver's parse loop stopped advancing, the outer `conn.query(...)` promise never resolved, and main() silently exited 0 when the pump had nothing left to do — exactly the symptom in the ticket.
+- New `scan_net_roots(mark)` walks `NET_LISTENERS`, re-NaN-boxes each callback `i64` with `POINTER_TAG`, and calls `mark` — mirrors the existing `cron::scan_cron_roots` / `timer::scan_timer_roots` pattern. Registered lazily via a `Once` from `spawn_socket_task` (first `net.createConnection` / `tls.connect`) and `js_net_socket_on` (first `.on(...)` call on any socket), so programs that never use net don't pay the registration cost. Repro: synthetic TCP client + external echo server + 30k-iteration wrapper-allocation burst between sends — before: `dataCb=0 bytes=0` (listener freed after iter 0); after: `dataCb=5 bytes=35` ✓.
+- **known remaining**: the same latent pattern still exists for `ws.rs`'s `WS_CLIENT_LISTENERS` + `WsServerHandle.listeners`, and `http.rs`'s `ClientRequest.response_callback` + `IncomingMessage.listeners`. Those registries are also Rust-side-only references to user closures — if a WS client or HTTP request lives across a GC cycle triggered by malloc pressure, its listeners will be swept. Filed as a follow-up sweep; not fixed in this commit to keep the scope tight to the issue #35 report.
 
 ### v0.5.25 — GC from `gc_malloc` + adaptive malloc-count trigger (closes #34)
 - **fix**: malloc-heavy workloads never triggered GC. `gc_check_trigger()` was only called from the arena slow path (when a block fills), but code that produces many short-lived malloc-tracked objects without pushing arena blocks — e.g. `@perry/postgres`'s `parseBigIntDecimal` (`n = n * 10n + digit` creates 2 new bigints per digit via `gc_malloc`) — accumulates indefinitely in `MALLOC_OBJECTS` until the process OOMs or heap corruption trips a malloc-allocator abort. The reported symptom was exit 139 on the second 1000-row × 20-column query or the first 10000-row query. New `gc_check_trigger()` call at the *entry* of `gc_malloc` — critically NOT at the end: running it after the header is pushed into `MALLOC_OBJECTS` would have the sweep free the about-to-be-returned pointer, since the fresh `user_ptr` lives only in a caller-saved register that setjmp's callee-saved-only conservative stack scan can't see. Running before means the allocation simply doesn't exist during any GC cycle this call triggers.
