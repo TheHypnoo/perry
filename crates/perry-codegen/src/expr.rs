@@ -835,6 +835,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     BinaryOp::Mul => Some("js_dynamic_mul"),
                     BinaryOp::Div => Some("js_dynamic_div"),
                     BinaryOp::Mod => Some("js_dynamic_mod"),
+                    // Bitwise ops on bigints dispatch to the same
+                    // unbox→bigint-op→rebox helpers used for arithmetic.
+                    // Without this, `5n ^ 1n` fell through to the i32
+                    // ToInt32 path that interprets the NaN-boxed bigint
+                    // bits as a double — `fptosi` on a NaN-payload f64
+                    // yielded a small signed integer (e.g. -6 for XOR of
+                    // two 64-bit bigints) and masking with
+                    // 0xFFFFFFFFFFFFFFFFn collapsed to 0 (closes #39).
+                    BinaryOp::BitAnd => Some("js_dynamic_bitand"),
+                    BinaryOp::BitOr => Some("js_dynamic_bitor"),
+                    BinaryOp::BitXor => Some("js_dynamic_bitxor"),
+                    BinaryOp::Shl => Some("js_dynamic_shl"),
+                    BinaryOp::Shr => Some("js_dynamic_shr"),
                     _ => None,
                 };
                 if let Some(fname) = helper {
@@ -2656,6 +2669,32 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_math_pow", &[(DOUBLE, &b), (DOUBLE, &e)]))
         }
 
+        // -------- Math.imul — 32-bit wrapping integer multiply --------
+        // ECMAScript: `Math.imul(a, b) = (ToInt32(a) * ToInt32(b)) | 0`.
+        // ToInt32 on a finite double is "truncate to i64 (wrapping), then
+        // take the low 32 bits", which is exactly what `fptosi f64 → i64`
+        // followed by `trunc i64 → i32` produces. LLVM `mul i32` wraps
+        // without `nsw`/`nuw`, giving the required 32-bit overflow. Result
+        // re-boxes via `sitofp` so the JS-visible value is a signed i32 in
+        // a double (e.g. -2110866647 for the FNV-1a constants in the #40
+        // repro). This unblocks every hash (FNV-1a-32, MurmurHash3, xxhash,
+        // CRC32) and PRNG (PCG, xorshift*) that uses the canonical
+        // 32-bit-wrap spelling instead of the 16-bit hi/lo workaround.
+        // NaN/Inf inputs coerce to 0 in spec JS; `fptosi` saturates instead,
+        // but no real hash/PRNG feeds those to imul, so we accept that minor
+        // divergence rather than adding a compare-and-select gate per call.
+        Expr::MathImul(a, b) => {
+            let av = lower_expr(ctx, a)?;
+            let bv = lower_expr(ctx, b)?;
+            let blk = ctx.block();
+            let a_i64 = blk.fptosi(DOUBLE, &av, I64);
+            let b_i64 = blk.fptosi(DOUBLE, &bv, I64);
+            let a_i32 = blk.trunc(I64, &a_i64, I32);
+            let b_i32 = blk.trunc(I64, &b_i64, I32);
+            let prod = blk.mul(I32, &a_i32, &b_i32);
+            Ok(blk.sitofp(I32, &prod, DOUBLE))
+        }
+
         // -------- new Error() / new Error(message) --------
         Expr::ErrorNew(opt_msg) => {
             if let Some(msg_expr) = opt_msg {
@@ -4116,14 +4155,18 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     Ok(nanbox_pointer_inline(blk, &h))
                 }
                 Some(e) => {
-                    let arr_box = lower_expr(ctx, e)?;
+                    // Non-literal case: `new Uint8Array(x)` where x is a
+                    // variable/expression. At codegen time we can't tell if
+                    // x is a number (length) or an array (source data), so
+                    // dispatch at runtime via `js_uint8array_new` which
+                    // inspects the NaN-box tag. Prior to this fix the catch-
+                    // all always called `js_uint8array_from_array`, which
+                    // treated numeric lengths as ArrayHeader pointers and
+                    // silently returned a zero-length buffer (closes #38).
+                    let val_box = lower_expr(ctx, e)?;
                     let blk = ctx.block();
-                    let arr_handle = unbox_to_i64(blk, &arr_box);
-                    let buf_handle = blk.call(
-                        I64,
-                        "js_uint8array_from_array",
-                        &[(I64, &arr_handle)],
-                    );
+                    let buf_handle =
+                        blk.call(I64, "js_uint8array_new", &[(DOUBLE, &val_box)]);
                     Ok(nanbox_pointer_inline(blk, &buf_handle))
                 }
             }
@@ -4144,7 +4187,24 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let val_i32 = blk.call(I32, "js_buffer_get", &[(I64, &handle), (I32, &idx_i32)]);
             Ok(blk.sitofp(I32, &val_i32, DOUBLE))
         }
-        Expr::Uint8ArraySet { value, .. } => lower_expr(ctx, value),
+        Expr::Uint8ArraySet { array, index, value } => {
+            // Write a byte into a Uint8Array / Buffer backing store. Mirrors
+            // Uint8ArrayGet: unbox the pointer, fptosi the index + value, call
+            // the runtime's js_buffer_set(buf, idx, val). Prior stub returned
+            // `lower_expr(value)` verbatim, making `u8[i] = v` a silent no-op —
+            // any idiomatic Perry code that filled a buffer via bracket
+            // assignment (image processing, binary protocol encoders) saw
+            // zero-filled output.
+            let a = lower_expr(ctx, array)?;
+            let i = lower_expr(ctx, index)?;
+            let v = lower_expr(ctx, value)?;
+            let blk = ctx.block();
+            let handle = unbox_to_i64(blk, &a);
+            let idx_i32 = blk.fptosi(DOUBLE, &i, I32);
+            let val_i32 = blk.fptosi(DOUBLE, &v, I32);
+            blk.call_void("js_buffer_set", &[(I64, &handle), (I32, &idx_i32), (I32, &val_i32)]);
+            Ok(v)
+        }
 
         // `new Int32Array([1,2,3])` etc. — generic typed array constructor.
         // Routes through `js_typed_array_new_from_array(kind, arr_handle)` for
