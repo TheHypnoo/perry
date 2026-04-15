@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.23
+**Current Version:** 0.5.24
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,13 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.24 — bigint arithmetic + `BigInt()` coercion (closes #33)
+- **fix**: bigint literals were NaN-boxed with `POINTER_TAG` (`0x7FFD`) instead of `BIGINT_TAG` (`0x7FFA`), so `typeof 5n` returned `"object"` and the runtime's `JSValue::is_bigint()` check (used by `js_dynamic_add/sub/mul/div/mod`) said no — arithmetic on bigints fell through to `fadd/fsub/...` on the NaN-tagged bits and produced `NaN`. New `nanbox_bigint_inline` + `BIGINT_TAG_I64` constant; `Expr::BigInt` now uses the bigint tag.
+- **feat**: `Expr::BigIntCoerce` was unimplemented (`BigInt(42)`/`BigInt("9223...")` failed to compile with `expression BigIntCoerce not yet supported`). Lowers to `js_bigint_from_f64` (which already dispatches on the NaN tag — pass-through for bigint, i64 conversion for int32, string parse for strings, truncate for doubles) and re-boxes with BIGINT_TAG.
+- **feat**: `Expr::Binary` with either operand statically bigint-typed now dispatches to `js_dynamic_add/sub/mul/div/mod` instead of float ops. The runtime helpers unbox, call `js_bigint_<op>`, and re-box. Mixed `bigint × int32` also works (they upcast to bigint). `is_bigint_expr` extended to recognize nested bigint `Binary` ops so `(n * 10n) + d` routes through bigint dispatch all the way up — unblocks the `@perry/postgres` `parseBigIntDecimal` pattern (digit-by-digit accumulator loop).
+- **fix**: `js_console_log_dynamic` fell through to the float-number branch for bigint values because `is_bigint()` wasn't in the dispatch chain — `console.log(x)` (single-arg) printed `NaN` for every bigint. Added an `is_bigint()` branch that routes through the existing `format_jsvalue` (which already knows to print `<digits>n`).
+- Regression test: `test-files/test_gap_bigint.ts` — matches Node byte-for-byte.
 
 ### v0.5.23 — module init order + namespace import dispatch (closes #32)
 - **fix**: `non_entry_module_prefixes` in `crates/perry/src/commands/compile.rs` was iterating `ctx.native_modules` (a `BTreeMap<PathBuf, _>`) which produces alphabetical path order, silently discarding the topologically-sorted `non_entry_module_names` built ~700 lines earlier. Any project whose leaf modules sort AFTER their dependents (e.g. `types/registry.ts` > `connection.ts`) had its init sequence reversed — a top-level `registerDefaultCodecs()` call in `register-defaults.ts` would run BEFORE `types/registry.ts`'s init allocated the `REGISTRY_OIDS` array, so every push wrote to a stale (0.0-initialized) global while later readers loaded the correctly-initialized one. Symptom: module-level registries/plugin tables appeared empty to every consumer even though primitives (`let registered = false`) looked shared. Fix: iterate the already-sorted `non_entry_module_names` instead.

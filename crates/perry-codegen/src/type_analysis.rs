@@ -376,10 +376,25 @@ pub(crate) fn compute_auto_captures(
 pub(crate) fn is_bigint_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
         Expr::BigInt(_) => true,
+        // `BigInt(x)` always returns a bigint.
+        Expr::BigIntCoerce(_) => true,
         Expr::LocalGet(id) => matches!(
             ctx.local_types.get(id),
             Some(HirType::BigInt)
         ),
+        // Nested bigint arithmetic — `(n * 10n) + d` must see the
+        // inner `n * 10n` as bigint so the outer `+` routes through
+        // the bigint dispatch instead of the float fallback.
+        Expr::Binary { op, left, right } => {
+            matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+            ) && (is_bigint_expr(ctx, left) || is_bigint_expr(ctx, right))
+        }
         _ => false,
     }
 }

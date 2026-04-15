@@ -18,7 +18,7 @@ use crate::function::LlFunction;
 use crate::lower_call::{lower_call, lower_native_method_call, lower_new};
 use crate::lower_conditional::{lower_conditional, lower_logical, lower_truthy};
 use crate::lower_string_method::{lower_string_coerce_concat, lower_string_concat, lower_string_self_append};
-use crate::nanbox::{double_literal, POINTER_MASK_I64, POINTER_TAG_I64, STRING_TAG_I64};
+use crate::nanbox::{double_literal, BIGINT_TAG_I64, POINTER_MASK_I64, POINTER_TAG_I64, STRING_TAG_I64};
 use crate::strings::StringPool;
 use crate::type_analysis::{
     compute_auto_captures, is_array_expr, is_bigint_expr, is_bool_expr, is_map_expr,
@@ -29,6 +29,17 @@ use crate::types::{DOUBLE, I1, I8, I32, I64, PTR};
 /// Inline NaN-box of a raw heap pointer with `POINTER_TAG`.
 pub(crate) fn nanbox_pointer_inline(blk: &mut LlBlock, ptr_i64: &str) -> String {
     let tagged = blk.or(I64, ptr_i64, POINTER_TAG_I64);
+    blk.bitcast_i64_to_double(&tagged)
+}
+
+/// Inline NaN-box of a raw `BigIntHeader*` with `BIGINT_TAG`. Required
+/// for `typeof x === "bigint"` (which reads the tag byte), and for the
+/// runtime's dynamic-dispatch helpers (`js_dynamic_add` etc.) to
+/// recognize the value as a bigint at their check sites. Without this,
+/// literals like `5n` get tagged as `POINTER_TAG` and `typeof` reports
+/// `"object"` / arithmetic falls back to float and returns `NaN`.
+pub(crate) fn nanbox_bigint_inline(blk: &mut LlBlock, ptr_i64: &str) -> String {
+    let tagged = blk.or(I64, ptr_i64, BIGINT_TAG_I64);
     blk.bitcast_i64_to_double(&tagged)
 }
 
@@ -802,6 +813,38 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 }
                 if l_is_str || r_is_str {
                     return lower_string_coerce_concat(ctx, left, right, l_is_str, r_is_str);
+                }
+            }
+            // BigInt arithmetic fast path. NaN-tagged bigints compare
+            // unordered under `fadd`/`fsub`/`fmul`/`fdiv`/`frem` (the
+            // tag bits make the f64 a NaN), so the default numeric path
+            // returns `NaN` for `5n + 3n` and friends. When either side
+            // is statically bigint-typed we dispatch to the runtime's
+            // dynamic helpers — they unbox, call `js_bigint_<op>`, and
+            // re-box with BIGINT_TAG. These helpers also tolerate
+            // mixed bigint/int32 operands (they upcast to bigint), so
+            // `n * 10n` where `n` is a bigint loop accumulator works
+            // even when the numeric literal side isn't a bigint. Add is
+            // in here too — `bigint + bigint` is arithmetic, not string
+            // concat (the `is_definitely_string_expr` check above
+            // already ruled out the string case). Closes GH #33.
+            if is_bigint_expr(ctx, left) || is_bigint_expr(ctx, right) {
+                let helper = match op {
+                    BinaryOp::Add => Some("js_dynamic_add"),
+                    BinaryOp::Sub => Some("js_dynamic_sub"),
+                    BinaryOp::Mul => Some("js_dynamic_mul"),
+                    BinaryOp::Div => Some("js_dynamic_div"),
+                    BinaryOp::Mod => Some("js_dynamic_mod"),
+                    _ => None,
+                };
+                if let Some(fname) = helper {
+                    let l = lower_expr(ctx, left)?;
+                    let r = lower_expr(ctx, right)?;
+                    return Ok(ctx.block().call(
+                        DOUBLE,
+                        fname,
+                        &[(DOUBLE, &l), (DOUBLE, &r)],
+                    ));
                 }
             }
             // Fast path: `<integer-valued> % <integer literal>` (the
@@ -5650,6 +5693,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // The HIR carries the literal as a string for arbitrary
         // precision. We hand it to the runtime as a UTF-8 byte
         // pointer + length.
+        //
+        // Tagged with BIGINT_TAG (not POINTER_TAG): `typeof 5n`
+        // reads the top 16 bits to distinguish `"bigint"` from
+        // `"object"`, and `js_dynamic_add`/`_sub`/`_mul`/`_div`/`_mod`
+        // use `JSValue::is_bigint()` which also checks that tag —
+        // literals tagged as POINTER_TAG fooled both sites, which is
+        // why arithmetic used to collapse to `NaN`. Closes GH #33.
         Expr::BigInt(s) => {
             let bytes_idx = ctx.strings.intern(s);
             let bytes_global =
@@ -5661,7 +5711,22 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 "js_bigint_from_string",
                 &[(PTR, &bytes_global), (I32, &len_str)],
             );
-            Ok(nanbox_pointer_inline(blk, &result))
+            Ok(nanbox_bigint_inline(blk, &result))
+        }
+
+        // -------- BigInt(value) coercion --------
+        // `BigInt(42)`, `BigInt("9223372036854775807")`, `BigInt(someBigInt)`.
+        // The runtime helper inspects the NaN-box tag and dispatches:
+        // bigint → pass-through, int32 → i64 conversion, string →
+        // parse, undefined/null → 0n, f64 → truncate-to-i64. Result
+        // is a raw `BigIntHeader*`; we NaN-box with BIGINT_TAG so
+        // later sites see `typeof === "bigint"` and the dynamic-
+        // arithmetic check `is_bigint()` both succeed.
+        Expr::BigIntCoerce(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            let ptr = blk.call(I64, "js_bigint_from_f64", &[(DOUBLE, &v)]);
+            Ok(nanbox_bigint_inline(blk, &ptr))
         }
 
         // -------- arr.sort(comparator) -> same array (in place) --------

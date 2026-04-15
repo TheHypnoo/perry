@@ -76,6 +76,13 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
     } else if jsval.is_pointer() {
         // Object/array pointer - format as JSON
         println!("{}{}", p, format_jsvalue(value, 0));
+    } else if jsval.is_bigint() {
+        // Bigint — defer to format_jsvalue which already prints the
+        // "<digits>n" form. Without this, the fall-through below
+        // treats the NaN-tagged bits as a raw double and prints
+        // `NaN` for every single-arg `console.log(x)` where x is a
+        // bigint (refs GH #33).
+        println!("{}{}", p, format_jsvalue(value, 0));
     } else if jsval.is_int32() {
         println!("{}{}", p, jsval.as_int32());
     } else {

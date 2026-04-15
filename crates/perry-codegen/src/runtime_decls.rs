@@ -397,7 +397,17 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_regexp_test", I32, &[I64, I64]);
     module.declare_function("js_get_string_pointer_unified", I64, &[DOUBLE]);
     module.declare_function("js_bigint_from_string", I64, &[PTR, I32]);
+    module.declare_function("js_bigint_from_f64", I64, &[DOUBLE]);
     module.declare_function("js_bigint_cmp", I32, &[I64, I64]);
+    // Dynamic bigint arithmetic — lowered from `Expr::Binary` when
+    // either operand is statically bigint-typed. These unbox, call
+    // the raw `js_bigint_<op>`, and re-box with BIGINT_TAG. Also
+    // tolerate mixed bigint/int32 operands.
+    module.declare_function("js_dynamic_add", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_sub", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_mul", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_div", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_mod", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_instanceof", DOUBLE, &[DOUBLE, I32]);
     module.declare_function("js_register_class_extends_error", VOID, &[I32]);
     // Inline-allocator class registration: emitted once per class
