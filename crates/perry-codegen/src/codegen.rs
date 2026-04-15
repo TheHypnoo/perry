@@ -219,6 +219,11 @@ pub(crate) struct CrossModuleCtx {
     /// dead branches (which may reference FFI functions that don't exist on
     /// the current target).
     pub compile_time_constants: std::collections::HashMap<u32, f64>,
+    /// (Issue #50) Module-level `const` 2D int arrays folded into flat
+    /// `[N x i32]` LLVM constants. Maps local_id → info. Populated by
+    /// scanning `hir.init`; threaded through every FnCtx so the IndexGet
+    /// lowering can intercept `X[i][j]` / `krow[j]` patterns.
+    pub flat_const_arrays: std::collections::HashMap<u32, crate::expr::FlatConstInfo>,
 }
 
 /// Compile a Perry HIR module to an object file via LLVM IR.
@@ -550,6 +555,76 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         ),
         imported_vars: opts.imported_vars,
         compile_time_constants,
+        flat_const_arrays: {
+            // Issue #50: fold module-level `const X: number[][] = [[int, ...], ...]`
+            // into a flat `[N x i32]` LLVM constant so `X[i][j]` / `krow[j]` can
+            // load directly from `.rodata` instead of chasing the arena array
+            // header. Qualifying locals are `Let { mutable: false }`, have a
+            // rectangular int-literal 2D init, and are never mutated anywhere
+            // in the module (LocalSet/Update/IndexSet/mutating methods).
+            let mut map: std::collections::HashMap<u32, crate::expr::FlatConstInfo> =
+                std::collections::HashMap::new();
+            for s in &hir.init {
+                if let perry_hir::Stmt::Let {
+                    id, init: Some(init), mutable: false, ..
+                } = s
+                {
+                    if let Some((rows, cols, vals)) =
+                        crate::expr::try_flat_const_2d_int(init)
+                    {
+                        let mut mutated = false;
+                        if crate::collectors::has_any_mutation(&hir.init, *id) {
+                            mutated = true;
+                        }
+                        if !mutated {
+                            for f in &hir.functions {
+                                if crate::collectors::has_any_mutation(&f.body, *id) {
+                                    mutated = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !mutated {
+                            'outer: for c in &hir.classes {
+                                for m in &c.methods {
+                                    if crate::collectors::has_any_mutation(&m.body, *id) {
+                                        mutated = true;
+                                        break 'outer;
+                                    }
+                                }
+                                if let Some(ctor) = &c.constructor {
+                                    if crate::collectors::has_any_mutation(&ctor.body, *id) {
+                                        mutated = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if !mutated {
+                            let gname = format!("perry_flat_{}__{}", module_prefix, id);
+                            let init_str = format!(
+                                "[{}]",
+                                vals.iter()
+                                    .map(|v| format!("i32 {}", v))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            );
+                            let ty = format!("[{} x i32]", rows * cols);
+                            llmod.add_raw_global(format!(
+                                "@{} = private unnamed_addr constant {} {}",
+                                gname, ty, init_str
+                            ));
+                            map.insert(*id, crate::expr::FlatConstInfo {
+                                global_name: gname,
+                                rows,
+                                cols,
+                            });
+                        }
+                    }
+                }
+            }
+            map
+        },
     };
 
     // Module-level globals registry. Pre-walk:
@@ -1441,6 +1516,8 @@ fn compile_function(
         scalar_replaced: std::collections::HashMap::new(),
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
+        flat_const_arrays: &cross_module.flat_const_arrays,
+        array_row_aliases: HashMap::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -1685,6 +1762,8 @@ fn compile_closure(
         scalar_replaced: std::collections::HashMap::new(),
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
+        flat_const_arrays: &cross_module.flat_const_arrays,
+        array_row_aliases: HashMap::new(),
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -1826,6 +1905,8 @@ fn compile_method(
         scalar_replaced: std::collections::HashMap::new(),
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
+        flat_const_arrays: &cross_module.flat_const_arrays,
+        array_row_aliases: HashMap::new(),
     };
 
     // Constructors emitted as standalone cross-module LLVM functions (named
@@ -1978,6 +2059,8 @@ fn compile_module_entry(
             scalar_replaced: std::collections::HashMap::new(),
             scalar_ctor_target: Vec::new(),
             non_escaping_news: main_non_escaping_news,
+            flat_const_arrays: &cross_module.flat_const_arrays,
+            array_row_aliases: HashMap::new(),
         };
         // Register every module-level global's ADDRESS as a GC root so
         // the mark phase can discover pointer-typed values (Maps, Arrays,
@@ -2144,6 +2227,8 @@ fn compile_module_entry(
             scalar_replaced: std::collections::HashMap::new(),
             scalar_ctor_target: Vec::new(),
             non_escaping_news: init_non_escaping_news,
+            flat_const_arrays: &cross_module.flat_const_arrays,
+            array_row_aliases: HashMap::new(),
         };
         // Register every module-level global's ADDRESS as a GC root —
         // same reason as the entry-module branch above (issue #36). For
@@ -2422,6 +2507,8 @@ fn compile_static_method(
         scalar_replaced: std::collections::HashMap::new(),
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
+        flat_const_arrays: &cross_module.flat_const_arrays,
+        array_row_aliases: HashMap::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;

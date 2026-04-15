@@ -456,6 +456,31 @@ pub(crate) struct FnCtx<'a> {
     /// is only used in PropertyGet/PropertySet. The Stmt::Let lowering
     /// intercepts these to emit scalar-replaced field allocas.
     pub non_escaping_news: std::collections::HashMap<u32, String>,
+
+    /// (Issue #50) Module-level const 2D int arrays folded into a flat
+    /// `[N x i32]` LLVM constant. Maps local_id → (flat_global_name, rows,
+    /// cols). Populated at module compile, before any function lowering.
+    /// The `IndexGet` lowering uses this to replace
+    /// `IndexGet(IndexGet(LocalGet(id), i), j)` with a direct GEP + load
+    /// of the flat global, eliminating the arena pointer chase and the
+    /// per-access NaN-box unwrap.
+    pub flat_const_arrays: &'a std::collections::HashMap<u32, FlatConstInfo>,
+
+    /// (Issue #50) Per-function row aliases. When a function declares
+    /// `let krow = X[i]` where `X` is in `flat_const_arrays`, this map
+    /// records `krow_id → (X_id, <cloned row_index expr>)`. The
+    /// `IndexGet` lowering then recognises `krow[j]` as a flat-const
+    /// access and emits the same fast path as the inline `X[i][j]`
+    /// shape.
+    pub array_row_aliases: std::collections::HashMap<u32, (u32, Box<perry_hir::Expr>)>,
+}
+
+/// (Issue #50) Info about a flat-folded const 2D int array.
+#[derive(Debug, Clone)]
+pub struct FlatConstInfo {
+    pub global_name: String,
+    pub rows: usize,
+    pub cols: usize,
 }
 
 /// Per-module i18n table snapshot used by the LLVM codegen to resolve
@@ -1472,6 +1497,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // bench_array_ops with ~400K reads per iteration this is a
         // major performance win.
         Expr::IndexGet { object, index } => {
+            // Issue #50: flat-const 2D int array fast path. Replaces
+            // `X[i][j]` (inline) and `krow[j]` (aliased row pattern)
+            // with a direct GEP + load from a private `[N x i32]`
+            // global emitted at module compile. Skips the arena header
+            // + length check + double reload per access. Returns the
+            // element as a NaN-boxed double (`sitofp i32 → double`) so
+            // callers that expect fp receive the same JSValue shape
+            // they already do; callers that expect i32 (via the #49
+            // `lower_expr_as_i32` path) collapse the `fptosi(sitofp)`
+            // round-trip during instcombine.
+            if let Some(v) = try_lower_flat_const_index_get(ctx, object, index)? {
+                return Ok(v);
+            }
+
             // String indexing fast path: `s[i]` returns the char at
             // position i as a single-char string. Handled before the
             // array path so `str[0]` doesn't fall through to a raw
@@ -7077,6 +7116,117 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             variant_name(other)
         ),
     }
+}
+
+/// (Issue #50) If `IndexGet { object, index }` is a flat-const access
+/// (inline `X[i][j]` or aliased `krow[j]`), lower it directly against
+/// the `[N x i32]` global and return the NaN-boxed-double form of the
+/// element. Returns `Ok(None)` when the pattern doesn't apply.
+fn try_lower_flat_const_index_get(
+    ctx: &mut FnCtx<'_>,
+    object: &Expr,
+    index: &Expr,
+) -> Result<Option<String>> {
+    let (info, row_expr, col_expr): (FlatConstInfo, Box<Expr>, Box<Expr>) = match object {
+        // Inline: IndexGet(IndexGet(LocalGet(X), i), j)
+        Expr::IndexGet { object: outer_obj, index: outer_idx } => {
+            if let Expr::LocalGet(id) = outer_obj.as_ref() {
+                if let Some(info) = ctx.flat_const_arrays.get(id).cloned() {
+                    (info, outer_idx.clone(), Box::new(index.clone()))
+                } else {
+                    return Ok(None);
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        // Aliased: IndexGet(LocalGet(krow), j) where krow was init'd
+        // as `IndexGet(LocalGet(X), i)` for a flat-const X.
+        Expr::LocalGet(alias_id) => {
+            if let Some((const_id, row_expr)) = ctx.array_row_aliases.get(alias_id).cloned() {
+                if let Some(info) = ctx.flat_const_arrays.get(&const_id).cloned() {
+                    (info, row_expr, Box::new(index.clone()))
+                } else {
+                    return Ok(None);
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        _ => return Ok(None),
+    };
+
+    // Compute `row_i32` and `col_i32` as i32 SSA values. Use the existing
+    // integer lowering when possible (both operands are likely small
+    // loop-derived values); otherwise fall back to the double path and
+    // fptosi.
+    let i32_slots = ctx.i32_counter_slots.clone();
+    let row_i32 = if can_lower_expr_as_i32(&row_expr, &i32_slots) {
+        lower_expr_as_i32(ctx, &row_expr)?
+    } else {
+        let d = lower_expr(ctx, &row_expr)?;
+        ctx.block().fptosi(DOUBLE, &d, I32)
+    };
+    let col_i32 = if can_lower_expr_as_i32(&col_expr, &i32_slots) {
+        lower_expr_as_i32(ctx, &col_expr)?
+    } else {
+        let d = lower_expr(ctx, &col_expr)?;
+        ctx.block().fptosi(DOUBLE, &d, I32)
+    };
+
+    // flat_idx = row * cols + col  (i32)
+    let blk = ctx.block();
+    let cols_str = info.cols.to_string();
+    let row_scaled = blk.mul(I32, &row_i32, &cols_str);
+    let flat_idx = blk.add(I32, &row_scaled, &col_i32);
+
+    // GEP into the `[N x i32]` global: ptr = &global[0][flat_idx]
+    let reg = blk.fresh_reg();
+    let n = info.rows * info.cols;
+    let ty = format!("[{} x i32]", n);
+    blk.emit_raw(format!(
+        "{} = getelementptr inbounds {}, ptr @{}, i32 0, i32 {}",
+        reg, ty, info.global_name, flat_idx
+    ));
+    let v_i32 = blk.load(I32, &reg);
+    Ok(Some(blk.sitofp(I32, &v_i32, DOUBLE)))
+}
+
+/// (Issue #50) Detect module-level `const X = [[int, ...], ...]` that
+/// qualifies as a flat-const 2D int array: rectangular shape, all
+/// elements are `Expr::Integer(n)` with n in i32, at least 1 row.
+/// Returns (rows, cols, flat_values).
+pub(crate) fn try_flat_const_2d_int(e: &Expr) -> Option<(usize, usize, Vec<i32>)> {
+    let rows = match e {
+        Expr::Array(r) => r,
+        _ => return None,
+    };
+    if rows.is_empty() {
+        return None;
+    }
+    let mut cols: Option<usize> = None;
+    let mut vals = Vec::new();
+    for row in rows {
+        let row_elems = match row {
+            Expr::Array(re) => re,
+            _ => return None,
+        };
+        match cols {
+            None => cols = Some(row_elems.len()),
+            Some(c) if c != row_elems.len() => return None,
+            _ => {}
+        }
+        for el in row_elems {
+            match el {
+                Expr::Integer(n) => {
+                    let v = i32::try_from(*n).ok()?;
+                    vals.push(v);
+                }
+                _ => return None,
+            }
+        }
+    }
+    Some((rows.len(), cols?, vals))
 }
 
 /// (Issue #49) Return `true` if `e` can be lowered as an i32-native

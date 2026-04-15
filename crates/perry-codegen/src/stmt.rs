@@ -112,6 +112,25 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 }
                 _ => {}
             }
+
+            // Issue #50: row-alias detection. When `let krow = X[i]` where
+            // `X` is a folded flat-const 2D int array, record
+            // `krow_id → (X_id, i)` so a later `krow[j]` can lower through
+            // the same flat `[N x i32]` load path as an inline `X[i][j]`.
+            // Only fires for non-mutable lets (reassignment would invalidate
+            // the alias relationship).
+            if !*mutable {
+                if let Some(perry_hir::Expr::IndexGet { object, index }) = init.as_ref() {
+                    if let perry_hir::Expr::LocalGet(const_id) = object.as_ref() {
+                        if ctx.flat_const_arrays.contains_key(const_id) {
+                            ctx.array_row_aliases.insert(
+                                *id,
+                                (*const_id, Box::new((**index).clone())),
+                            );
+                        }
+                    }
+                }
+            }
             // Refine the declared type from the initializer when the
             // declared type is Any. The HIR's destructuring lowering
             // declares synthetic `__destruct_*` lets as `ty: Any` even

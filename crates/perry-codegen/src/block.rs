@@ -56,6 +56,16 @@ impl LlBlock {
         self.terminated
     }
 
+    /// Allocate a fresh SSA register name in the enclosing function's
+    /// virtual register pool (e.g. `"%r42"`). Safe to call between
+    /// `gep` / other instructions that may emit sub-registers. Pair with
+    /// `emit_raw` when you need a custom instruction whose type string
+    /// isn't in the `LlvmType` alphabet (e.g. a literal `[N x i32]`
+    /// array type passed to `getelementptr`).
+    pub fn fresh_reg(&mut self) -> String {
+        self.reg()
+    }
+
     fn emit(&mut self, line: impl Into<String>) {
         // Never emit instructions after a terminator — LLVM rejects them and
         // the symptom is a confusing `clang` parse error many lines later.
