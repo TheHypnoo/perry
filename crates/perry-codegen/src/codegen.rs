@@ -1518,6 +1518,8 @@ fn compile_function(
         non_escaping_news,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
+        ic_site_counter: 0,
+        ic_globals: Vec::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -1537,10 +1539,14 @@ fn compile_function(
             ctx.block().ret(DOUBLE, "0.0");
         }
     }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let pending = std::mem::take(&mut ctx.pending_declares);
     drop(ctx); // releases &mut LlFunction borrow on llmod
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
+    }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
     }
     Ok(())
 }
@@ -1764,6 +1770,8 @@ fn compile_closure(
         non_escaping_news,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
+        ic_site_counter: 0,
+        ic_globals: Vec::new(),
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -1772,10 +1780,14 @@ fn compile_closure(
     if !ctx.block().is_terminated() {
         ctx.block().ret(DOUBLE, "0.0");
     }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let pending = std::mem::take(&mut ctx.pending_declares);
     drop(ctx);
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
+    }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
     }
     Ok(())
 }
@@ -1907,6 +1919,8 @@ fn compile_method(
         non_escaping_news,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
+        ic_site_counter: 0,
+        ic_globals: Vec::new(),
     };
 
     // Constructors emitted as standalone cross-module LLVM functions (named
@@ -1927,10 +1941,14 @@ fn compile_method(
     if !ctx.block().is_terminated() {
         ctx.block().ret(DOUBLE, "0.0");
     }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let pending = std::mem::take(&mut ctx.pending_declares);
     drop(ctx);
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
+    }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
     }
     Ok(())
 }
@@ -2061,6 +2079,8 @@ fn compile_module_entry(
             non_escaping_news: main_non_escaping_news,
             flat_const_arrays: &cross_module.flat_const_arrays,
             array_row_aliases: HashMap::new(),
+        ic_site_counter: 0,
+        ic_globals: Vec::new(),
         };
         // Register every module-level global's ADDRESS as a GC root so
         // the mark phase can discover pointer-typed values (Maps, Arrays,
@@ -2138,11 +2158,15 @@ fn compile_module_entry(
             ctx.current_block = exit_idx;
             ctx.block().ret(I32, "0");
         }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
         let pending = std::mem::take(&mut ctx.pending_declares);
         drop(ctx);
         for (name, ret, params) in pending {
             llmod.declare_function(&name, ret, &params);
         }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
     } else {
         let init_name = format!("{}__init", module_prefix);
         // Debug: emit puts("INIT: <prefix>") at the top of each module init
@@ -2229,6 +2253,8 @@ fn compile_module_entry(
             non_escaping_news: init_non_escaping_news,
             flat_const_arrays: &cross_module.flat_const_arrays,
             array_row_aliases: HashMap::new(),
+        ic_site_counter: 0,
+        ic_globals: Vec::new(),
         };
         // Register every module-level global's ADDRESS as a GC root —
         // same reason as the entry-module branch above (issue #36). For
@@ -2244,11 +2270,15 @@ fn compile_module_entry(
         if !ctx.block().is_terminated() {
             ctx.block().ret_void();
         }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
         let pending = std::mem::take(&mut ctx.pending_declares);
         drop(ctx);
         for (name, ret, params) in pending {
             llmod.declare_function(&name, ret, &params);
         }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
     }
     Ok(())
 }
@@ -2509,6 +2539,8 @@ fn compile_static_method(
         non_escaping_news,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
+        ic_site_counter: 0,
+        ic_globals: Vec::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;
@@ -2523,10 +2555,14 @@ fn compile_static_method(
             ctx.block().ret(DOUBLE, "0.0");
         }
     }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let pending = std::mem::take(&mut ctx.pending_declares);
     drop(ctx);
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
+    }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
     }
     Ok(())
 }

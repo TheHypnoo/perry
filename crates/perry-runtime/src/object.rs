@@ -2135,6 +2135,63 @@ pub extern "C" fn js_object_get_field_by_name_f64(obj: *const ObjectHeader, key:
     f64::from_bits(value.bits())
 }
 
+/// Monomorphic inline cache miss handler (issue #51).
+///
+/// Called when the codegen-emitted shape check (`obj->keys_array == cache[0]`)
+/// fails. Performs the full field lookup via `js_object_get_field_by_name`,
+/// then populates the per-site cache so subsequent calls with the same shape
+/// hit the inline fast path (no function call, direct field load).
+///
+/// `cache` layout: `[keys_array_ptr: i64, field_slot_index: i64]`
+///
+/// Only caches when:
+/// - obj is a valid ObjectHeader (not null, not handle, not string/array/etc.)
+/// - field exists and its slot index < 8 (inline allocation limit)
+///
+/// Overflow fields (slot >= 8) are NOT cached — the fast path loads from
+/// `obj_ptr + 24 + slot*8` which would read past the inline allocation.
+#[no_mangle]
+pub extern "C" fn js_object_get_field_ic_miss(
+    obj: *const ObjectHeader,
+    key: *const crate::StringHeader,
+    cache: *mut [i64; 2],
+) -> f64 {
+    if obj.is_null() || (obj as usize) < 0x10000 || key.is_null() {
+        return f64::from_bits(crate::value::TAG_UNDEFINED);
+    }
+    // When accessors are active anywhere in the program, skip the cache
+    // entirely: the PIC fast path does a direct field load that bypasses
+    // getter dispatch, so any object that uses defineProperty / get / set
+    // would silently return the raw slot value instead of calling the
+    // getter. The slow path through js_object_get_field_by_name handles
+    // accessors correctly.
+    let can_cache = !ACCESSORS_IN_USE.with(|c| c.get());
+    unsafe {
+        let keys = (*obj).keys_array;
+        let is_regular = (*obj).object_type == crate::error::OBJECT_TYPE_REGULAR;
+        if can_cache && is_regular && !keys.is_null() && (keys as usize) > 0x10000 {
+            let key_count = *(keys as *const u32) as usize;
+            let keys_data = (keys as *const u8).add(8) as *const f64;
+            for i in 0..key_count {
+                let k_bits = (*keys_data.add(i)).to_bits();
+                let k_ptr = (k_bits & 0x0000_FFFF_FFFF_FFFF) as *const crate::StringHeader;
+                if !k_ptr.is_null() && crate::string::js_string_equals(k_ptr, key) != 0 {
+                    if i < 8 {
+                        (*cache)[0] = keys as i64;
+                        (*cache)[1] = i as i64;
+                    }
+                    let field_ptr = (obj as *const u8).add(
+                        std::mem::size_of::<ObjectHeader>() + i * 8,
+                    ) as *const f64;
+                    return *field_ptr;
+                }
+            }
+        }
+    }
+    let value = js_object_get_field_by_name(obj, key);
+    f64::from_bits(value.bits())
+}
+
 /// Set a field value by its string key name (dynamic property access)
 /// This searches the keys array for a match and sets the corresponding value.
 /// If the key doesn't exist, it adds it to the object.

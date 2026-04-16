@@ -466,6 +466,16 @@ pub(crate) struct FnCtx<'a> {
     /// per-access NaN-box unwrap.
     pub flat_const_arrays: &'a std::collections::HashMap<u32, FlatConstInfo>,
 
+    /// (Issue #51) Counter for per-site inline cache globals. Each
+    /// `PropertyGet` site gets a unique `@perry_ic_<N>` global holding
+    /// `[cached_keys_ptr, cached_slot_idx]` (16 bytes).
+    pub ic_site_counter: u32,
+
+    /// (Issue #51) Names of IC globals created during lowering. After
+    /// the function is emitted, the caller emits `@<name> = private
+    /// global [2 x i64] zeroinitializer` for each entry.
+    pub ic_globals: Vec<String>,
+
     /// (Issue #50) Per-function row aliases. When a function declares
     /// `let krow = X[i]` where `X` is in `flat_const_arrays`, this map
     /// records `krow_id → (X_id, <cloned row_index expr>)`. The
@@ -2240,10 +2250,68 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let key_box = blk.load(DOUBLE, &key_handle_global);
             let key_bits = blk.bitcast_double_to_i64(&key_box);
             let key_handle = blk.and(I64, &key_bits, POINTER_MASK_I64);
-            Ok(blk.call(
+
+            // Issue #51: monomorphic inline cache. Per-site 16-byte global
+            // holds [cached_keys_array_ptr, cached_slot_index]. The fast path
+            // compares obj->keys_array (offset 16) to cache[0]; on match,
+            // loads the field directly at obj+24+slot*8 — no function call,
+            // no hash, no linear scan. On miss, calls the slow helper which
+            // does the full lookup and primes the cache for next time.
+            let site_id = ctx.ic_site_counter;
+            ctx.ic_site_counter += 1;
+            let cache_name = format!("perry_ic_{}", site_id);
+            ctx.pending_declares.push((
+                format!("__ic_decl_{}", site_id),
+                DOUBLE, vec![],
+            ));
+            ctx.ic_globals.push(cache_name.clone());
+
+            // Load obj->keys_array at offset 16 of ObjectHeader.
+            let keys_addr = ctx.block().add(I64, &obj_handle, "16");
+            let keys_ptr_p = ctx.block().inttoptr(I64, &keys_addr);
+            let keys_val = ctx.block().load(I64, &keys_ptr_p);
+
+            // Load cached keys_array from the per-site global.
+            let cache_ref = format!("@{}", cache_name);
+            let cache_keys_ptr = ctx.block().gep(I64, &cache_ref, &[(I64, "0")]);
+            let cached_keys = ctx.block().load(I64, &cache_keys_ptr);
+            let hit = ctx.block().icmp_eq(I64, &keys_val, &cached_keys);
+
+            let hit_idx = ctx.new_block("pic.hit");
+            let miss_idx = ctx.new_block("pic.miss");
+            let merge_idx = ctx.new_block("pic.merge");
+            let hit_label = ctx.block_label(hit_idx);
+            let miss_label = ctx.block_label(miss_idx);
+            let merge_label = ctx.block_label(merge_idx);
+            ctx.block().cond_br(&hit, &hit_label, &miss_label);
+
+            // PIC hit: direct field load.
+            ctx.current_block = hit_idx;
+            let cache_slot_ptr = ctx.block().gep(I64, &cache_ref, &[(I64, "1")]);
+            let slot = ctx.block().load(I64, &cache_slot_ptr);
+            let offset = ctx.block().shl(I64, &slot, "3");
+            let base = ctx.block().add(I64, &obj_handle, "24");
+            let field_addr = ctx.block().add(I64, &base, &offset);
+            let field_ptr = ctx.block().inttoptr(I64, &field_addr);
+            let val_hit = ctx.block().load(DOUBLE, &field_ptr);
+            let hit_end_label = ctx.block().label.clone();
+            ctx.block().br(&merge_label);
+
+            // PIC miss: slow path with cache population.
+            ctx.current_block = miss_idx;
+            let val_miss = ctx.block().call(
                 DOUBLE,
-                "js_object_get_field_by_name_f64",
-                &[(I64, &obj_handle), (I64, &key_handle)],
+                "js_object_get_field_ic_miss",
+                &[(I64, &obj_handle), (I64, &key_handle), (PTR, &cache_ref)],
+            );
+            let miss_end_label = ctx.block().label.clone();
+            ctx.block().br(&merge_label);
+
+            // Merge.
+            ctx.current_block = merge_idx;
+            Ok(ctx.block().phi(
+                DOUBLE,
+                &[(&val_hit, &hit_end_label), (&val_miss, &miss_end_label)],
             ))
         }
 
