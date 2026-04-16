@@ -2148,8 +2148,9 @@ pub extern "C" fn js_object_get_field_by_name_f64(obj: *const ObjectHeader, key:
 /// - obj is a valid ObjectHeader (not null, not handle, not string/array/etc.)
 /// - field exists and its slot index < 8 (inline allocation limit)
 ///
-/// Overflow fields (slot >= 8) are NOT cached — the fast path loads from
-/// `obj_ptr + 24 + slot*8` which would read past the inline allocation.
+/// Overflow fields (slot >= alloc_limit) are NOT cached and fall through to
+/// the slow path — the fast path loads from `obj_ptr + 24 + slot*8` which
+/// would read past the inline allocation.
 #[no_mangle]
 pub extern "C" fn js_object_get_field_ic_miss(
     obj: *const ObjectHeader,
@@ -2172,10 +2173,16 @@ pub extern "C" fn js_object_get_field_ic_miss(
         if can_cache && is_regular && !keys.is_null() && (keys as usize) > 0x10000 {
             let key_count = *(keys as *const u32) as usize;
             let keys_data = (keys as *const u8).add(8) as *const f64;
+            let alloc_limit = std::cmp::max((*obj).field_count, 8) as usize;
             for i in 0..key_count {
                 let k_bits = (*keys_data.add(i)).to_bits();
                 let k_ptr = (k_bits & 0x0000_FFFF_FFFF_FFFF) as *const crate::StringHeader;
                 if !k_ptr.is_null() && crate::string::js_string_equals(k_ptr, key) != 0 {
+                    if i >= alloc_limit {
+                        // Field is in the overflow map — fall through to the
+                        // slow path which handles overflow correctly.
+                        break;
+                    }
                     if i < 8 {
                         (*cache)[0] = keys as i64;
                         (*cache)[1] = i as i64;
