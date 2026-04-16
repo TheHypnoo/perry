@@ -688,7 +688,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
                 if !ctx.closure_captures.contains_key(id)
                     && !(ctx.boxed_vars.contains(id) && !ctx.module_globals.contains_key(id))
-                    && can_lower_expr_as_i32(value, &ctx.i32_counter_slots)
+                    && can_lower_expr_as_i32(value, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals)
                 {
                     let v_i32 = lower_expr_as_i32(ctx, value)?;
                     let blk = ctx.block();
@@ -7161,13 +7161,16 @@ fn try_lower_flat_const_index_get(
     // loop-derived values); otherwise fall back to the double path and
     // fptosi.
     let i32_slots = ctx.i32_counter_slots.clone();
-    let row_i32 = if can_lower_expr_as_i32(&row_expr, &i32_slots) {
+    let flat_ca = ctx.flat_const_arrays.clone();
+    let ara = ctx.array_row_aliases.clone();
+    let int_locals = ctx.integer_locals.clone();
+    let row_i32 = if can_lower_expr_as_i32(&row_expr, &i32_slots, &flat_ca, &ara, &int_locals) {
         lower_expr_as_i32(ctx, &row_expr)?
     } else {
         let d = lower_expr(ctx, &row_expr)?;
         ctx.block().fptosi(DOUBLE, &d, I32)
     };
-    let col_i32 = if can_lower_expr_as_i32(&col_expr, &i32_slots) {
+    let col_i32 = if can_lower_expr_as_i32(&col_expr, &i32_slots, &flat_ca, &ara, &int_locals) {
         lower_expr_as_i32(ctx, &col_expr)?
     } else {
         let d = lower_expr(ctx, &col_expr)?;
@@ -7244,16 +7247,28 @@ pub(crate) fn try_flat_const_2d_int(e: &Expr) -> Option<(usize, usize, Vec<i32>)
 pub(crate) fn can_lower_expr_as_i32(
     e: &Expr,
     i32_slots: &std::collections::HashMap<u32, String>,
+    flat_const_arrays: &std::collections::HashMap<u32, FlatConstInfo>,
+    array_row_aliases: &std::collections::HashMap<u32, (u32, Box<Expr>)>,
+    integer_locals: &std::collections::HashSet<u32>,
 ) -> bool {
     match e {
         Expr::Integer(n) => i32::try_from(*n).is_ok(),
-        Expr::LocalGet(id) => i32_slots.contains_key(id),
+        Expr::LocalGet(id) => i32_slots.contains_key(id) || integer_locals.contains(id),
         Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
         Expr::Binary { op, left, right }
             if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
         {
-            can_lower_expr_as_i32(left, i32_slots) && can_lower_expr_as_i32(right, i32_slots)
+            can_lower_expr_as_i32(left, i32_slots, flat_const_arrays, array_row_aliases, integer_locals)
+                && can_lower_expr_as_i32(right, i32_slots, flat_const_arrays, array_row_aliases, integer_locals)
         }
+        // Issue #50 bridge: element of a flat-const 2D int table.
+        Expr::IndexGet { object, .. } => match object.as_ref() {
+            Expr::IndexGet { object: inner, .. } => {
+                matches!(inner.as_ref(), Expr::LocalGet(id) if flat_const_arrays.contains_key(id))
+            }
+            Expr::LocalGet(id) => array_row_aliases.get(id).map_or(false, |(cid, _)| flat_const_arrays.contains_key(cid)),
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -7264,12 +7279,12 @@ pub(crate) fn lower_expr_as_i32(ctx: &mut FnCtx<'_>, e: &Expr) -> Result<String>
     match e {
         Expr::Integer(n) => Ok((*n as i32).to_string()),
         Expr::LocalGet(id) => {
-            let slot = ctx
-                .i32_counter_slots
-                .get(id)
-                .cloned()
-                .ok_or_else(|| anyhow!("lower_expr_as_i32: LocalGet({}) has no i32 slot", id))?;
-            Ok(ctx.block().load(I32, &slot))
+            if let Some(slot) = ctx.i32_counter_slots.get(id).cloned() {
+                Ok(ctx.block().load(I32, &slot))
+            } else {
+                let d = lower_expr(ctx, e)?;
+                Ok(ctx.block().fptosi(DOUBLE, &d, I32))
+            }
         }
         Expr::Binary { op, left, right }
             if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>

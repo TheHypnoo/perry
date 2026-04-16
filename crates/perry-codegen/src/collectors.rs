@@ -1216,9 +1216,20 @@ fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
 /// Closure captures: writes from inside a closure body go through `LocalSet`
 /// with a rhs that's typically not int32-producing, so mutably-captured
 /// locals naturally fall out. Read-only captures remain qualified.
-pub(crate) fn collect_integer_locals(stmts: &[perry_hir::Stmt]) -> HashSet<u32> {
+pub(crate) fn collect_integer_locals(
+    stmts: &[perry_hir::Stmt],
+    flat_const_ids: &HashSet<u32>,
+) -> HashSet<u32> {
     let mut candidates: HashSet<u32> = HashSet::new();
-    collect_integer_let_ids(stmts, &mut candidates);
+
+    // Issue #50 bridge: pre-compute which locals are row-aliases of
+    // flat-const 2D int arrays BEFORE collecting integer let ids, since
+    // `collect_integer_let_ids` needs to recognize `let k = krow[j]`
+    // (where krow is a flat-const row alias) as an int-producing init.
+    let mut flat_row_alias_ids: HashSet<u32> = HashSet::new();
+    collect_flat_row_aliases(stmts, flat_const_ids, &mut flat_row_alias_ids);
+
+    collect_integer_let_ids(stmts, &mut candidates, flat_const_ids, &flat_row_alias_ids);
 
     // Iterate to a fixed point (issue #49): `is_int32_producing_expr` now
     // recognizes `LocalGet(id)` as int-producing when `id` is itself
@@ -1229,7 +1240,10 @@ pub(crate) fn collect_integer_locals(stmts: &[perry_hir::Stmt]) -> HashSet<u32> 
     // stabilizes.
     loop {
         let mut disqualified: HashSet<u32> = HashSet::new();
-        collect_non_int_localset_ids_in_stmts(stmts, &mut disqualified, &candidates);
+        collect_non_int_localset_ids_in_stmts(
+            stmts, &mut disqualified, &candidates,
+            flat_const_ids, &flat_row_alias_ids,
+        );
         let before = candidates.len();
         candidates.retain(|id| !disqualified.contains(id));
         if candidates.len() == before {
@@ -1237,6 +1251,43 @@ pub(crate) fn collect_integer_locals(stmts: &[perry_hir::Stmt]) -> HashSet<u32> 
         }
     }
     candidates
+}
+
+fn collect_flat_row_aliases(
+    stmts: &[perry_hir::Stmt],
+    flat_const_ids: &HashSet<u32>,
+    out: &mut HashSet<u32>,
+) {
+    use perry_hir::{Expr, Stmt};
+    for s in stmts {
+        match s {
+            Stmt::Let { id, init: Some(Expr::IndexGet { object, .. }), mutable: false, .. } => {
+                if let Expr::LocalGet(const_id) = object.as_ref() {
+                    if flat_const_ids.contains(const_id) {
+                        out.insert(*id);
+                    }
+                }
+            }
+            Stmt::If { then_branch, else_branch, .. } => {
+                collect_flat_row_aliases(then_branch, flat_const_ids, out);
+                if let Some(eb) = else_branch {
+                    collect_flat_row_aliases(eb, flat_const_ids, out);
+                }
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(init_stmt) = init {
+                    collect_flat_row_aliases(
+                        std::slice::from_ref(init_stmt), flat_const_ids, out,
+                    );
+                }
+                collect_flat_row_aliases(body, flat_const_ids, out);
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                collect_flat_row_aliases(body, flat_const_ids, out);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Returns `true` if evaluating `e` yields a value that will already be
@@ -1265,7 +1316,12 @@ pub(crate) fn collect_integer_locals(stmts: &[perry_hir::Stmt]) -> HashSet<u32> 
 /// Rejected: everything else (notably `Div`/`Mod` without a `|0` wrapper,
 /// bare floats, calls returning doubles, etc.) because they can produce
 /// non-integer doubles at runtime.
-fn is_int32_producing_expr(e: &perry_hir::Expr, known_int_locals: &HashSet<u32>) -> bool {
+fn is_int32_producing_expr(
+    e: &perry_hir::Expr,
+    known_int_locals: &HashSet<u32>,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
+) -> bool {
     use perry_hir::{BinaryOp, Expr};
     match e {
         Expr::Integer(_) => true,
@@ -1279,8 +1335,8 @@ fn is_int32_producing_expr(e: &perry_hir::Expr, known_int_locals: &HashSet<u32>)
         Expr::Binary { op, left, right }
             if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
         {
-            is_int32_producing_expr(left, known_int_locals)
-                && is_int32_producing_expr(right, known_int_locals)
+            is_int32_producing_expr(left, known_int_locals, flat_const_ids, flat_row_alias_ids)
+                && is_int32_producing_expr(right, known_int_locals, flat_const_ids, flat_row_alias_ids)
         }
         Expr::Binary { op, .. } => matches!(
             op,
@@ -1293,48 +1349,85 @@ fn is_int32_producing_expr(e: &perry_hir::Expr, known_int_locals: &HashSet<u32>)
         ),
         Expr::LocalGet(id) => known_int_locals.contains(id),
         Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
+        // Issue #50 bridge: element access on a flat-const 2D int array
+        // produces i32. Two shapes:
+        //   - inline `X[i][j]`: IndexGet(IndexGet(LocalGet(X), i), j)
+        //   - aliased `krow[j]`: IndexGet(LocalGet(alias), j)
+        Expr::IndexGet { object, .. } => match object.as_ref() {
+            Expr::IndexGet { object: inner, .. } => {
+                matches!(inner.as_ref(), Expr::LocalGet(id) if flat_const_ids.contains(id))
+            }
+            Expr::LocalGet(id) => flat_row_alias_ids.contains(id),
+            _ => false,
+        },
         _ => false,
     }
 }
 
-fn collect_integer_let_ids(stmts: &[perry_hir::Stmt], out: &mut HashSet<u32>) {
+fn is_flat_const_indexget(
+    e: &perry_hir::Expr,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
+) -> bool {
+    use perry_hir::Expr;
+    match e {
+        Expr::IndexGet { object, .. } => match object.as_ref() {
+            Expr::IndexGet { object: inner, .. } => {
+                matches!(inner.as_ref(), Expr::LocalGet(id) if flat_const_ids.contains(id))
+            }
+            Expr::LocalGet(id) => flat_row_alias_ids.contains(id),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn collect_integer_let_ids(
+    stmts: &[perry_hir::Stmt],
+    out: &mut HashSet<u32>,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
+) {
     use perry_hir::{Expr, Stmt};
     for s in stmts {
         match s {
-            Stmt::Let { id, init: Some(Expr::Integer(_)), .. } => {
+            Stmt::Let { id, init: Some(init), .. }
+                if matches!(init, Expr::Integer(_))
+                    || is_flat_const_indexget(init, flat_const_ids, flat_row_alias_ids) =>
+            {
                 out.insert(*id);
             }
             Stmt::If { then_branch, else_branch, .. } => {
-                collect_integer_let_ids(then_branch, out);
+                collect_integer_let_ids(then_branch, out, flat_const_ids, flat_row_alias_ids);
                 if let Some(eb) = else_branch {
-                    collect_integer_let_ids(eb, out);
+                    collect_integer_let_ids(eb, out, flat_const_ids, flat_row_alias_ids);
                 }
             }
             Stmt::For { init, body, .. } => {
                 if let Some(init_stmt) = init {
-                    collect_integer_let_ids(std::slice::from_ref(init_stmt), out);
+                    collect_integer_let_ids(std::slice::from_ref(init_stmt), out, flat_const_ids, flat_row_alias_ids);
                 }
-                collect_integer_let_ids(body, out);
+                collect_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids);
             }
             Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
-                collect_integer_let_ids(body, out);
+                collect_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids);
             }
             Stmt::Try { body, catch, finally } => {
-                collect_integer_let_ids(body, out);
+                collect_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids);
                 if let Some(c) = catch {
-                    collect_integer_let_ids(&c.body, out);
+                    collect_integer_let_ids(&c.body, out, flat_const_ids, flat_row_alias_ids);
                 }
                 if let Some(f) = finally {
-                    collect_integer_let_ids(f, out);
+                    collect_integer_let_ids(f, out, flat_const_ids, flat_row_alias_ids);
                 }
             }
             Stmt::Switch { cases, .. } => {
                 for c in cases {
-                    collect_integer_let_ids(&c.body, out);
+                    collect_integer_let_ids(&c.body, out, flat_const_ids, flat_row_alias_ids);
                 }
             }
             Stmt::Labeled { body, .. } => {
-                collect_integer_let_ids(std::slice::from_ref(body.as_ref()), out);
+                collect_integer_let_ids(std::slice::from_ref(body.as_ref()), out, flat_const_ids, flat_row_alias_ids);
             }
             _ => {}
         }
@@ -1354,49 +1447,56 @@ fn collect_non_int_localset_ids_in_stmts(
     stmts: &[perry_hir::Stmt],
     out: &mut HashSet<u32>,
     known_int_locals: &HashSet<u32>,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
 ) {
-    collect_localset_ids_in_stmts_filtered(stmts, out, Some(known_int_locals));
+    collect_localset_ids_in_stmts_filtered(
+        stmts, out, Some(known_int_locals), flat_const_ids, flat_row_alias_ids,
+    );
 }
 
 fn collect_localset_ids_in_stmts(stmts: &[perry_hir::Stmt], out: &mut HashSet<u32>) {
-    collect_localset_ids_in_stmts_filtered(stmts, out, None);
+    let empty = HashSet::new();
+    collect_localset_ids_in_stmts_filtered(stmts, out, None, &empty, &empty);
 }
 
 fn collect_localset_ids_in_stmts_filtered(
     stmts: &[perry_hir::Stmt],
     out: &mut HashSet<u32>,
     filter: Option<&HashSet<u32>>,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
 ) {
     use perry_hir::Stmt;
     for s in stmts {
         match s {
             Stmt::Expr(e) | Stmt::Throw(e) => {
-                collect_localset_ids_in_expr_filtered(e, out, filter)
+                collect_localset_ids_in_expr_filtered(e, out, filter, flat_const_ids, flat_row_alias_ids)
             }
             Stmt::Return(opt) => {
                 if let Some(e) = opt {
-                    collect_localset_ids_in_expr_filtered(e, out, filter);
+                    collect_localset_ids_in_expr_filtered(e, out, filter, flat_const_ids, flat_row_alias_ids);
                 }
             }
             Stmt::Let { init, .. } => {
                 if let Some(e) = init {
-                    collect_localset_ids_in_expr_filtered(e, out, filter);
+                    collect_localset_ids_in_expr_filtered(e, out, filter, flat_const_ids, flat_row_alias_ids);
                 }
             }
             Stmt::If { condition, then_branch, else_branch } => {
-                collect_localset_ids_in_expr_filtered(condition, out, filter);
-                collect_localset_ids_in_stmts_filtered(then_branch, out, filter);
+                collect_localset_ids_in_expr_filtered(condition, out, filter, flat_const_ids, flat_row_alias_ids);
+                collect_localset_ids_in_stmts_filtered(then_branch, out, filter, flat_const_ids, flat_row_alias_ids);
                 if let Some(eb) = else_branch {
-                    collect_localset_ids_in_stmts_filtered(eb, out, filter);
+                    collect_localset_ids_in_stmts_filtered(eb, out, filter, flat_const_ids, flat_row_alias_ids);
                 }
             }
             Stmt::While { condition, body } => {
-                collect_localset_ids_in_expr_filtered(condition, out, filter);
-                collect_localset_ids_in_stmts_filtered(body, out, filter);
+                collect_localset_ids_in_expr_filtered(condition, out, filter, flat_const_ids, flat_row_alias_ids);
+                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids);
             }
             Stmt::DoWhile { body, condition } => {
-                collect_localset_ids_in_stmts_filtered(body, out, filter);
-                collect_localset_ids_in_expr_filtered(condition, out, filter);
+                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids);
+                collect_localset_ids_in_expr_filtered(condition, out, filter, flat_const_ids, flat_row_alias_ids);
             }
             Stmt::For { init, condition, update, body } => {
                 if let Some(init_stmt) = init {
@@ -1404,32 +1504,34 @@ fn collect_localset_ids_in_stmts_filtered(
                         std::slice::from_ref(init_stmt),
                         out,
                         filter,
+                        flat_const_ids,
+                        flat_row_alias_ids,
                     );
                 }
                 if let Some(cond) = condition {
-                    collect_localset_ids_in_expr_filtered(cond, out, filter);
+                    collect_localset_ids_in_expr_filtered(cond, out, filter, flat_const_ids, flat_row_alias_ids);
                 }
                 if let Some(upd) = update {
-                    collect_localset_ids_in_expr_filtered(upd, out, filter);
+                    collect_localset_ids_in_expr_filtered(upd, out, filter, flat_const_ids, flat_row_alias_ids);
                 }
-                collect_localset_ids_in_stmts_filtered(body, out, filter);
+                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids);
             }
             Stmt::Try { body, catch, finally } => {
-                collect_localset_ids_in_stmts_filtered(body, out, filter);
+                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids);
                 if let Some(c) = catch {
-                    collect_localset_ids_in_stmts_filtered(&c.body, out, filter);
+                    collect_localset_ids_in_stmts_filtered(&c.body, out, filter, flat_const_ids, flat_row_alias_ids);
                 }
                 if let Some(f) = finally {
-                    collect_localset_ids_in_stmts_filtered(f, out, filter);
+                    collect_localset_ids_in_stmts_filtered(f, out, filter, flat_const_ids, flat_row_alias_ids);
                 }
             }
             Stmt::Switch { discriminant, cases } => {
-                collect_localset_ids_in_expr_filtered(discriminant, out, filter);
+                collect_localset_ids_in_expr_filtered(discriminant, out, filter, flat_const_ids, flat_row_alias_ids);
                 for c in cases {
                     if let Some(t) = &c.test {
-                        collect_localset_ids_in_expr_filtered(t, out, filter);
+                        collect_localset_ids_in_expr_filtered(t, out, filter, flat_const_ids, flat_row_alias_ids);
                     }
-                    collect_localset_ids_in_stmts_filtered(&c.body, out, filter);
+                    collect_localset_ids_in_stmts_filtered(&c.body, out, filter, flat_const_ids, flat_row_alias_ids);
                 }
             }
             Stmt::Labeled { body, .. } => {
@@ -1437,6 +1539,8 @@ fn collect_localset_ids_in_stmts_filtered(
                     std::slice::from_ref(body.as_ref()),
                     out,
                     filter,
+                    flat_const_ids,
+                    flat_row_alias_ids,
                 );
             }
             _ => {}
@@ -1445,25 +1549,25 @@ fn collect_localset_ids_in_stmts_filtered(
 }
 
 fn collect_localset_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
-    collect_localset_ids_in_expr_filtered(e, out, None);
+    let empty = HashSet::new();
+    collect_localset_ids_in_expr_filtered(e, out, None, &empty, &empty);
 }
 
 fn collect_localset_ids_in_expr_filtered(
     e: &perry_hir::Expr,
     out: &mut HashSet<u32>,
     filter: Option<&HashSet<u32>>,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
 ) {
     use perry_hir::{ArrayElement, CallArg, Expr};
     let mut walk = |sub: &Expr, out: &mut HashSet<u32>| {
-        collect_localset_ids_in_expr_filtered(sub, out, filter);
+        collect_localset_ids_in_expr_filtered(sub, out, filter, flat_const_ids, flat_row_alias_ids);
     };
     match e {
         Expr::LocalSet(id, value) => {
-            // In filter mode we only record LocalSets whose rhs would LOSE
-            // integer-ness — so writes like `sum = (sum + i) | 0` don't
-            // disqualify `sum` from getting an i32 slot.
             match filter {
-                Some(known) if is_int32_producing_expr(value, known) => {}
+                Some(known) if is_int32_producing_expr(value, known, flat_const_ids, flat_row_alias_ids) => {}
                 _ => {
                     out.insert(*id);
                 }

@@ -1460,7 +1460,7 @@ fn compile_function(
 
     // Pre-walk: which locals are provably integer-valued? Used by
     // `BinaryOp::Mod` to emit integer modulo instead of libm `fmod()`.
-    let integer_locals = crate::collectors::collect_integer_locals(&f.body);
+    let integer_locals = crate::collectors::collect_integer_locals(&f.body, &cross_module.flat_const_arrays.keys().copied().collect());
 
     // Pre-walk: which `let x = new Class(...)` locals never escape?
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
@@ -1703,7 +1703,7 @@ fn compile_closure(
     // the closure body just sees them via the capture mechanism.
     let closure_boxed_vars = module_boxed_vars.clone();
 
-    let integer_locals = crate::collectors::collect_integer_locals(body);
+    let integer_locals = crate::collectors::collect_integer_locals(body, &cross_module.flat_const_arrays.keys().copied().collect());
 
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
         body, &closure_boxed_vars, module_globals,
@@ -1850,7 +1850,7 @@ fn compile_method(
 
     let method_boxed_vars = module_boxed_vars.clone();
 
-    let integer_locals = crate::collectors::collect_integer_locals(&method.body);
+    let integer_locals = crate::collectors::collect_integer_locals(&method.body, &cross_module.flat_const_arrays.keys().copied().collect());
 
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
         &method.body, &method_boxed_vars, module_globals,
@@ -2006,7 +2006,7 @@ fn compile_module_entry(
         main.mark_entry_init_boundary();
 
         let main_boxed_vars = module_boxed_vars.clone();
-        let main_integer_locals = crate::collectors::collect_integer_locals(&hir.init);
+        let main_integer_locals = crate::collectors::collect_integer_locals(&hir.init, &cross_module.flat_const_arrays.keys().copied().collect());
         let main_non_escaping_news = crate::collectors::collect_non_escaping_news(
             &hir.init, &main_boxed_vars, module_globals,
         );
@@ -2174,7 +2174,7 @@ fn compile_module_entry(
         init_fn.mark_entry_init_boundary();
 
         let init_boxed_vars = module_boxed_vars.clone();
-        let init_integer_locals = crate::collectors::collect_integer_locals(&hir.init);
+        let init_integer_locals = crate::collectors::collect_integer_locals(&hir.init, &cross_module.flat_const_arrays.keys().copied().collect());
         let init_non_escaping_news = crate::collectors::collect_non_escaping_news(
             &hir.init, &init_boxed_vars, module_globals,
         );
@@ -2447,7 +2447,7 @@ fn compile_static_method(
         .map(|p| (p.id, p.ty.clone()))
         .collect();
 
-    let integer_locals = crate::collectors::collect_integer_locals(&f.body);
+    let integer_locals = crate::collectors::collect_integer_locals(&f.body, &cross_module.flat_const_arrays.keys().copied().collect());
 
     let static_boxed_vars = module_boxed_vars.clone();
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
