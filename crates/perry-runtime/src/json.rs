@@ -101,6 +101,22 @@ unsafe fn str_from_header<'a>(ptr: *const StringHeader) -> Option<&'a str> {
 
 // ─── Direct JSON parser ────────────────────────────────────────────────────────
 
+/// Result of parsing a JSON string: either a zero-copy borrow from the
+/// input buffer (no escapes) or an owned allocation (had escape sequences).
+enum ParsedStr<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl<'a> ParsedStr<'a> {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            ParsedStr::Borrowed(s) => s,
+            ParsedStr::Owned(v) => v,
+        }
+    }
+}
+
 struct DirectParser<'a> {
     input: &'a [u8],
     pos: usize,
@@ -158,20 +174,42 @@ impl<'a> DirectParser<'a> {
 
     unsafe fn parse_string_value(&mut self) -> JSValue {
         if let Some(s) = self.parse_string_bytes() {
-            let ptr = js_string_from_bytes(s.as_ptr(), s.len() as u32);
+            let b = s.as_bytes();
+            let ptr = js_string_from_bytes(b.as_ptr(), b.len() as u32);
             JSValue::string_ptr(ptr)
         } else {
             JSValue::null()
         }
     }
 
-    fn parse_string_bytes(&mut self) -> Option<Vec<u8>> {
+    /// Zero-copy fast path: if the string has no escape sequences,
+    /// return a direct slice into the input buffer. Falls back to
+    /// `parse_string_bytes_slow` for strings containing `\`.
+    fn parse_string_bytes(&mut self) -> Option<ParsedStr<'a>> {
         if self.peek() != Some(b'"') {
             return None;
         }
         self.advance();
+        let start = self.pos;
+        // Fast scan: look for closing `"` without any `\`.
+        while self.pos < self.input.len() {
+            let ch = self.input[self.pos];
+            if ch == b'"' {
+                let slice = &self.input[start..self.pos];
+                self.pos += 1;
+                return Some(ParsedStr::Borrowed(slice));
+            }
+            if ch == b'\\' {
+                // Has escapes — fall back to slow path from current position.
+                return self.parse_string_bytes_slow(start);
+            }
+            self.pos += 1;
+        }
+        None
+    }
 
-        let mut result = Vec::new();
+    fn parse_string_bytes_slow(&mut self, start: usize) -> Option<ParsedStr<'a>> {
+        let mut result = Vec::from(&self.input[start..self.pos]);
         loop {
             if self.pos >= self.input.len() {
                 return None;
@@ -179,7 +217,7 @@ impl<'a> DirectParser<'a> {
             let ch = self.input[self.pos];
             self.pos += 1;
             match ch {
-                b'"' => return Some(result),
+                b'"' => return Some(ParsedStr::Owned(result)),
                 b'\\' => {
                     if self.pos >= self.input.len() {
                         return None;
@@ -238,7 +276,6 @@ impl<'a> DirectParser<'a> {
         self.skip_whitespace();
 
         let saved_roots = parse_root_save_len();
-        let mut pairs: Vec<(Vec<u8>, JSValue)> = Vec::new();
 
         if self.peek() == Some(b'}') {
             self.advance();
@@ -247,6 +284,16 @@ impl<'a> DirectParser<'a> {
             js_object_set_keys(js_obj, keys_arr);
             return JSValue::object_ptr(js_obj as *mut u8);
         }
+
+        // Incremental build: allocate the object upfront and set fields
+        // as we parse them (no intermediate Vec). Combined with key
+        // interning (PARSE_KEY_CACHE) and transition-cache shape sharing
+        // (js_object_set_field_by_name), this gives:
+        //  - First record of each schema: N key allocs + N transitions.
+        //  - Subsequent records: 0 key allocs + N transition hits.
+        //  - Zero Rust-heap Vec allocations per record.
+        let js_obj = js_object_alloc(0, 0);
+        let _obj_slot = parse_root_push(JSValue::object_ptr(js_obj as *mut u8));
 
         loop {
             self.skip_whitespace();
@@ -260,10 +307,29 @@ impl<'a> DirectParser<'a> {
             }
 
             let value = self.parse_value();
-            // Root immediately — `pairs` backing storage is on the Rust heap, so
-            // GC stack scan can't see heap pointers stored inside it.
+            // Root the value before the key-intern + set_field path
+            // (which may allocate and trigger GC).
             parse_root_push(value);
-            pairs.push((key, value));
+
+            let key_bytes = key.as_bytes();
+            // Two-phase lookup: check cache with immutable borrow first,
+            // then allocate OUTSIDE the borrow (js_string_from_bytes can
+            // trigger GC → scan_parse_roots → borrow() on same RefCell).
+            let cached = PARSE_KEY_CACHE.with(|c| {
+                c.borrow().get(key_bytes).copied()
+            });
+            let key_ptr = if let Some(p) = cached {
+                p
+            } else {
+                let ptr = js_string_from_bytes(key_bytes.as_ptr(), key_bytes.len() as u32);
+                PARSE_KEY_CACHE.with(|c| {
+                    c.borrow_mut().insert(key_bytes.to_vec(), ptr);
+                });
+                ptr
+            };
+            crate::object::js_object_set_field_by_name(
+                js_obj, key_ptr as *mut StringHeader, f64::from_bits(value.bits()),
+            );
 
             self.skip_whitespace();
             if self.peek() == Some(b',') {
@@ -273,38 +339,7 @@ impl<'a> DirectParser<'a> {
             }
         }
         self.expect(b'}');
-
-        // Issue #51 follow-up: use js_object_set_field_by_name (goes through
-        // the TRANSITION_CACHE) so all records from the same JSON schema
-        // share their keys_array pointer. Combined with key interning via
-        // PARSE_KEY_CACHE, this gives:
-        //  - First record: N string allocs + N transition-cache misses.
-        //  - Subsequent records: 0 string allocs + N transition-cache hits.
-        //  - The monomorphic inline cache (PIC) at each PropertyGet site
-        //    then hits for every record after the first.
-        let js_obj = js_object_alloc(0, 0);
-        let obj_slot = parse_root_push(JSValue::object_ptr(js_obj as *mut u8));
-
-        for (_idx, (key, value)) in pairs.into_iter().enumerate() {
-            let key_ptr = PARSE_KEY_CACHE.with(|c| {
-                let mut cache = c.borrow_mut();
-                if let Some(&cached) = cache.get(&key) {
-                    cached
-                } else {
-                    let ptr = js_string_from_bytes(key.as_ptr(), key.len() as u32);
-                    cache.insert(key.clone(), ptr);
-                    ptr
-                }
-            });
-            parse_root_push(JSValue::string_ptr(key_ptr as *mut StringHeader));
-            crate::object::js_object_set_field_by_name(
-                js_obj, key_ptr as *mut StringHeader, f64::from_bits(value.bits()),
-            );
-        }
-        // Restore roots — js_obj is returned; caller is responsible for rooting it
-        // before triggering any further allocation.
         parse_root_restore(saved_roots);
-        let _ = obj_slot;
         JSValue::object_ptr(js_obj as *mut u8)
     }
 
