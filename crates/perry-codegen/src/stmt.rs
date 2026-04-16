@@ -351,8 +351,14 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 let v = lower_expr(ctx, init_expr)?;
                 ctx.block().store(DOUBLE, &v, &slot);
                 // Seed the i32 slot from the init value when the local has one.
+                // Use fptosi→i64 + trunc→i32 instead of direct fptosi→i32
+                // to handle unsigned values (e.g. `let s = 0x9E3779B9 >>> 0`
+                // where the double exceeds INT32_MAX). Direct fptosi→i32 is
+                // UB for such values; going through i64 then truncating gives
+                // the correct bit pattern.
                 if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
-                    let v_i32 = ctx.block().fptosi(DOUBLE, &v, I32);
+                    let v_i64 = ctx.block().fptosi(DOUBLE, &v, crate::types::I64);
+                    let v_i32 = ctx.block().trunc(crate::types::I64, &v_i64, I32);
                     ctx.block().store(I32, &v_i32, &i32_slot);
                 }
             } else if let Some(cv) = ctx.compile_time_constants.get(id) {

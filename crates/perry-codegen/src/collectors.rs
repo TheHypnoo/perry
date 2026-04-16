@@ -1432,12 +1432,11 @@ fn collect_integer_let_ids(
                     // Bitwise ops always produce int32 per JS spec. Safe for const
                     // because they never get i32 counter slots (only mutable locals do).
                     || (!mutable && is_bitwise_expr(init))
-                    // Seed mutable Lets with `(expr) | 0` init. The `| 0` applies
-                    // ToInt32 which always produces a value in [-2^31, 2^31-1], so
-                    // fptosi on the double result is defined behavior. NOTE: we do NOT
-                    // seed `(expr) >>> 0` (ToUint32) because the result can exceed
-                    // INT32_MAX, causing fptosi UB.
-                    || (*mutable && matches!(init, Expr::Binary { op: perry_hir::BinaryOp::BitOr, right, .. } if matches!(right.as_ref(), Expr::Integer(0))))
+                    // Seed mutable Lets with `(expr) | 0` or `(expr) >>> 0` init.
+                    // Both produce 32-bit integer values. The i32 slot init uses
+                    // toint32_safe (fptosi→i64 then trunc→i32) to handle unsigned
+                    // values that exceed INT32_MAX without fptosi UB.
+                    || (*mutable && matches!(init, Expr::Binary { op: perry_hir::BinaryOp::BitOr | perry_hir::BinaryOp::UShr, right, .. } if matches!(right.as_ref(), Expr::Integer(0))))
  =>
             {
                 out.insert(*id);

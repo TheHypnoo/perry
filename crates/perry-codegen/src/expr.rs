@@ -761,8 +761,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 // Mirror to the parallel i32 slot allocated for int32-stable
                 // locals (issue #48). Without this, the i32 slot would go
                 // stale on every `sum = (sum + i) | 0` write.
+                // Use fptosi→i64 + trunc→i32 to safely handle unsigned values
+                // (e.g. xorshift state `s = ... >>> 0` where double > INT32_MAX).
                 if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
-                    let v_i32 = ctx.block().fptosi(DOUBLE, &v, I32);
+                    let v_i64 = ctx.block().fptosi(DOUBLE, &v, crate::types::I64);
+                    let v_i32 = ctx.block().trunc(crate::types::I64, &v_i64, I32);
                     ctx.block().store(I32, &v_i32, &i32_slot);
                 }
             } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
