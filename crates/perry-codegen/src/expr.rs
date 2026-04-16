@@ -1019,6 +1019,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 }
                 // Bitwise ops: use toint32_fast (skip NaN/Inf guard) when
                 // operands are known-finite from integer analysis.
+                //
+                // `x | 0` and `x >>> 0` where x is known-finite: the op
+                // is just a ToInt32/ToUint32 coercion. When x comes from
+                // the integer path (already finite), skip the toint32
+                // entirely — just fptosi + sitofp (identity for in-range
+                // values, LLVM eliminates via instcombine).
+                BinaryOp::BitOr
+                    if matches!(right.as_ref(), Expr::Integer(0))
+                        && is_known_finite(ctx, left) =>
+                {
+                    let blk = ctx.block();
+                    let li = blk.toint32_fast(&l);
+                    blk.sitofp(I32, &li, DOUBLE)
+                }
                 BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
                 | BinaryOp::Shl | BinaryOp::Shr => {
                     let l_safe = is_known_finite(ctx, left);
@@ -1035,6 +1049,14 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         _ => unreachable!(),
                     };
                     blk.sitofp(I32, &v, DOUBLE)
+                }
+                BinaryOp::UShr
+                    if matches!(right.as_ref(), Expr::Integer(0))
+                        && is_known_finite(ctx, left) =>
+                {
+                    let blk = ctx.block();
+                    let li = blk.toint32_fast(&l);
+                    blk.uitofp(I32, &li, DOUBLE)
                 }
                 BinaryOp::UShr => {
                     let l_safe = is_known_finite(ctx, left);
@@ -4363,11 +4385,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().sitofp(I32, &result_i32, DOUBLE))
         }
         Expr::Uint8ArraySet { array, index, value } => {
-            // Inline `buf[idx] = v` counterpart to Uint8ArrayGet (issue #47).
-            // Replaces `bl js_buffer_set` with a bounds-checked `strb`. Prior
-            // stub before v0.5.36 returned `lower_expr(value)` verbatim, making
-            // `u8[i] = v` a silent no-op; the runtime-call version fixed that;
-            // this version eliminates the call overhead for tight encoders.
+            // Inline `buf[idx] = v` — branchless via @llvm.assume (mirrors
+            // Uint8ArrayGet). Eliminates the branch+merge diamond that
+            // blocked vectorization in tight encoder / input-gen loops.
             let a = lower_expr(ctx, array)?;
             let i = lower_expr(ctx, index)?;
             let v = lower_expr(ctx, value)?;
@@ -4377,23 +4397,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let val_i32 = blk.fptosi(DOUBLE, &v, I32);
             let len_i32 = blk.safe_load_i32_from_ptr(&handle);
             let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
-            let ok_idx = ctx.new_block("u8set.ok");
-            let merge_idx = ctx.new_block("u8set.merge");
-            let ok_label = ctx.block_label(ok_idx);
-            let merge_label = ctx.block_label(merge_idx);
-            ctx.block().cond_br(&in_bounds, &ok_label, &merge_label);
-            // In-bounds: truncate to i8 and store.
-            ctx.current_block = ok_idx;
-            let blk = ctx.block();
+            blk.emit_raw(format!("call void @llvm.assume(i1 {})", in_bounds));
             let idx_i64 = blk.zext(I32, &idx_i32, I64);
             let data_offset = blk.add(I64, &idx_i64, "8");
             let byte_addr = blk.add(I64, &handle, &data_offset);
             let byte_ptr = blk.inttoptr(I64, &byte_addr);
             let byte_val = blk.trunc(I32, &val_i32, I8);
             blk.store(I8, &byte_val, &byte_ptr);
-            blk.br(&merge_label);
-            // OOB simply falls through — matches js_buffer_set's silent-drop.
-            ctx.current_block = merge_idx;
             Ok(v)
         }
 
