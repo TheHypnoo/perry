@@ -415,6 +415,15 @@ impl LlBlock {
         r
     }
 
+    /// Signed integer division.  Emitted by the `(int / int) | 0` fast
+    /// path — avoids `scvtf → fdiv → fcvtzs` and lets LLVM replace
+    /// constant divisors with `smulh + asr`.
+    pub fn sdiv(&mut self, ty: LlvmType, a: &str, b: &str) -> String {
+        let r = self.reg();
+        self.emit(format!("{} = sdiv {} {}, {}", r, ty, a, b));
+        r
+    }
+
     pub fn and(&mut self, ty: LlvmType, a: &str, b: &str) -> String {
         let r = self.reg();
         self.emit(format!("{} = and {} {}, {}", r, ty, a, b));
