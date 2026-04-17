@@ -8,6 +8,7 @@ use anyhow::{anyhow, bail, Result};
 use perry_hir::Stmt;
 
 use crate::expr::{lower_expr, FnCtx};
+use crate::loop_purity::body_is_observably_side_effect_free;
 use crate::lower_conditional::lower_truthy;
 use crate::types::{DOUBLE, I8, I32, I64, PTR};
 
@@ -937,6 +938,17 @@ fn lower_for(
     // Body block.
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
+    // Issue #74: insert an empty `asm sideeffect` in bodies whose
+    // statements are all LLVM-pure (local-only arithmetic, no calls,
+    // no heap mutation). Without this, clang -O3's loop-deletion
+    // pass folds patterns like `for (let i=0;i<N;i++) sum+=1;` to
+    // `sum=N` and eliminates the loop entirely — so two `Date.now()`
+    // calls bracketing the loop end up adjacent in the binary and
+    // report 0ms wall-clock. The barrier emits zero machine
+    // instructions but is opaque to IndVarSimplify.
+    if !ctx.block().is_terminated() && body_is_observably_side_effect_free(body) {
+        ctx.block().asm_sideeffect_barrier();
+    }
     if !ctx.block().is_terminated() {
         ctx.block().br(&update_label);
     }
@@ -1273,6 +1285,10 @@ fn lower_while(ctx: &mut FnCtx<'_>, condition: &perry_hir::Expr, body: &[Stmt]) 
 
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
+    // Issue #74: see lower_for for rationale.
+    if !ctx.block().is_terminated() && body_is_observably_side_effect_free(body) {
+        ctx.block().asm_sideeffect_barrier();
+    }
     if !ctx.block().is_terminated() {
         ctx.block().br(&cond_label);
     }
@@ -1312,6 +1328,10 @@ fn lower_do_while(
 
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
+    // Issue #74: see lower_for for rationale.
+    if !ctx.block().is_terminated() && body_is_observably_side_effect_free(body) {
+        ctx.block().asm_sideeffect_barrier();
+    }
     if !ctx.block().is_terminated() {
         ctx.block().br(&cond_label);
     }

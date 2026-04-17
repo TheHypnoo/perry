@@ -515,6 +515,18 @@ impl LlBlock {
         self.emit(format!("call void @{}({})", func_name, arg_str));
     }
 
+    /// Empty inline-asm barrier (`call void asm sideeffect "", ""()`).
+    /// Emits zero machine instructions but is opaque to the optimizer:
+    /// LLVM's loop-deletion / IndVarSimplify cannot prove the surrounding
+    /// loop has no observable effect, so the loop is preserved end-to-end
+    /// instead of being folded to its closed-form result. Used by
+    /// `lower_for` on bodies that would otherwise be eliminated (e.g.
+    /// `for (let i=0;i<N;i++) sum+=1;` between two `Date.now()` calls —
+    /// issue #74).
+    pub fn asm_sideeffect_barrier(&mut self) {
+        self.emit("call void asm sideeffect \"\", \"\"()".to_string());
+    }
+
     pub fn call_indirect(
         &mut self,
         ret_ty: LlvmType,
