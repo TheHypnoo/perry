@@ -134,22 +134,6 @@ pub extern "C" fn js_array_alloc_with_length(capacity: u32) -> *mut ArrayHeader 
     unsafe {
         (*ptr).length = capacity;  // Set length = requested capacity
         (*ptr).capacity = actual_capacity;
-
-        // Issue #73: pin `new Array(N)` user-facing allocations. The
-        // async await wait-loop's conservative stack scan can miss
-        // values that LLVM holds in caller-saved FP registers across
-        // the runtime poll callbacks; when GC then sweeps the block
-        // containing the array, `arena_reset_empty_blocks` rewinds
-        // the block offset and subsequent allocations overwrite the
-        // array's header — length field goes to 0, samples.slice()
-        // returns empty, computeStats produces NaN. Pinning the
-        // header guarantees the block stays live until the user
-        // explicitly drops every ref. Memory cost is bounded by the
-        // number of `new Array(N)` calls the program makes — small
-        // for benchmarks; acceptable for most long-running programs
-        // (they tend to hold a few arrays and mutate them in place).
-        let gc_header = (ptr as *mut u8).sub(crate::gc::GC_HEADER_SIZE) as *mut crate::gc::GcHeader;
-        (*gc_header).gc_flags |= crate::gc::GC_FLAG_PINNED;
     }
 
     ptr

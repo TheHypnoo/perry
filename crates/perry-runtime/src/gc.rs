@@ -659,6 +659,40 @@ impl ValidPointerSet {
     pub(crate) fn contains(&self, ptr: &usize) -> bool {
         self.sorted.binary_search(ptr).is_ok()
     }
+
+    /// Issue #73: interior-pointer lookup. Given a scanned word, find
+    /// the heap object that encloses it (if any) and return its user
+    /// pointer. This matters for runtime functions that derive
+    /// `elements_ptr = arr + 8` or `data = buf + 8` and hold only the
+    /// interior pointer while calling into user code. The conservative
+    /// scan would otherwise see `arr + 8`, miss it (it's not in
+    /// `sorted` which only has `arr`), and let the GC sweep the
+    /// backing object mid-iteration. Binary-searches for the largest
+    /// user pointer `<= query`, then consults that object's GcHeader
+    /// size to decide whether `query` lies within `[start, start+size)`.
+    pub(crate) fn enclosing_object(&self, ptr: usize) -> Option<usize> {
+        if self.sorted.is_empty() { return None; }
+        // Find insertion point: `idx` is the first entry > ptr; the
+        // candidate enclosing start is at idx-1.
+        let idx = self.sorted.partition_point(|&p| p <= ptr);
+        if idx == 0 { return None; }
+        let candidate = self.sorted[idx - 1];
+        // User pointer. The GcHeader lives at candidate - GC_HEADER_SIZE
+        // and holds the total allocation size (including the 8-byte
+        // header). `candidate` is valid-heap by construction, so
+        // candidate - 8 is safe to read.
+        unsafe {
+            let header = (candidate as *const u8).sub(GC_HEADER_SIZE) as *const GcHeader;
+            let total = (*header).size as usize;
+            // Object payload spans [candidate, candidate + total - GC_HEADER_SIZE).
+            let payload_end = candidate + total.saturating_sub(GC_HEADER_SIZE);
+            if ptr >= candidate && ptr < payload_end {
+                Some(candidate)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// Build a set of all valid user-space pointers (pointers returned to callers).
@@ -713,7 +747,12 @@ fn try_mark_value(value_bits: u64, valid_ptrs: &ValidPointerSet) -> bool {
         return false;
     }
 
-    // Validate against known heap pointers
+    // Validate against known heap pointers. NaN-boxed pointers always
+    // point at object starts (POINTER_TAG is stamped at box time on
+    // the user pointer, never at an interior offset), so a direct
+    // lookup suffices. The enclosing-object fallback lives on the
+    // raw-pointer path (`try_mark_value_or_raw`) where interior
+    // pointers actually occur.
     if !valid_ptrs.contains(&ptr_val) {
         return false;
     }
@@ -750,6 +789,59 @@ fn mark_stack_roots(valid_ptrs: &ValidPointerSet) {
     // Scan the register buffer (covers callee-saved regs: x19-x28 on AArch64, rbx/rbp/r12-r15 on x86_64)
     for &word in &jmp_buf {
         try_mark_value_or_raw(word, valid_ptrs);
+    }
+
+    // Issue #73: setjmp only captures callee-saved registers. On
+    // macOS ARM64 that's x19-x28 + d8-d15 — it misses d0-d7 and
+    // d16-d31 (caller-saved FP regs where LLVM may be holding a
+    // NaN-boxed pointer across the async poll loop's internal calls,
+    // especially under heavy optimization). Capture them explicitly
+    // via inline asm so any spilling LLVM hasn't performed is
+    // irrelevant — we read the regs directly as they stand at GC
+    // entry. A value in d0-d31 ANY of which happens to be a
+    // NaN-boxed heap pointer gets marked here.
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let mut fp_regs: [u64; 32] = [0; 32];
+        std::arch::asm!(
+            "str d0,  [{buf}, #0x00]",
+            "str d1,  [{buf}, #0x08]",
+            "str d2,  [{buf}, #0x10]",
+            "str d3,  [{buf}, #0x18]",
+            "str d4,  [{buf}, #0x20]",
+            "str d5,  [{buf}, #0x28]",
+            "str d6,  [{buf}, #0x30]",
+            "str d7,  [{buf}, #0x38]",
+            "str d8,  [{buf}, #0x40]",
+            "str d9,  [{buf}, #0x48]",
+            "str d10, [{buf}, #0x50]",
+            "str d11, [{buf}, #0x58]",
+            "str d12, [{buf}, #0x60]",
+            "str d13, [{buf}, #0x68]",
+            "str d14, [{buf}, #0x70]",
+            "str d15, [{buf}, #0x78]",
+            "str d16, [{buf}, #0x80]",
+            "str d17, [{buf}, #0x88]",
+            "str d18, [{buf}, #0x90]",
+            "str d19, [{buf}, #0x98]",
+            "str d20, [{buf}, #0xa0]",
+            "str d21, [{buf}, #0xa8]",
+            "str d22, [{buf}, #0xb0]",
+            "str d23, [{buf}, #0xb8]",
+            "str d24, [{buf}, #0xc0]",
+            "str d25, [{buf}, #0xc8]",
+            "str d26, [{buf}, #0xd0]",
+            "str d27, [{buf}, #0xd8]",
+            "str d28, [{buf}, #0xe0]",
+            "str d29, [{buf}, #0xe8]",
+            "str d30, [{buf}, #0xf0]",
+            "str d31, [{buf}, #0xf8]",
+            buf = in(reg) fp_regs.as_mut_ptr(),
+            options(nostack, preserves_flags),
+        );
+        for &word in &fp_regs {
+            try_mark_value_or_raw(word, valid_ptrs);
+        }
     }
 
     // Get stack bounds
@@ -807,11 +899,23 @@ fn try_mark_value_or_raw(word: u64, valid_ptrs: &ValidPointerSet) -> bool {
         return false; // Too small (null/invalid) or has upper bits set (NaN tag or non-address)
     }
     let raw_ptr = raw_ptr_u64 as usize;
-    if !valid_ptrs.contains(&raw_ptr) {
-        return false;
-    }
+    // Try direct match first (pointer to object start).
+    let target = if valid_ptrs.contains(&raw_ptr) {
+        raw_ptr
+    } else {
+        // Issue #73: interior-pointer fallback. Runtime functions like
+        // `js_array_reduce` derive `elements_ptr = arr + 8` and hold
+        // only the interior pointer across user-callback invocations.
+        // A conservative scan that only matches object-start addresses
+        // would miss this, letting the GC sweep the backing array
+        // mid-iteration. Look up the enclosing object and mark that.
+        match valid_ptrs.enclosing_object(raw_ptr) {
+            Some(start) => start,
+            None => return false,
+        }
+    };
     unsafe {
-        let header = header_from_user_ptr(raw_ptr as *const u8);
+        let header = header_from_user_ptr(target as *const u8);
         if (*header).gc_flags & GC_FLAG_MARKED != 0 {
             return false; // Already marked
         }
