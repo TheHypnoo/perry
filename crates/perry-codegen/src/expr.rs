@@ -523,6 +523,13 @@ pub(crate) struct FnCtx<'a> {
     /// different buffers don't alias (fixes the vectorizer's "unsafe
     /// dependent memory operations" remark).
     pub buffer_data_slots: std::collections::HashMap<u32, (String, u32)>,
+    /// Starting alias-scope id for buffers registered in this function.
+    /// Seeded from `LlModule::buffer_alias_counter` at FnCtx creation so
+    /// scope ids don't collide across functions in the same LLVM module.
+    /// New scopes are allocated as `base + buffer_data_slots.len()`;
+    /// after the function finishes lowering the caller bumps the module
+    /// counter by the number of slots it used (closes #71).
+    pub buffer_alias_base: u32,
 }
 
 /// (Issue #50) Info about a flat-folded const 2D int array.

@@ -348,7 +348,7 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                             let data_ptr = blk.gep(I8, &handle_ptr, &[(I32, "8")]);
                             let slot = ctx.func.alloca_entry(PTR);
                             ctx.block().store(PTR, &data_ptr, &slot);
-                            let scope_idx = ctx.buffer_data_slots.len() as u32;
+                            let scope_idx = ctx.buffer_alias_base + ctx.buffer_data_slots.len() as u32;
                             ctx.buffer_data_slots.insert(*id, (slot, scope_idx));
                         }
                     }
@@ -471,7 +471,7 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                         let data_ptr = blk.gep(I8, &handle_ptr, &[(I32, "8")]);
                         let buf_slot = ctx.func.alloca_entry(PTR);
                         ctx.block().store(PTR, &data_ptr, &buf_slot);
-                        let scope_idx = ctx.buffer_data_slots.len() as u32;
+                        let scope_idx = ctx.buffer_alias_base + ctx.buffer_data_slots.len() as u32;
                         ctx.buffer_data_slots.insert(*id, (buf_slot, scope_idx));
                     }
                 }

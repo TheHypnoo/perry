@@ -1392,6 +1392,16 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // can each have their own string-pool init without colliding.
     emit_string_pool(&mut llmod, &strings, &module_prefix, &class_keys_init_data, &class_ids, &class_table);
 
+    // Emit the buffer alias-scope metadata once per module, covering every
+    // scope id allocated across compile_function / compile_closure /
+    // compile_method / compile_static_method / compile_module_entry. Must
+    // run AFTER all function compilation so the counter reflects the true
+    // total — otherwise functions whose scope ids exceed the init
+    // function's count emit `!alias.scope !N` references with no matching
+    // metadata definition (issue #71).
+    let total_buffer_scopes = llmod.buffer_alias_counter;
+    emit_buffer_alias_metadata(&mut llmod, total_buffer_scopes);
+
     let ll_text = llmod.to_ir();
     log::debug!(
         "perry-codegen: emitted {} bytes of LLVM IR for '{}' ({} interned strings)",
@@ -1445,6 +1455,7 @@ fn compile_function(
         .collect();
 
     let ic_base = llmod.ic_counter;
+    let buffer_alias_base = llmod.buffer_alias_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
     // Small leaf functions (≤ 8 statements) get alwaysinline so LLVM
     // exposes their operations to the caller's optimizer context — critical
@@ -1563,6 +1574,7 @@ fn compile_function(
         ic_site_counter: ic_base,
         ic_globals: Vec::new(),
         buffer_data_slots: HashMap::new(),
+        buffer_alias_base,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -1585,8 +1597,10 @@ fn compile_function(
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
+    let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
     drop(ctx); // releases &mut LlFunction borrow on llmod
     llmod.ic_counter = ic_end;
+    llmod.buffer_alias_counter += buffer_alias_used;
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
     }
@@ -1655,6 +1669,7 @@ fn compile_closure(
     }
 
     let ic_base = llmod.ic_counter;
+    let buffer_alias_base = llmod.buffer_alias_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, llvm_params);
     let _ = lf.create_block("entry");
 
@@ -1832,6 +1847,7 @@ fn compile_closure(
         ic_site_counter: ic_base,
         ic_globals: Vec::new(),
         buffer_data_slots: HashMap::new(),
+        buffer_alias_base,
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -1843,8 +1859,10 @@ fn compile_closure(
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
+    let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
     drop(ctx);
     llmod.ic_counter = ic_end;
+    llmod.buffer_alias_counter += buffer_alias_used;
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
     }
@@ -1897,6 +1915,7 @@ fn compile_method(
     }
 
     let ic_base = llmod.ic_counter;
+    let buffer_alias_base = llmod.buffer_alias_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
     let _ = lf.create_block("entry");
 
@@ -1998,6 +2017,7 @@ fn compile_method(
         ic_site_counter: ic_base,
         ic_globals: Vec::new(),
         buffer_data_slots: HashMap::new(),
+        buffer_alias_base,
     };
 
     // Constructors emitted as standalone cross-module LLVM functions (named
@@ -2021,8 +2041,10 @@ fn compile_method(
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
+    let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
     drop(ctx);
     llmod.ic_counter = ic_end;
+    llmod.buffer_alias_counter += buffer_alias_used;
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
     }
@@ -2089,6 +2111,7 @@ fn compile_module_entry(
         // module-level Maps/Arrays would never be registered as GC roots
         // and the first GC cycle after connect() would free them (issue #54).
         let ic_base = llmod.ic_counter;
+    let buffer_alias_base = llmod.buffer_alias_counter;
         let main = if is_dylib {
             llmod.define_function("perry_module_init", VOID, vec![])
         } else {
@@ -2188,6 +2211,7 @@ fn compile_module_entry(
         ic_site_counter: ic_base,
         ic_globals: Vec::new(),
         buffer_data_slots: HashMap::new(),
+        buffer_alias_base,
         };
         // Register every module-level global's ADDRESS as a GC root so
         // the mark phase can discover pointer-typed values (Maps, Arrays,
@@ -2276,16 +2300,16 @@ fn compile_module_entry(
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
         let ic_end = ctx.ic_site_counter;
         let pending = std::mem::take(&mut ctx.pending_declares);
-        let buffer_alias_count = ctx.buffer_data_slots.len() as u32;
+        let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
         drop(ctx);
         llmod.ic_counter = ic_end;
+        llmod.buffer_alias_counter += buffer_alias_used;
         for (name, ret, params) in pending {
             llmod.declare_function(&name, ret, &params);
         }
     for ic_name in &ic_globals {
         llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
     }
-        emit_buffer_alias_metadata(llmod, buffer_alias_count);
     } else {
         let init_name = format!("{}__init", module_prefix);
         // Debug: emit puts("INIT: <prefix>") at the top of each module init
@@ -2298,6 +2322,7 @@ fn compile_module_entry(
             None
         };
         let ic_base = llmod.ic_counter;
+    let buffer_alias_base = llmod.buffer_alias_counter;
         let init_fn = llmod.define_function(&init_name, VOID, vec![]);
         let _ = init_fn.create_block("entry");
         {
@@ -2389,6 +2414,7 @@ fn compile_module_entry(
         ic_site_counter: ic_base,
         ic_globals: Vec::new(),
         buffer_data_slots: HashMap::new(),
+        buffer_alias_base,
         };
         // Register every module-level global's ADDRESS as a GC root —
         // same reason as the entry-module branch above (issue #36). For
@@ -2407,16 +2433,16 @@ fn compile_module_entry(
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
         let ic_end = ctx.ic_site_counter;
         let pending = std::mem::take(&mut ctx.pending_declares);
-        let buffer_alias_count = ctx.buffer_data_slots.len() as u32;
+        let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
         drop(ctx);
         llmod.ic_counter = ic_end;
+        llmod.buffer_alias_counter += buffer_alias_used;
         for (name, ret, params) in pending {
             llmod.declare_function(&name, ret, &params);
         }
     for ic_name in &ic_globals {
         llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
     }
-        emit_buffer_alias_metadata(llmod, buffer_alias_count);
     }
     Ok(())
 }
@@ -2646,6 +2672,7 @@ fn compile_static_method(
         .collect();
 
     let ic_base = llmod.ic_counter;
+    let buffer_alias_base = llmod.buffer_alias_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
     let _ = lf.create_block("entry");
 
@@ -2744,6 +2771,7 @@ fn compile_static_method(
         ic_site_counter: ic_base,
         ic_globals: Vec::new(),
         buffer_data_slots: HashMap::new(),
+        buffer_alias_base,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;
@@ -2761,8 +2789,10 @@ fn compile_static_method(
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
+    let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
     drop(ctx);
     llmod.ic_counter = ic_end;
+    llmod.buffer_alias_counter += buffer_alias_used;
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
     }

@@ -31,6 +31,14 @@ pub struct LlModule {
     /// Module-wide counter for inline cache globals (`perry_ic_N`).
     /// Must be unique across all functions in the module.
     pub ic_counter: u32,
+    /// Module-wide counter for buffer alias-scope ids. Each function's
+    /// `FnCtx` reads this as its `buffer_alias_base` at creation, then
+    /// after the function lowers its body the counter is bumped by the
+    /// number of scopes that function allocated. Must be unique across
+    /// every function in the module so `!alias.scope !201` references
+    /// emitted on loads/stores match the metadata nodes emitted once
+    /// at the end of `compile_module` (closes #71).
+    pub buffer_alias_counter: u32,
 }
 
 impl LlModule {
@@ -45,6 +53,7 @@ impl LlModule {
             string_counter: 0,
             metadata_lines: Vec::new(),
             ic_counter: 0,
+            buffer_alias_counter: 0,
         }
     }
 
