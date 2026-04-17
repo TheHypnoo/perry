@@ -1051,19 +1051,43 @@ pub extern "C" fn js_string_ends_with(s: *const StringHeader, suffix: *const Str
 
 /// Get character code at index (returns UTF-16 code unit, or NaN if out of bounds).
 /// Index is in UTF-16 code units (matches JS spec). For ASCII strings this is
-/// equivalent to byte indexing; for multi-byte UTF-8 we convert to UTF-16 first.
+/// equivalent to byte indexing; for multi-byte UTF-8 we walk codepoints without
+/// allocating — the old `encode_utf16().collect()` path made hashing a 68 MB
+/// string O(n²) (issue #65).
 #[no_mangle]
 pub extern "C" fn js_string_char_code_at(s: *const StringHeader, index: i32) -> f64 {
     if !is_valid_string_ptr(s) || index < 0 {
         return f64::NAN;
     }
 
-    let str_data = string_as_str(s);
-    let utf16: Vec<u16> = str_data.encode_utf16().collect();
-    if index as usize >= utf16.len() {
+    let u16len = unsafe { (*s).utf16_len } as usize;
+    let idx = index as usize;
+    if idx >= u16len {
         return f64::NAN;
     }
-    utf16[index as usize] as f64
+
+    // ASCII fast path: byte_len == utf16_len means every byte is one
+    // UTF-16 code unit. Direct byte index, no scan, no allocation.
+    if is_ascii_string(s) {
+        unsafe { return *string_data(s).add(idx) as f64; }
+    }
+
+    // Non-ASCII: walk codepoints counting UTF-16 units. Allocation-free.
+    let str_data = string_as_str(s);
+    let mut utf16_pos = 0usize;
+    for ch in str_data.chars() {
+        let clen = ch.len_utf16();
+        if utf16_pos + clen > idx {
+            if clen == 1 {
+                return ch as u32 as f64;
+            }
+            let mut buf = [0u16; 2];
+            ch.encode_utf16(&mut buf);
+            return buf[idx - utf16_pos] as f64;
+        }
+        utf16_pos += clen;
+    }
+    f64::NAN
 }
 
 /// Get character at UTF-16 code unit index (returns single-character string).
@@ -1207,21 +1231,36 @@ pub extern "C" fn js_string_code_point_at(s: *const StringHeader, index: i32) ->
     if !is_valid_string_ptr(s) || index < 0 {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    let str_data = string_as_str(s);
-    let utf16: Vec<u16> = str_data.encode_utf16().collect();
-    let len = utf16.len() as i32;
-    if index >= len {
+    let u16len = unsafe { (*s).utf16_len } as usize;
+    let idx = index as usize;
+    if idx >= u16len {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    let unit = utf16[index as usize];
-    if (0xD800..=0xDBFF).contains(&unit) && (index + 1) < len {
-        let next = utf16[(index + 1) as usize];
-        if (0xDC00..=0xDFFF).contains(&next) {
-            let cp = 0x10000 + ((unit as u32 - 0xD800) << 10) + (next as u32 - 0xDC00);
-            return cp as f64;
-        }
+
+    // ASCII fast path — identical to charCodeAt's.
+    if is_ascii_string(s) {
+        unsafe { return *string_data(s).add(idx) as f64; }
     }
-    unit as f64
+
+    // Non-ASCII: walk codepoints without allocating a Vec<u16>.
+    let str_data = string_as_str(s);
+    let mut utf16_pos = 0usize;
+    for ch in str_data.chars() {
+        let clen = ch.len_utf16();
+        if utf16_pos + clen > idx {
+            if clen == 1 || utf16_pos == idx {
+                // Either a BMP char, or the start of a surrogate pair
+                // (which is the whole codepoint per the spec).
+                return ch as u32 as f64;
+            }
+            // Index lands on the low surrogate — return the bare unit.
+            let mut buf = [0u16; 2];
+            ch.encode_utf16(&mut buf);
+            return buf[idx - utf16_pos] as f64;
+        }
+        utf16_pos += clen;
+    }
+    f64::from_bits(crate::value::TAG_UNDEFINED)
 }
 
 /// String.prototype.normalize(form) — Unicode normalization.
