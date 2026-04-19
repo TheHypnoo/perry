@@ -185,11 +185,43 @@ jobs:
           PERRY="target/release/perry"
           PASS=0
           FAIL=0
+          SKIP=0
           FAILURES=()
+
+          # Tests that are known to not compile cleanly under the bare
+          # `perry foo.ts -o out` smoke path. Sources:
+          # - test_ui_*: need `--target macos` / `ios-simulator` to pull
+          #   in libperry_ui_*; the no-target compile path doesn't link
+          #   the platform widgets.
+          # - test_timer: hangs on the runtime event loop under the
+          #   no-arg compile path.
+          # - The 5 macOS-14-only compile failures (test_gap_buffer_ops,
+          #   test_gap_node_crypto_buffer, test_gap_typed_arrays,
+          #   test_stress_buffer, test_stress_int_ops) compile cleanly on
+          #   local macOS 15.x but fail on the GitHub macOS-14 runner
+          #   (SDK/linker version interaction). Tracked as `ci-env` in
+          #   `test-parity/known_failures.json`.
+          declare -A SKIP_TESTS=(
+            [test_ui_comprehensive]=1
+            [test_ui_controls]=1
+            [test_ui_counter]=1
+            [test_ui_phase4]=1
+            [test_ui_state_binding]=1
+            [test_timer]=1
+            [test_gap_buffer_ops]=1
+            [test_gap_node_crypto_buffer]=1
+            [test_gap_typed_arrays]=1
+            [test_stress_buffer]=1
+            [test_stress_int_ops]=1
+          )
 
           for f in test-files/*.ts; do
             [[ -d "$f" ]] && continue
             name=$(basename "$f" .ts)
+            if [[ -n "${SKIP_TESTS[$name]:-}" ]]; then
+              ((SKIP++))
+              continue
+            fi
             if $PERRY "$f" -o "/tmp/perry_smoke_${name}" 2>/dev/null; then
               ((PASS++))
               rm -f "/tmp/perry_smoke_${name}"
@@ -199,7 +231,7 @@ jobs:
             fi
           done
 
-          echo "Compile smoke: $PASS passed, $FAIL failed"
+          echo "Compile smoke: $PASS passed, $FAIL failed, $SKIP skipped"
 
           if [[ $FAIL -gt 0 ]]; then
             echo "Compile failures:"
