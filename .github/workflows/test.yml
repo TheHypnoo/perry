@@ -201,24 +201,26 @@ jobs:
           #   local macOS 15.x but fail on the GitHub macOS-14 runner
           #   (SDK/linker version interaction). Tracked as `ci-env` in
           #   `test-parity/known_failures.json`.
-          declare -A SKIP_TESTS=(
-            [test_ui_comprehensive]=1
-            [test_ui_controls]=1
-            [test_ui_counter]=1
-            [test_ui_phase4]=1
-            [test_ui_state_binding]=1
-            [test_timer]=1
-            [test_gap_buffer_ops]=1
-            [test_gap_node_crypto_buffer]=1
-            [test_gap_typed_arrays]=1
-            [test_stress_buffer]=1
-            [test_stress_int_ops]=1
-          )
+          # Space-separated skip list (associative arrays require bash
+          # 4+; macOS-14 ships bash 3.2). Word-boundary match keeps
+          # the substring lookup safe.
+          SKIP_TESTS=" \
+            test_ui_comprehensive \
+            test_ui_controls \
+            test_ui_counter \
+            test_ui_phase4 \
+            test_ui_state_binding \
+            test_timer \
+            test_gap_buffer_ops \
+            test_gap_node_crypto_buffer \
+            test_gap_typed_arrays \
+            test_stress_buffer \
+            test_stress_int_ops "
 
           for f in test-files/*.ts; do
             [[ -d "$f" ]] && continue
             name=$(basename "$f" .ts)
-            if [[ -n "${SKIP_TESTS[$name]:-}" ]]; then
+            if [[ "$SKIP_TESTS" == *" $name "* ]]; then
               ((SKIP++))
               continue
             fi
