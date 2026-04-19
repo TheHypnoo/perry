@@ -1330,10 +1330,20 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
             substitute_locals(object, param_map, next_local_id);
             substitute_locals(value, param_map, next_local_id);
         }
-        Expr::TypeOf(inner) => {
-            substitute_locals(inner, param_map, next_local_id);
-        }
-        Expr::Void(inner) => {
+        Expr::TypeOf(inner)
+        | Expr::Void(inner)
+        | Expr::Await(inner)
+        | Expr::Delete(inner)
+        | Expr::StringCoerce(inner)
+        | Expr::BooleanCoerce(inner)
+        | Expr::NumberCoerce(inner)
+        | Expr::IsFinite(inner)
+        | Expr::IsNaN(inner)
+        | Expr::NumberIsNaN(inner)
+        | Expr::NumberIsFinite(inner)
+        | Expr::NumberIsInteger(inner)
+        | Expr::IsUndefinedOrBareNan(inner)
+        | Expr::ParseFloat(inner) => {
             substitute_locals(inner, param_map, next_local_id);
         }
         Expr::Yield { value, .. } => {
@@ -1463,9 +1473,6 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
             substitute_locals(target, param_map, next_local_id);
             substitute_locals(start, param_map, next_local_id);
             if let Some(e) = end { substitute_locals(e, param_map, next_local_id); }
-        }
-        Expr::Await(inner) => {
-            substitute_locals(inner, param_map, next_local_id);
         }
         // Object literal
         Expr::Object(fields) => {
