@@ -3,6 +3,12 @@ name: Release Packages
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      publish_npm:
+        description: "Publish npm packages (use for the first run / to bypass release trigger)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -27,6 +33,12 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: perry-linux-aarch64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            artifact: perry-linux-x86_64-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact: perry-linux-aarch64-musl
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: perry-windows-x86_64
@@ -47,9 +59,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install GTK4 development libraries (Linux)
-        if: runner.os == 'Linux'
+      - name: Install GTK4 development libraries (Linux glibc)
+        if: runner.os == 'Linux' && !endsWith(matrix.target, '-musl')
         run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev
+
+      - name: Install musl tools (Linux musl)
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build perry
         run: cargo build --release --target ${{ matrix.target }}
@@ -63,8 +79,8 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo build --release --target ${{ matrix.target }} -p perry-ui-macos
 
-      - name: Build UI library (Linux)
-        if: runner.os == 'Linux'
+      - name: Build UI library (Linux glibc)
+        if: runner.os == 'Linux' && !endsWith(matrix.target, '-musl')
         run: cargo build --release --target ${{ matrix.target }} -p perry-ui-gtk4
 
       - name: Build UI library (Windows)
@@ -113,8 +129,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}.zip" --clobber
 
-      - name: Upload build artifact (for deb job)
+      - name: Upload build artifact (Unix, for deb + npm-publish jobs)
         if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staging/
+
+      - name: Upload build artifact (Windows, for npm-publish job)
+        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -125,6 +148,7 @@ jobs:
   # ---------------------------------------------------------------------------
   homebrew:
     needs: build
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - name: Get release info
@@ -236,6 +260,7 @@ jobs:
   # ---------------------------------------------------------------------------
   apt:
     needs: build
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -319,6 +344,7 @@ jobs:
   # ---------------------------------------------------------------------------
   apt-repo:
     needs: apt
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - name: Get release info
@@ -407,6 +433,7 @@ jobs:
   # ---------------------------------------------------------------------------
   winget:
     needs: build
+    if: github.event_name == 'release'
     runs-on: windows-latest
     steps:
       - name: Get release info
@@ -440,6 +467,7 @@ jobs:
   # ---------------------------------------------------------------------------
   update-workers:
     needs: build
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - name: Get release version
@@ -459,3 +487,59 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"expected_version\": \"${{ steps.release.outputs.version }}\"}" 2>&1) || true
           echo "Hub response: ${RESPONSE}"
+
+  # ---------------------------------------------------------------------------
+  # Publish npm packages (@perryts/perry + 7 per-platform packages)
+  #
+  # Uses OIDC / Trusted Publishers (no long-lived NPM_TOKEN). Each of the 8
+  # package names must be registered on npmjs.com with this repo + workflow
+  # as a Trusted Publisher. See npm/README.md for the one-time setup.
+  # ---------------------------------------------------------------------------
+  npm-publish:
+    needs: build
+    if: >
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_npm == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write          # REQUIRED for OIDC + npm --provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts/
+
+      - name: Stage npm packages
+        run: ./scripts/stage-npm.sh release-artifacts/
+
+      - name: Sanity-check staged packages
+        run: |
+          for dir in npm/perry npm/perry-*; do
+            echo "=== $dir ==="
+            ls -la "$dir"
+            if [ -f "$dir/package.json" ]; then
+              node -e "const p=require('./$dir/package.json'); console.log(p.name, p.version)"
+            else
+              echo "MISSING package.json in $dir" >&2
+              exit 1
+            fi
+          done
+
+      - name: Publish platform packages
+        run: |
+          set -e
+          for pkg in npm/perry-*; do
+            echo "=== publishing $pkg ==="
+            npm publish "$pkg" --access public --provenance
+          done
+
+      - name: Publish wrapper (@perryts/perry) last
+        run: npm publish npm/perry --access public --provenance

@@ -78,6 +78,16 @@ __perry_js_bundle.js
 # Node.js
 node_modules/
 
+# npm packaging: rendered package.json + staged binaries/libs
+# (rebuilt by scripts/stage-npm.sh; only templates and wrapper sources are tracked)
+npm/perry/package.json
+npm/perry/LICENSE
+npm/perry-*/package.json
+npm/perry-*/bin/
+npm/perry-*/lib/
+npm/perry-*/LICENSE
+npm/perry-*/README.md
+
 # Temporary files
 tmp/
 debug_test.ts
