@@ -529,30 +529,6 @@ jobs:
       - name: Stage npm packages
         run: ./scripts/stage-npm.sh release-artifacts/
 
-      - name: Debug — decode OIDC claim npm will receive
-        # Same audience npm uses for Trusted Publisher auth. Decodes the
-        # JWT payload and prints the fields that must match the npmjs.com
-        # Trusted Publisher config (sub, repository, workflow, ref, etc.).
-        run: |
-          set -e
-          AUD="npm:registry.npmjs.org"
-          TOKEN=$(curl -sSL \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUD" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")
-          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2)
-          # base64url -> base64 pad + decode
-          PAD=$(( (4 - ${#PAYLOAD} % 4) % 4 ))
-          PADDED="${PAYLOAD}$(printf '=%.0s' $(seq 1 $PAD))"
-          DECODED=$(echo "$PADDED" | tr '_-' '/+' | base64 -d 2>/dev/null)
-          echo "--- OIDC claim (audience=$AUD) ---"
-          echo "$DECODED" | python3 -c "
-          import sys, json
-          c = json.load(sys.stdin)
-          for k in ['sub','repository','repository_owner','workflow','workflow_ref','job_workflow_ref','ref','ref_type','event_name','environment','runner_environment','actor']:
-              print(f'  {k}: {c.get(k)!r}')
-          "
-
       - name: Sanity-check staged packages
         run: |
           for dir in npm/perry npm/perry-*; do
