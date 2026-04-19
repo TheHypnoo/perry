@@ -6708,6 +6708,39 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             }
         }
 
+        // Standalone `crypto.createHash(alg)` — when the user binds the
+        // result to a local before calling `.update(...)` / `.digest()`,
+        // the three-level chain-collapse above no longer matches and this
+        // arm runs instead. It registers a HashHandle in perry-stdlib and
+        // returns a small-integer handle NaN-boxed as POINTER_TAG.
+        // `js_native_call_method` routes subsequent method calls on that
+        // handle through `HANDLE_METHOD_DISPATCH` → `dispatch_hash`. See
+        // `perry-stdlib/src/crypto.rs::js_crypto_create_hash`.
+        Expr::Call { callee, args, .. }
+            if matches!(
+                callee.as_ref(),
+                Expr::PropertyGet { object, property } if property == "createHash" && matches!(
+                    object.as_ref(),
+                    Expr::NativeModuleRef(n) if n == "crypto"
+                )
+            ) =>
+        {
+            if args.is_empty() {
+                return Ok(double_literal(f64::from_bits(
+                    crate::nanbox::TAG_UNDEFINED,
+                )));
+            }
+            let alg_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let alg_handle = unbox_to_i64(blk, &alg_box);
+            // Returns an already-NaN-boxed f64 (POINTER_TAG + handle id).
+            Ok(blk.call(
+                DOUBLE,
+                "js_crypto_create_hash",
+                &[(I64, &alg_handle)],
+            ))
+        }
+
         // Phase H crypto: `crypto.randomBytes(n)` as a Buffer.
         Expr::Call { callee, args, .. }
             if matches!(

@@ -15,6 +15,36 @@ use crate::lower_patterns::*;
 use crate::destructuring::*;
 use crate::analysis::*;
 
+/// Build `if (param === undefined) { param = default; }` stmts for every
+/// param with a default value. Prepended to function/constructor bodies so
+/// cross-module callers that pad missing args with `undefined` still observe
+/// the intended default. Rest params are skipped (they're handled by the
+/// call-site array bundling, not by scalar default substitution).
+fn build_default_param_stmts(params: &[Param]) -> Vec<Stmt> {
+    let mut out: Vec<Stmt> = Vec::new();
+    for param in params {
+        if param.is_rest {
+            continue;
+        }
+        let Some(default_expr) = param.default.as_ref() else {
+            continue;
+        };
+        out.push(Stmt::If {
+            condition: Expr::Compare {
+                op: CompareOp::Eq,
+                left: Box::new(Expr::LocalGet(param.id)),
+                right: Box::new(Expr::Undefined),
+            },
+            then_branch: vec![Stmt::Expr(Expr::LocalSet(
+                param.id,
+                Box::new(default_expr.clone()),
+            ))],
+            else_branch: None,
+        });
+    }
+    out
+}
+
 /// Detect the computed key `[Symbol.iterator]` in a class method / object
 /// literal. Recognizes the standard `Symbol.iterator` form — doesn't try to
 /// evaluate arbitrary expressions, which is enough for `*[Symbol.iterator]()`
@@ -306,6 +336,16 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     // Prepend destructuring statements to body
     if !destructuring_stmts.is_empty() {
         let mut new_body = destructuring_stmts;
+        new_body.append(&mut body);
+        body = new_body;
+    }
+
+    // Prepend defaulted-parameter application (see lower_constructor for the
+    // rationale). Without this, cross-module callers that pad missing args
+    // with TAG_UNDEFINED read the param as `undefined` instead of its default.
+    let default_stmts = build_default_param_stmts(&params);
+    if !default_stmts.is_empty() {
+        let mut new_body = default_stmts;
         new_body.append(&mut body);
         body = new_body;
     }
@@ -1319,6 +1359,21 @@ pub(crate) fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, cto
         // Prepend synthetic assignments before the user-written constructor body
         synthetic_stmts.append(&mut body);
         body = synthetic_stmts;
+    }
+
+    // Prepend defaulted-parameter application: for every param with a
+    // default, emit `if (param === undefined) { param = default; }` at the
+    // very top of the constructor body. Needed for cross-module `new C(...)`
+    // calls that pass fewer args than the constructor declares — the
+    // codegen call site pads missing args with TAG_UNDEFINED, so without
+    // body-side default application the param reads as `undefined`. The
+    // in-module HIR `fill_default_arguments` pass already fills the args at
+    // same-module call sites, so this check is a no-op there.
+    let default_stmts = build_default_param_stmts(&params);
+    if !default_stmts.is_empty() {
+        let mut new_body = default_stmts;
+        new_body.append(&mut body);
+        body = new_body;
     }
 
     ctx.exit_scope(scope_mark);

@@ -48,7 +48,7 @@ database-mongodb = ["dep:mongodb", "dep:bson", "dep:futures-util", "async-runtim
 # Implies `async-runtime` because bcrypt/jwt/argon2 hashing offloads to
 # `tokio::task::spawn_blocking`, and `ids` because `crypto.randomUUID()`
 # delegates to the `uuid` crate.
-crypto = ["dep:sha2", "dep:md-5", "dep:hex", "dep:hmac", "dep:bcrypt", "dep:jsonwebtoken", "dep:aes", "dep:cbc", "dep:scrypt", "dep:pbkdf2", "dep:argon2", "dep:base64", "dep:x25519-dalek", "dep:aes-gcm", "dep:hkdf", "async-runtime", "ids"]
+crypto = ["dep:sha2", "dep:sha1", "dep:md-5", "dep:hex", "dep:hmac", "dep:bcrypt", "dep:jsonwebtoken", "dep:aes", "dep:cbc", "dep:scrypt", "dep:pbkdf2", "dep:argon2", "dep:base64", "dep:x25519-dalek", "dep:aes-gcm", "dep:hkdf", "async-runtime", "ids"]
 
 # Compression (zlib)
 compression = ["dep:flate2"]
@@ -128,6 +128,7 @@ rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 
 # Crypto
 sha2 = { version = "0.10", optional = true }
+sha1 = { version = "0.10", optional = true }
 md-5 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }
 hmac = { version = "0.12", optional = true }

@@ -24,6 +24,9 @@ use crate::types::{DOUBLE, I32, I64, PTR, VOID};
 pub fn declare_phase1(module: &mut LlModule) {
     // GC / runtime bootstrap.
     module.declare_function("js_gc_init", VOID, &[]);
+    // Handle-method dispatcher wiring (issue #86). Stdlib provides the
+    // real impl; when only runtime is linked, it's a no-op stub.
+    module.declare_function("js_stdlib_init_dispatch", VOID, &[]);
 
     // Console.
     module.declare_function("js_console_log_dynamic", VOID, &[DOUBLE]);
@@ -636,6 +639,10 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_crypto_pbkdf2_bytes", I64, &[I64, I64, DOUBLE, DOUBLE]);
     module.declare_function("js_crypto_random_bytes_buffer", I64, &[DOUBLE]);
     module.declare_function("js_crypto_random_uuid", I64, &[]);
+    // Hash-handle form (issue #86): `const h = crypto.createHash(alg);
+    // h.update(x); h.digest()`. Returns a NaN-boxed POINTER_TAG handle id;
+    // subsequent method dispatch flows through HANDLE_METHOD_DISPATCH.
+    module.declare_function("js_crypto_create_hash", DOUBLE, &[I64]);
     module.declare_function("js_string_from_bytes", I64, &[I64, I32]);
     // Buffer.alloc(size, fill) — returns raw *mut BufferHeader.
     module.declare_function("js_buffer_alloc", I64, &[I32, I32]);

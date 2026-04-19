@@ -213,6 +213,13 @@ pub(crate) struct CrossModuleCtx {
     pub i18n: Option<crate::expr::I18nLowerCtx>,
     /// Names of imports that are exported variables (not functions).
     pub imported_vars: std::collections::HashSet<String>,
+    /// Whether perry-stdlib will be linked into the final binary. When
+    /// false, compile_module_entry skips the `js_stdlib_init_dispatch()`
+    /// call in main's prologue because only the runtime is linked and
+    /// the stub symbol isn't pulled in (runtime is built with the
+    /// `stdlib` feature on when perry-stdlib depends on it, which
+    /// excludes the cfg-gated stub in `perry-runtime/src/stdlib_stubs.rs`).
+    pub needs_stdlib: bool,
     /// Compile-time constant values for module globals. Maps LocalId → f64
     /// for variables like `__platform__` whose value is known at compile time.
     /// Used by `lower_if` to constant-fold platform checks and skip emitting
@@ -561,6 +568,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             },
         ),
         imported_vars: opts.imported_vars,
+        needs_stdlib: opts.needs_stdlib,
         compile_time_constants,
         clamp3_functions: hir.functions.iter()
             .filter_map(|f| crate::collectors::detect_clamp3(f).map(|_| f.id))
@@ -2121,6 +2129,18 @@ fn compile_module_entry(
         {
             let blk = main.block_mut(0).unwrap();
             blk.call_void("js_gc_init", &[]);
+            // Wire up stdlib HANDLE_METHOD_DISPATCH eagerly when stdlib is
+            // linked. Previously this was only called from
+            // `ensure_pump_registered`, which fires lazily on the first
+            // deferred-promise resolution — so sync-only programs (e.g.
+            // pure crypto/hash pipelines — issue #86) never registered
+            // the dispatcher and handle-based method calls fell through
+            // to `js_native_call_method` which returned a non-Perry NaN
+            // (`typeof === 'number'`). Guarded on `needs_stdlib` because
+            // the runtime-only link doesn't pull in the stub symbol.
+            if cross_module.needs_stdlib {
+                blk.call_void("js_stdlib_init_dispatch", &[]);
+            }
             // Entry module's own string pool first.
             blk.call_void(&strings_init_name, &[]);
             // Then every non-entry module's init in order. Each

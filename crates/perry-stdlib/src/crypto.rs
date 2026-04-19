@@ -6,11 +6,13 @@
 
 use perry_runtime::{js_string_from_bytes, StringHeader};
 use md5::{Md5, Digest as Md5Digest};
-use sha2::{Sha256, Digest as Sha256Digest};
+use sha1::Sha1;
+use sha2::{Sha256, Sha512, Digest as Sha256Digest};
 use rand::RngCore;
 use aes::Aes256;
 use cbc::{Encryptor, Decryptor, cipher::{KeyIvInit, block_padding::Pkcs7, BlockEncryptMut, BlockDecryptMut}};
 use base64::Engine as _;
+use crate::common::handle::{register_handle, get_handle_mut, Handle};
 
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<Vec<u8>> {
@@ -479,4 +481,119 @@ pub unsafe extern "C" fn js_crypto_scrypt_custom(
 
     let hex_str = hex::encode(&output);
     js_string_from_bytes(hex_str.as_ptr(), hex_str.len() as u32)
+}
+
+// ---------------------------------------------------------------------------
+// Hash handle — powers `const h = crypto.createHash('sha1'); h.update(x);
+// h.digest()` (issue #86). The runtime-resident chain-collapse in
+// `perry-codegen/src/expr.rs` only catches the literal single-expression
+// form; once the user binds the hash to a local and calls update/digest on
+// subsequent statements, the chain pattern no longer matches and the calls
+// fall through to `js_native_call_method`. We register the hash state in
+// the handle registry and the small-integer dispatch path (see
+// `perry-runtime/src/object.rs` ~line 3040) routes update/digest back to
+// `dispatch_hash` below.
+// ---------------------------------------------------------------------------
+
+pub enum HashState {
+    Sha1(Sha1),
+    Sha256(Sha256),
+    Sha512(Sha512),
+    Md5(Md5),
+}
+
+pub struct HashHandle {
+    /// `Option` so `digest()` can `take()` ownership of the hasher
+    /// (sha1/sha2 `finalize()` consumes `self`).
+    state: std::sync::Mutex<Option<HashState>>,
+}
+
+/// Allocate a new Hash handle for the given algorithm. Returns the handle
+/// id NaN-boxed with POINTER_TAG (0x7FFD_…). Small integers survive the
+/// 48-bit POINTER_MASK, and the runtime's handle-range check in
+/// `js_native_call_method` (`raw_ptr < 0x100000`) routes subsequent
+/// `.update(...)` / `.digest(...)` through `HANDLE_METHOD_DISPATCH` which
+/// calls `dispatch_hash` below. Unknown algorithms return undefined.
+#[no_mangle]
+pub unsafe extern "C" fn js_crypto_create_hash(alg_ptr: i64) -> f64 {
+    let alg_bytes = bytes_from_ptr(alg_ptr);
+    let alg = std::str::from_utf8(&alg_bytes).unwrap_or("").to_ascii_lowercase();
+    let state = match alg.as_str() {
+        "sha1" | "sha-1" => HashState::Sha1(Sha1::new()),
+        "sha256" | "sha-256" => HashState::Sha256(Sha256::new()),
+        "sha512" | "sha-512" => HashState::Sha512(Sha512::new()),
+        "md5" => HashState::Md5(Md5::new()),
+        _ => return f64::from_bits(0x7FFC_0000_0000_0001),
+    };
+    let handle: Handle = register_handle(HashHandle {
+        state: std::sync::Mutex::new(Some(state)),
+    });
+    f64::from_bits(0x7FFD_0000_0000_0000u64 | ((handle as u64) & 0x0000_FFFF_FFFF_FFFF))
+}
+
+/// Dispatch `update` / `digest` on a HashHandle. Called from
+/// `common/dispatch.rs::js_handle_method_dispatch`.
+pub unsafe fn dispatch_hash(handle: i64, method: &str, args: &[f64]) -> f64 {
+    let h = match get_handle_mut::<HashHandle>(handle) {
+        Some(h) => h,
+        None => return f64::from_bits(0x7FFC_0000_0000_0001),
+    };
+    match method {
+        "update" if !args.is_empty() => {
+            let ptr = (args[0].to_bits() & 0x0000_FFFF_FFFF_FFFF) as i64;
+            let bytes = bytes_from_ptr(ptr);
+            let mut guard = h.state.lock().unwrap();
+            if let Some(state) = guard.as_mut() {
+                match state {
+                    HashState::Sha1(x) => Sha256Digest::update(x, &bytes),
+                    HashState::Sha256(x) => Sha256Digest::update(x, &bytes),
+                    HashState::Sha512(x) => Sha256Digest::update(x, &bytes),
+                    HashState::Md5(x) => Md5Digest::update(x, &bytes),
+                }
+            }
+            f64::from_bits(0x7FFD_0000_0000_0000u64 | ((handle as u64) & 0x0000_FFFF_FFFF_FFFF))
+        }
+        "digest" => {
+            let state = {
+                let mut guard = h.state.lock().unwrap();
+                guard.take()
+            };
+            let digest: Vec<u8> = match state {
+                Some(HashState::Sha1(x)) => x.finalize().to_vec(),
+                Some(HashState::Sha256(x)) => x.finalize().to_vec(),
+                Some(HashState::Sha512(x)) => x.finalize().to_vec(),
+                Some(HashState::Md5(x)) => x.finalize().to_vec(),
+                None => return f64::from_bits(0x7FFC_0000_0000_0001),
+            };
+            if args.is_empty() || is_undefined_f64(args[0]) {
+                let buf = alloc_buffer_from_slice(&digest);
+                f64::from_bits(
+                    0x7FFD_0000_0000_0000u64 | ((buf as u64) & 0x0000_FFFF_FFFF_FFFF),
+                )
+            } else {
+                let enc_ptr = (args[0].to_bits() & 0x0000_FFFF_FFFF_FFFF) as i64;
+                let enc_bytes = bytes_from_ptr(enc_ptr);
+                let enc = std::str::from_utf8(&enc_bytes)
+                    .unwrap_or("hex")
+                    .to_ascii_lowercase();
+                let encoded = match enc.as_str() {
+                    "hex" => hex::encode(&digest),
+                    "base64" => base64::engine::general_purpose::STANDARD.encode(&digest),
+                    "base64url" => base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest),
+                    "binary" | "latin1" => String::from_utf8_lossy(&digest).into_owned(),
+                    _ => hex::encode(&digest),
+                };
+                let s = js_string_from_bytes(encoded.as_ptr(), encoded.len() as u32);
+                f64::from_bits(
+                    0x7FFF_0000_0000_0000u64 | ((s as u64) & 0x0000_FFFF_FFFF_FFFF),
+                )
+            }
+        }
+        _ => f64::from_bits(0x7FFC_0000_0000_0001),
+    }
+}
+
+#[inline]
+fn is_undefined_f64(v: f64) -> bool {
+    v.to_bits() == 0x7FFC_0000_0000_0001
 }

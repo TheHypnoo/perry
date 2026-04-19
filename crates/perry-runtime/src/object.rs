@@ -3117,15 +3117,26 @@ pub unsafe extern "C" fn js_native_call_method(
                                 let stored_key = key_val.as_string_ptr();
                                 if crate::string::js_string_equals(method_key, stored_key) != 0 {
                                     let field_val = js_object_get_field(obj as *mut _, i as u32);
-                                    if field_val.is_pointer() {
-                                        return crate::closure::js_native_call_value(
-                                            f64::from_bits(field_val.bits()),
-                                            args_ptr,
-                                            args_len,
-                                        );
-                                    }
-                                    // Field found but not callable — return the value as-is
-                                    return f64::from_bits(field_val.bits());
+                                    // Always try the field as a callable —
+                                    // `js_native_call_value` validates
+                                    // CLOSURE_MAGIC internally and safely
+                                    // returns undefined for non-callables.
+                                    // The previous `is_pointer()` gate bailed
+                                    // on raw-pointer-bit values (e.g. the
+                                    // Promise executor's resolve/reject
+                                    // closures — stored as
+                                    // `transmute(ptr → f64)` without a
+                                    // POINTER_TAG). That turned
+                                    // `box.resolve(val)` into a no-op that
+                                    // returned the raw pointer bits instead
+                                    // of invoking `js_promise_resolve`, so
+                                    // the outer `await` hung forever
+                                    // (issue #87).
+                                    return crate::closure::js_native_call_value(
+                                        f64::from_bits(field_val.bits()),
+                                        args_ptr,
+                                        args_len,
+                                    );
                                 }
                             }
                         }
@@ -3426,16 +3437,27 @@ pub unsafe extern "C" fn js_native_call_method(
                 if key_val.is_string() {
                     let stored_key = key_val.as_string_ptr();
                     if crate::string::js_string_equals(method_key, stored_key) != 0 {
-                        // Found the method - get it and call it if it's a closure
+                        // Found the method — delegate to `js_native_call_value`
+                        // which handles both NaN-boxed pointers (POINTER_TAG)
+                        // and raw-pointer-bits (e.g. the resolve/reject
+                        // closures from `js_promise_new_with_executor`,
+                        // transmuted `i64 → f64` so their bits live outside
+                        // the NaN range). The earlier `is_pointer()` gate
+                        // bailed on the raw-pointer case: `{ resolve }` on a
+                        // plain object caused `box.resolve(x)` to land here,
+                        // the tag check failed, we fell through to vtable
+                        // lookup, and returned NULL_OBJECT_BYTES without
+                        // invoking `js_promise_resolve` → the awaiter hung
+                        // forever (issue #87). `js_native_call_value`
+                        // validates CLOSURE_MAGIC before calling the func
+                        // pointer, so non-callable field values (numbers,
+                        // strings, booleans) safely return undefined.
                         let field_val = js_object_get_field(obj as *mut _, i as u32);
-                        if field_val.is_pointer() {
-                            // Assume it's a closure and call it
-                            return crate::closure::js_native_call_value(
-                                f64::from_bits(field_val.bits()),
-                                args_ptr,
-                                args_len,
-                            );
-                        }
+                        return crate::closure::js_native_call_value(
+                            f64::from_bits(field_val.bits()),
+                            args_ptr,
+                            args_len,
+                        );
                     }
                 }
             }
