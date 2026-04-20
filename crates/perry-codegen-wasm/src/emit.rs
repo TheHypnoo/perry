@@ -359,7 +359,7 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
         "get" if class_name.map_or(false, |c| c == "State") => "perry_ui_state_get",
         "set" if class_name.map_or(false, |c| c == "State") => "perry_ui_state_set",
         "value" => "perry_ui_state_get",
-        "onChange" | "state_on_change" => "perry_ui_state_on_change",
+        "onChange" | "state_on_change" | "stateOnChange" => "perry_ui_state_on_change",
         // State bindings
         "bindText" | "state_bind_text" => "perry_ui_state_bind_text",
         "bindTextNumeric" | "state_bind_text_numeric" => "perry_ui_state_bind_text_numeric",
@@ -2821,7 +2821,10 @@ impl WasmModuleEmitter {
             Expr::New { args, .. } => {
                 for a in args { self.collect_strings_in_expr(a); }
             }
-            Expr::Update { .. } | Expr::Sequence(_) => {}
+            Expr::Update { .. } => {}
+            Expr::Sequence(exprs) => {
+                for e in exprs { self.collect_strings_in_expr(e); }
+            }
             Expr::EnumMember { enum_name, member_name } => {
                 self.intern_string(enum_name);
                 self.intern_string(member_name);
