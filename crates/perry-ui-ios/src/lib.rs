@@ -832,7 +832,7 @@ pub extern "C" fn perry_ui_widget_set_tooltip(handle: i64, text_ptr: i64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const perry_runtime::string::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -893,7 +893,7 @@ pub extern "C" fn perry_system_open_url(url_ptr: i64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const perry_runtime::string::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1009,7 +1009,7 @@ pub extern "C" fn perry_system_preferences_set(key_ptr: i64, value: f64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const perry_runtime::string::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1044,7 +1044,7 @@ pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const perry_runtime::string::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1171,7 +1171,7 @@ pub extern "C" fn perry_ui_text_set_font_family(handle: i64, family_ptr: i64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const perry_runtime::string::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1445,7 +1445,7 @@ fn keychain_str_from_header(ptr: *const u8) -> &'static str {
     if ptr.is_null() { return ""; }
     unsafe {
         let header = ptr as *const perry_runtime::string::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
     }
@@ -1681,7 +1681,7 @@ pub extern "C" fn hone_ws_connect(url_ptr: i64) -> f64 {
         if !ptr.is_null() && url_ptr > 0x1000 {
             let header = ptr as *const perry_runtime::string::StringHeader;
             unsafe {
-                let len = (*header).length as usize;
+                let len = (*header).byte_len as usize;
                 let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
                 if let Ok(s) = std::str::from_utf8(std::slice::from_raw_parts(data, len.min(200))) {
                     let _ = writeln!(f, "  url_str={}", s);
