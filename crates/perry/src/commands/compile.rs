@@ -5167,11 +5167,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
         // conflict with the SwiftUI @main entry point in PerryWatchApp.swift.
         // The Swift runtime calls perry_main_init() to initialize the compiled TS code.
         if let Some(entry_obj) = obj_paths.iter().find(|f| f.to_string_lossy().contains("main_ts")) {
-            // Use rustup's llvm-objcopy to rename _main to _perry_main_init
+            // Use rust-objcopy (newer Rust) or llvm-objcopy (older) to rename _main
             let objcopy = std::env::var("HOME").ok()
-                .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
+                .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy"))
                 .filter(|p| p.exists())
-                .unwrap_or_else(|| PathBuf::from("llvm-objcopy"));
+                .or_else(|| std::env::var("HOME").ok()
+                    .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
+                    .filter(|p| p.exists()))
+                .unwrap_or_else(|| PathBuf::from("rust-objcopy"));
             let _ = Command::new(&objcopy)
                 .args(["--redefine-sym", "_main=_perry_main_init"])
                 .arg(entry_obj)
@@ -5419,10 +5422,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
     // becomes the process entry point. It spawns _perry_user_main on a game thread.
     if (is_ios || is_tvos) && compiled_features.iter().any(|f| f == "ios-game-loop") {
         if let Some(entry_obj) = obj_paths.iter().find(|f| f.to_string_lossy().contains("main_ts")) {
+            // Try rust-objcopy first (newer Rust), then llvm-objcopy (older Rust)
             let objcopy = std::env::var("HOME").ok()
-                .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
+                .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy"))
                 .filter(|p| p.exists())
-                .unwrap_or_else(|| PathBuf::from("llvm-objcopy"));
+                .or_else(|| std::env::var("HOME").ok()
+                    .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
+                    .filter(|p| p.exists()))
+                .unwrap_or_else(|| PathBuf::from("rust-objcopy"));
             let _ = Command::new(&objcopy)
                 .args(["--redefine-sym", "_main=__perry_user_main"])
                 .arg(entry_obj)
