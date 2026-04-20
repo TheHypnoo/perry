@@ -1505,6 +1505,7 @@ fn parse_native_library_manifest(
         Some("ios-simulator") | Some("ios") => "ios",
         Some("android") => "android",
         Some("tvos-simulator") | Some("tvos") => "tvos",
+        Some("watchos-simulator") | Some("watchos") => "watchos",
         Some("linux") => "linux",
         Some("windows") => "windows",
         Some("web") => "web",
