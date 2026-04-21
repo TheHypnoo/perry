@@ -64,6 +64,12 @@ struct Cli {
     /// Skip the `targets:` cross-compile phase entirely.
     #[arg(long)]
     skip_xcompile: bool,
+
+    /// Restrict the cross-compile phase to just these targets (comma-separated).
+    /// Each must still appear in an example's banner `targets:` list —
+    /// this acts as an include-filter on top of the banner.
+    #[arg(long, value_delimiter = ',')]
+    xcompile_only_target: Vec<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -211,6 +217,11 @@ fn run(cli: &Cli) -> Result<i32> {
         // invoke `perry compile --target <t>` and check exit + artifact. No
         // execution — this catches drift in platform-specific code paths.
         for target in &ex.targets {
+            if !cli.xcompile_only_target.is_empty()
+                && !cli.xcompile_only_target.iter().any(|t| t == target)
+            {
+                continue;
+            }
             if let Some(reason) = target_buildable_reason(target, host) {
                 results.push(ExampleReport {
                     file: rel.clone(),

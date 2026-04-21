@@ -273,7 +273,8 @@ jobs:
             shell: bash
             cmd_exclude_gallery: "./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
             cmd_gallery: "./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter ui/gallery.ts"
-            cmd_xcompile: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
+            cmd_xcompile_blocking: "./scripts/run_doc_tests.sh --verbose --xcompile-only --xcompile-only-target web,wasm"
+            cmd_xcompile_advisory: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
             # Baseline captured from a clean CI run of 24723671119 (900x970).
             gallery_advisory: false
           - os: ubuntu-24.04
@@ -281,7 +282,8 @@ jobs:
             shell: bash
             cmd_exclude_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
             cmd_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter ui/gallery.ts"
-            cmd_xcompile: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
+            cmd_xcompile_blocking: "./scripts/run_doc_tests.sh --verbose --xcompile-only --xcompile-only-target web,wasm"
+            cmd_xcompile_advisory: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
             # Baseline captured under Xvfb (900x1024).
             gallery_advisory: false
           - os: windows-2022
@@ -289,7 +291,8 @@ jobs:
             shell: pwsh
             cmd_exclude_gallery: "./scripts/run_doc_tests.ps1 --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
             cmd_gallery: "./scripts/run_doc_tests.ps1 --verbose --skip-xcompile --filter ui/gallery.ts"
-            cmd_xcompile: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only"
+            cmd_xcompile_blocking: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only --xcompile-only-target web,wasm"
+            cmd_xcompile_advisory: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only"
             # perry-ui-windows/src/widgets/picker.rs:81 panics with
             # HRESULT(0x8007057E) "Cannot create a top-level child window"
             # when the gallery's Picker widget is created in test mode;
@@ -338,7 +341,15 @@ jobs:
       - name: Install Apple SDK Rust targets (macOS only)
         if: matrix.os == 'macos-14'
         run: |
-          rustup target add aarch64-apple-ios-sim aarch64-apple-tvos-sim
+          rustup target add aarch64-apple-ios-sim
+          # tvOS-sim is Rust Tier-3 — perry auto-rebuilds with
+          # `+nightly -Zbuild-std`, which requires the rust-src
+          # component on the nightly toolchain.
+          rustup toolchain install nightly --component rust-src --profile minimal || true
+
+      - name: Install Android Rust target (macOS + Ubuntu)
+        if: matrix.os == 'macos-14' || matrix.os == 'ubuntu-24.04'
+        run: rustup target add aarch64-linux-android
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -371,10 +382,17 @@ jobs:
         continue-on-error: ${{ matrix.gallery_advisory }}
         run: ${{ matrix.cmd_gallery }}
 
-      - name: Cross-compile examples for listed targets (advisory)
-        id: xcompile
+      - name: Cross-compile for web + wasm (blocking)
+        id: xcompile_blocking
+        run: ${{ matrix.cmd_xcompile_blocking }}
+
+      - name: Cross-compile remaining targets (advisory)
+        # iOS-sim/tvOS-sim/watchos-sim/android still surface real errors
+        # that the harness logs but that aren't yet tracked issues. Keep
+        # advisory until each target has a green baseline run.
+        id: xcompile_advisory
         continue-on-error: true
-        run: ${{ matrix.cmd_xcompile }}
+        run: ${{ matrix.cmd_xcompile_advisory }}
 
       - name: Upload doc-tests report
         if: always()
