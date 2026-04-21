@@ -73,7 +73,13 @@ pub fn create(label_ptr: *const u8, on_change: f64, _style: i64) -> i64 {
                         | WS_VSCROLL.0,
                 ),
                 0, 0, 200, 200, // height includes dropdown area
-                None,
+                // WS_CHILD requires a parent HWND — the main app window
+                // doesn't exist yet when widgets are constructed during
+                // the body-builder closure, so use the parking window
+                // (same approach as button/textfield/toggle/slider/etc).
+                // layout::relayout() moves the widget to its real parent
+                // once the App() container hierarchy is resolved.
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
                 HINSTANCE::from(hinstance),
                 None,
