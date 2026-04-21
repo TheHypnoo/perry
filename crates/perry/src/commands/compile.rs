@@ -5904,21 +5904,24 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                 // libperry_ui_gtk4.a references perry-stdlib symbols
                 // (js_stdlib_process_pending, js_promise_run_microtasks, …)
                 // through glib::source::trampoline_local closures. GNU ld
-                // scans archives left-to-right and won't retroactively pull
-                // objects from stdlib after ui_lib creates the undefined
-                // reference — "archive twice" wasn't enough because the
-                // runtime stub at perry-runtime/src/stdlib_stubs.rs satisfies
-                // the symbol with a no-op before ld ever reaches the real
-                // stdlib. Wrap stdlib in --whole-archive so every one of its
-                // objects is pulled unconditionally, overriding the runtime
-                // stub via --allow-multiple-definition. Cost: bigger Linux
-                // binary (full stdlib instead of just referenced objects),
-                // which is acceptable for a UI program that already pulls
-                // GTK4 + glib + pulse.
-                if let Some(ref stdlib) = stdlib_lib {
+                // scans archives left-to-right and the runtime stub at
+                // perry-runtime/src/stdlib_stubs.rs satisfies the symbol
+                // with a no-op before ld ever reaches the real stdlib.
+                // Wrap stdlib in --whole-archive so every one of its objects
+                // is pulled unconditionally, overriding the runtime stub via
+                // --allow-multiple-definition. If stdlib_lib wasn't resolved
+                // earlier (ctx.needs_stdlib==false), fall back to a direct
+                // find_stdlib_library lookup so the UI-driven references
+                // still resolve.
+                let linux_stdlib_for_ui = stdlib_lib.clone()
+                    .or_else(|| find_stdlib_library(target.as_deref()));
+                if let Some(ref stdlib) = linux_stdlib_for_ui {
+                    eprintln!("[linux-ui] --whole-archive {}", stdlib.display());
                     cmd.arg("-Wl,--whole-archive")
                        .arg(stdlib)
                        .arg("-Wl,--no-whole-archive");
+                } else {
+                    eprintln!("[linux-ui] WARNING: libperry_stdlib.a not found — ui_lib will likely fail to link");
                 }
                 // GTK4 libraries via pkg-config
                 if let Ok(output) = Command::new("pkg-config").args(["--libs", "gtk4"]).output() {
