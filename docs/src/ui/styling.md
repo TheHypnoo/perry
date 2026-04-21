@@ -117,45 +117,14 @@ btn.setEnabled(false);  // Greys out and disables interaction
 
 ## Complete Styling Example
 
-```typescript,no-test
-import { App, Text, Button, VStack, HStack, State, Spacer } from "perry/ui";
-
-const count = State(0);
-
-const title = Text("Counter");
-title.setFontSize(28);
-title.setColor("#1A1A1A");
-
-const display = Text(`${count.value}`);
-display.setFontSize(48);
-display.setFontFamily("monospaced");
-display.setColor("#007AFF");
-
-const decBtn = Button("-", () => count.set(count.value - 1));
-decBtn.setCornerRadius(20);
-decBtn.setBackgroundColor("#FF3B30");
-
-const incBtn = Button("+", () => count.set(count.value + 1));
-incBtn.setCornerRadius(20);
-incBtn.setBackgroundColor("#34C759");
-
-const controls = HStack(8, [decBtn, Spacer(), incBtn]);
-controls.setPadding(20);
-
-const container = VStack(16, [title, display, controls]);
-container.setPadding(40);
-container.setCornerRadius(16);
-container.setBackgroundColor("#FFFFFF");
-container.setBorderColor("#E5E5E5");
-container.setBorderWidth(1);
-
-App({
-  title: "Styled App",
-  width: 400,
-  height: 300,
-  body: container,
-});
+```typescript
+{{#include ../../examples/ui/styling/counter_card.ts}}
 ```
+
+Colors are RGBA floats in `[0.0, 1.0]`. Divide each hex byte by 255 to
+convert — `0xFF3B30` becomes `(1.0, 0.231, 0.188, 1.0)`. Padding is four
+explicit sides (`widgetSetEdgeInsets(w, top, left, bottom, right)`), not a
+single value.
 
 ## Composing Styles
 

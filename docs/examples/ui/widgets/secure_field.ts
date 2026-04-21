@@ -1,7 +1,7 @@
 // demonstrates: SecureField for password input
 // docs: docs/src/ui/widgets.md
 // platforms: macos, linux, windows
-// targets: web, wasm
+// targets: ios-simulator, web, wasm
 
 import { App, VStack, SecureField, State } from "perry/ui"
 

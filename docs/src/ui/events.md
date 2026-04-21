@@ -117,44 +117,13 @@ const text = clipboardGet();
 
 ## Complete Example
 
-```typescript,no-test
-import { App, Text, Button, VStack, HStack, State, Spacer, registerShortcut } from "perry/ui";
-
-const lastEvent = State("No events yet");
-
-// Global shortcut
-registerShortcut("r", () => {
-  lastEvent.set("Keyboard: Cmd+R");
-});
-
-const hoverBtn = Button("Hover me", () => {});
-hoverBtn.setOnHover((h) => {
-  lastEvent.set(h ? "Mouse entered" : "Mouse left");
-});
-
-const dblLabel = Text("Double-click me");
-dblLabel.setOnDoubleClick(() => {
-  lastEvent.set("Double-clicked!");
-});
-
-App({
-  title: "Events Demo",
-  width: 400,
-  height: 300,
-  body: VStack(16, [
-    Text(`Last event: ${lastEvent.value}`),
-
-    Spacer(),
-
-    Button("Click me", () => {
-      lastEvent.set("Button clicked");
-    }),
-
-    hoverBtn,
-    dblLabel,
-  ]),
-});
+```typescript
+{{#include ../../examples/ui/events/complete.ts}}
 ```
+
+Verified by CI. Note that event handlers are registered via free functions
+(`widgetSetOnHover(widget, cb)`) rather than methods — the widget handle is
+opaque and perry's API is function-first throughout.
 
 ## Next Steps
 

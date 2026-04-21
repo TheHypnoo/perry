@@ -1,7 +1,7 @@
 // demonstrates: Section grouping with widgetAddChild (no Form widget in Perry)
 // docs: docs/src/ui/widgets.md
 // platforms: macos, linux, windows
-// targets: web, wasm
+// targets: ios-simulator, web, wasm
 
 import {
     App,

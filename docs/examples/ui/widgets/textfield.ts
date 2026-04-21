@@ -1,7 +1,7 @@
 // demonstrates: TextField + two-way binding via stateBindTextfield
 // docs: docs/src/ui/widgets.md
 // platforms: macos, linux, windows
-// targets: web, wasm
+// targets: ios-simulator, web, wasm
 
 import { App, VStack, Text, TextField, State, stateBindTextfield } from "perry/ui"
 

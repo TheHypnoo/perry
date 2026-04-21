@@ -1,7 +1,7 @@
 // demonstrates: Slider with a numeric range
 // docs: docs/src/ui/widgets.md
 // platforms: macos, linux, windows
-// targets: web, wasm
+// targets: ios-simulator, web, wasm
 
 import { App, VStack, Text, Slider, State } from "perry/ui"
 

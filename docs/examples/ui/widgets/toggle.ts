@@ -1,7 +1,7 @@
 // demonstrates: Toggle widget bound to State
 // docs: docs/src/ui/widgets.md
 // platforms: macos, linux, windows
-// targets: web, wasm
+// targets: ios-simulator, web, wasm
 
 import { App, VStack, Text, Toggle, State } from "perry/ui"
 

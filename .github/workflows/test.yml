@@ -277,7 +277,7 @@ jobs:
             # single comma-delimited value because PowerShell splits even
             # `--foo=a,b` at the comma when unquoted (array literal).
             # Repetition sidesteps the whole issue on every shell.
-            cmd_xcompile_blocking: "./scripts/run_doc_tests.sh --verbose --xcompile-only --xcompile-only-target=web --xcompile-only-target=wasm"
+            cmd_xcompile_blocking: "./scripts/run_doc_tests.sh --verbose --xcompile-only --xcompile-only-target=web --xcompile-only-target=wasm --xcompile-only-target=ios-simulator"
             cmd_xcompile_advisory: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
             # Baseline captured from a clean CI run of 24723671119 (900x970).
             gallery_advisory: false
@@ -286,7 +286,7 @@ jobs:
             shell: bash
             cmd_exclude_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
             cmd_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter ui/gallery.ts"
-            cmd_xcompile_blocking: "./scripts/run_doc_tests.sh --verbose --xcompile-only --xcompile-only-target=web --xcompile-only-target=wasm"
+            cmd_xcompile_blocking: "./scripts/run_doc_tests.sh --verbose --xcompile-only --xcompile-only-target=web --xcompile-only-target=wasm --xcompile-only-target=ios-simulator"
             cmd_xcompile_advisory: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
             # Baseline captured under Xvfb (900x1024).
             gallery_advisory: false
@@ -295,14 +295,13 @@ jobs:
             shell: pwsh
             cmd_exclude_gallery: "./scripts/run_doc_tests.ps1 --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
             cmd_gallery: "./scripts/run_doc_tests.ps1 --verbose --skip-xcompile --filter ui/gallery.ts"
-            cmd_xcompile_blocking: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only --xcompile-only-target=web --xcompile-only-target=wasm"
+            cmd_xcompile_blocking: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only --xcompile-only-target=web --xcompile-only-target=wasm --xcompile-only-target=ios-simulator"
             cmd_xcompile_advisory: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only"
-            # perry-ui-windows/src/widgets/picker.rs:81 panics with
-            # HRESULT(0x8007057E) "Cannot create a top-level child window"
-            # when the gallery's Picker widget is created in test mode;
-            # gallery stays advisory on Windows until that pre-existing
-            # perry-ui-windows bug is fixed.
-            gallery_advisory: true
+            # Baseline captured from run #24735151417 (900x788).
+            # perry-ui-windows screenshot.rs emits an uncompressed PNG
+            # (~2.7MB vs macOS 56KB / Linux 32KB) — functional but worth
+            # cleaning up in a follow-up; dssim diffs the pixels either way.
+            gallery_advisory: false
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -332,15 +331,38 @@ jobs:
       - name: Surface Android NDK location (for cross-compile)
         if: matrix.os == 'macos-14' || matrix.os == 'ubuntu-24.04'
         run: |
+          # 1. Discover NDK location on the runner.
+          NDK=""
           if [ -n "$ANDROID_NDK_HOME" ]; then
-            echo "Found ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+            NDK="$ANDROID_NDK_HOME"
           elif [ -d "$ANDROID_HOME/ndk-bundle" ]; then
-            echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk-bundle" >> "$GITHUB_ENV"
+            NDK="$ANDROID_HOME/ndk-bundle"
           elif [ -d "$ANDROID_HOME/ndk" ]; then
-            # Pick the highest versioned NDK under $ANDROID_HOME/ndk/.
             NDK=$(ls -1d "$ANDROID_HOME/ndk/"*/ 2>/dev/null | sort -V | tail -1)
-            [ -n "$NDK" ] && echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+            NDK="${NDK%/}"
           fi
+          if [ -z "$NDK" ]; then
+            echo "No Android NDK found on runner — android xcompile will skip"
+            exit 0
+          fi
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          # 2. Point cc-rs + cargo at the NDK's clang wrapper so
+          #    `cargo build --target aarch64-linux-android` picks up the
+          #    right linker/CC/AR instead of the host `cc`.
+          HOST_TAG=$(uname -s | tr '[:upper:]' '[:lower:]')-x86_64
+          # macOS NDK uses darwin-x86_64 even on arm64 runners (rosetta).
+          if [ "$(uname -s)" = "Darwin" ]; then HOST_TAG="darwin-x86_64"; fi
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin"
+          API=24
+          CLANG=$(ls "$TOOLCHAIN"/aarch64-linux-android*-clang 2>/dev/null | sort -V | tail -1)
+          if [ -z "$CLANG" ]; then
+            echo "Could not locate NDK clang under $TOOLCHAIN — skipping env setup"
+            exit 0
+          fi
+          echo "CC_aarch64_linux_android=$CLANG"                      >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar"           >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG"      >> "$GITHUB_ENV"
+          echo "Android NDK wired: CLANG=$CLANG"
 
       - name: Install Apple SDK Rust targets (macOS only)
         if: matrix.os == 'macos-14'

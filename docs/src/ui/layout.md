@@ -131,36 +131,10 @@ VStack(12, [
 
 ## Nesting Layouts
 
-Layouts can be nested freely:
+Layouts can be nested freely. This example is verified by CI:
 
-```typescript,no-test
-import { App, VStack, HStack, Text, Button, Spacer, Divider } from "perry/ui";
-
-App({
-  title: "Layout Example",
-  width: 800,
-  height: 600,
-  body: VStack(16, [
-    // Header
-    HStack(8, [
-      Text("My App"),
-      Spacer(),
-      Button("Settings", () => {}),
-    ]),
-    Divider(),
-    // Content
-    VStack(12, [
-      Text("Welcome!"),
-      HStack(8, [
-        Button("Action 1", () => {}),
-        Button("Action 2", () => {}),
-      ]),
-    ]),
-    Spacer(),
-    // Footer
-    Text("v1.0.0"),
-  ]),
-});
+```typescript
+{{#include ../../examples/ui/layout/nesting.ts}}
 ```
 
 ## Child Management

@@ -1,7 +1,7 @@
 // demonstrates: Picker with items added via pickerAddItem
 // docs: docs/src/ui/widgets.md
 // platforms: macos, linux, windows
-// targets: web, wasm
+// targets: ios-simulator, web, wasm
 
 import { App, VStack, Text, Picker, State, pickerAddItem } from "perry/ui"
 

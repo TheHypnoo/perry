@@ -1,7 +1,7 @@
 // demonstrates: TextArea for multi-line input
 // docs: docs/src/ui/widgets.md
 // platforms: macos, linux, windows
-// targets: web, wasm
+// targets: ios-simulator, web, wasm
 
 import { App, VStack, Text, TextArea, State } from "perry/ui"
 

@@ -4,17 +4,8 @@ Perry's `perry/ui` module lets you build native desktop and mobile apps with dec
 
 ## Quick Start
 
-```typescript,no-test
-import { App, Text, VStack } from "perry/ui";
-
-App({
-  title: "My App",
-  width: 400,
-  height: 300,
-  body: VStack(16, [
-    Text("Hello from Perry!"),
-  ]),
-});
+```typescript
+{{#include ../../examples/ui/overview/quickstart.ts}}
 ```
 
 ```bash
