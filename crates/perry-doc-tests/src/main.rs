@@ -464,9 +464,9 @@ fn run_one(
                     kind: ex.kind,
                     status: Status::RunFail,
                     detail: format!(
-                        "exit={} stderr={}",
+                        "exit={} {}",
                         out.status.code().unwrap_or(-1),
-                        trim_detail(&String::from_utf8_lossy(&out.stderr))
+                        combine_stdio(&out.stdout, &out.stderr),
                     ),
                     duration_ms: 0,
                 };
@@ -628,7 +628,7 @@ fn cross_compile_one(
             detail: format!(
                 "target=`{target}`: perry exit {}: {}",
                 output.status.code().unwrap_or(-1),
-                trim_detail(&String::from_utf8_lossy(&output.stderr))
+                combine_stdio(&output.stdout, &output.stderr),
             ),
             duration_ms: 0,
         };
@@ -668,14 +668,28 @@ fn compile(perry_bin: &Path, src: &Path, out: &Path) -> Result<()> {
         .output()
         .with_context(|| format!("launching perry for {}", src.display()))?;
     if !out_status.status.success() {
-        let stderr = String::from_utf8_lossy(&out_status.stderr);
         return Err(anyhow!(
             "perry exit {}: {}",
             out_status.status.code().unwrap_or(-1),
-            trim_detail(&stderr)
+            combine_stdio(&out_status.stdout, &out_status.stderr),
         ));
     }
     Ok(())
+}
+
+/// Merge child stdout + stderr for error reporting. MSVC `link.exe` on
+/// Windows writes LNKxxxx errors to stdout, not stderr, so failing to
+/// include both hid the real linker diagnostic behind a generic perry
+/// "Linking failed" message.
+fn combine_stdio(stdout: &[u8], stderr: &[u8]) -> String {
+    let o = String::from_utf8_lossy(stdout);
+    let e = String::from_utf8_lossy(stderr);
+    let merged = match (o.trim().is_empty(), e.trim().is_empty()) {
+        (true, _) => e.to_string(),
+        (false, true) => o.to_string(),
+        (false, false) => format!("{e}\n--- stdout ---\n{o}"),
+    };
+    trim_detail(&merged)
 }
 
 enum RunError {
