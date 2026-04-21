@@ -367,8 +367,10 @@ jobs:
       - name: Pre-build Apple UI libs for cross-compile (macOS only)
         if: matrix.os == 'macos-14'
         run: |
-          cargo build --release -p perry-ui-ios  --target aarch64-apple-ios-sim
-          cargo build --release -p perry-ui-tvos --target aarch64-apple-tvos-sim
+          # iOS-sim is Rust Tier-2 — builds with stable. tvOS-sim is Tier-3
+          # and needs nightly + -Zbuild-std; perry's auto-optimize handles
+          # that path itself, so we skip pre-building perry-ui-tvos here.
+          cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim
 
       - name: Lint docs/src markdown fences (repo-wide)
         if: matrix.os == 'macos-14'

@@ -69,7 +69,10 @@ pub fn create(placeholder_ptr: *const u8, on_change: f64) -> i64 {
                         | WS_TABSTOP.0,
                 ),
                 0, 0, 200, 24,
-                None,
+                // WS_CHILD requires a parent HWND; same pattern as picker/
+                // button/textfield — use the parking window until
+                // layout::relayout() moves the control to its real parent.
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
                 HINSTANCE::from(hinstance),
                 None,
