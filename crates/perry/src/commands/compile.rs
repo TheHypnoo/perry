@@ -5902,15 +5902,23 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                 // Allow multiple definitions from perry-runtime in both stdlib and UI lib
                 cmd.arg("-Wl,--allow-multiple-definition");
                 // libperry_ui_gtk4.a references perry-stdlib symbols
-                // (js_stdlib_process_pending, js_promise_run_microtasks, …).
-                // ld scans archives left-to-right; stdlib was already added
-                // above before any ui references were undefined, so those
-                // objects weren't pulled in. Re-link stdlib here so the
-                // UI-driven references resolve. Same trick GNU ld users
-                // call "archive twice" — or you could wrap both in
-                // --start-group/--end-group, but repeating is a one-liner.
+                // (js_stdlib_process_pending, js_promise_run_microtasks, …)
+                // through glib::source::trampoline_local closures. GNU ld
+                // scans archives left-to-right and won't retroactively pull
+                // objects from stdlib after ui_lib creates the undefined
+                // reference — "archive twice" wasn't enough because the
+                // runtime stub at perry-runtime/src/stdlib_stubs.rs satisfies
+                // the symbol with a no-op before ld ever reaches the real
+                // stdlib. Wrap stdlib in --whole-archive so every one of its
+                // objects is pulled unconditionally, overriding the runtime
+                // stub via --allow-multiple-definition. Cost: bigger Linux
+                // binary (full stdlib instead of just referenced objects),
+                // which is acceptable for a UI program that already pulls
+                // GTK4 + glib + pulse.
                 if let Some(ref stdlib) = stdlib_lib {
-                    cmd.arg(stdlib);
+                    cmd.arg("-Wl,--whole-archive")
+                       .arg(stdlib)
+                       .arg("-Wl,--no-whole-archive");
                 }
                 // GTK4 libraries via pkg-config
                 if let Ok(output) = Command::new("pkg-config").args(["--libs", "gtk4"]).output() {
