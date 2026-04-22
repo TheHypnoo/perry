@@ -104,6 +104,9 @@ enum Commands {
 
     /// Generate TypeScript type stubs for Perry built-in modules
     Types(commands::types::TypesArgs),
+
+    /// Manage the per-module object cache at `.perry-cache/`
+    Cache(commands::cache::CacheArgs),
 }
 
 /// Check if the first non-flag argument looks like a TypeScript file
@@ -120,7 +123,7 @@ fn is_legacy_invocation(args: &[String]) -> bool {
         // If it's a known subcommand, not legacy
         if matches!(
             arg.as_str(),
-            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "audit" | "verify" | "run" | "dev" | "appstore" | "types" | "help"
+            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "audit" | "verify" | "run" | "dev" | "appstore" | "types" | "cache" | "help"
         ) {
             return false;
         }
@@ -260,6 +263,9 @@ fn main_inner() -> Result<()> {
         }
         Commands::Types(args) => {
             commands::types::run(args, cli.format, use_color)
+        }
+        Commands::Cache(args) => {
+            commands::cache::run(args, cli.format)
         }
     };
 

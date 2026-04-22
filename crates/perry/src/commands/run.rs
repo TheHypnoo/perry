@@ -168,6 +168,7 @@ pub fn run(args: RunArgs, format: OutputFormat, use_color: bool, verbose: u8) ->
         geisterhand_port: args.geisterhand_port,
         minimal_stdlib: false,
         no_auto_optimize: false,
+        no_cache: false,
     };
 
     let result = super::compile::run(compile_args, format, use_color, verbose)?;

@@ -2,6 +2,7 @@
 
 pub mod appstore;
 pub mod audit;
+pub mod cache;
 pub mod check;
 pub mod compile;
 pub mod deps;
