@@ -153,12 +153,16 @@ while IFS= read -r -d '' src; do
     # Launch with PERRY_UI_TEST_MODE so the app self-exits after one frame.
     # --console-pty captures the app's stdout/stderr; we wait for the launch
     # command to return (happens when the app calls exit(0)).
-    # simctl launch's --setenv takes `KEY=VALUE` as a *separate* argument —
-    # `--setenv=KEY=VALUE` confuses the parser ("Invalid device").
+    # simctl launch has NO --setenv flag. Env vars reach the spawned app by
+    # prefixing them with SIMCTL_CHILD_ in the calling shell's environment
+    # (see `xcrun simctl help launch` — the SIMCTL_CHILD_ note at the end).
+    # Prior attempts to pass --setenv=KEY=VALUE or --setenv KEY=VALUE both
+    # failed with "Invalid device: --setenv..." because simctl parsed the
+    # unknown flag as the positional device argument.
+    SIMCTL_CHILD_PERRY_UI_TEST_MODE=1 \
+    SIMCTL_CHILD_PERRY_UI_TEST_EXIT_AFTER_MS=500 \
     run_with_timeout "$LAUNCH_TIMEOUT" xcrun simctl launch --console-pty \
         --terminate-running-process \
-        --setenv PERRY_UI_TEST_MODE=1 \
-        --setenv PERRY_UI_TEST_EXIT_AFTER_MS=500 \
         "$UDID" "$bundle_id" >"$OUT_DIR/$stem.run.log" 2>&1
     rc=$?
     if [ "$rc" -ne 0 ]; then
