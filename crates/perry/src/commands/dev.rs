@@ -297,6 +297,7 @@ fn build_once(
         geisterhand_port: None,
         minimal_stdlib: false,
         no_auto_optimize: false,
+        no_cache: false,
     };
     parse_cache.reset_counters();
     super::compile::run_with_parse_cache(
