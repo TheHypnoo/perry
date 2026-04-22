@@ -619,7 +619,8 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 #[no_mangle] pub extern "C" fn perry_ui_poll_open_file() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn perry_ui_widget_add_overlay(_parent: i64, _child: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_widget_set_overlay_frame(_h: i64, _x: f64, _y: f64, _w: f64, _h2: f64) {}
-#[no_mangle] pub extern "C" fn perry_ui_alert(_title: i64, _msg: i64, _btns: i64, _cb: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_alert(_title: i64, _msg: i64, _btns: f64, _cb: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_alert_simple(_title: i64, _msg: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_sheet_create(_w: f64, _h: f64, _title: i64) -> i64 { 0 }
 #[no_mangle] pub extern "C" fn perry_ui_sheet_present(_sheet: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_sheet_dismiss(_sheet: i64) {}

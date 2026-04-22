@@ -1186,10 +1186,22 @@ pub extern "C" fn perry_ui_state_bind_textfield(state_handle: i64, textfield_han
 // Alert Dialog
 // =============================================================================
 
-/// Show an alert dialog. Returns button index.
+/// Show an alert dialog with custom buttons.
+/// `buttons` is a NaN-boxed JS array of string labels; the callback is
+/// invoked with the 0-based index of the clicked button. Called from
+/// `alertWithButtons(title, message, buttons, cb)` in TS.
 #[no_mangle]
-pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons_ptr: i64, callback: f64) {
+pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons: f64, callback: f64) {
+    extern "C" { fn js_nanbox_get_pointer(value: f64) -> i64; }
+    let buttons_ptr = unsafe { js_nanbox_get_pointer(buttons) };
     widgets::alert::show(title_ptr as *const u8, message_ptr as *const u8, buttons_ptr, callback);
+}
+
+/// Simple 2-arg alert: shows NSAlert with the title/message and a single
+/// "OK" button. Called from `alert(title, message)` in TS.
+#[no_mangle]
+pub extern "C" fn perry_ui_alert_simple(title_ptr: i64, message_ptr: i64) {
+    widgets::alert::show_simple(title_ptr as *const u8, message_ptr as *const u8);
 }
 
 // =============================================================================
@@ -1424,6 +1436,12 @@ pub extern "C" fn perry_ui_lazyvstack_create(count: f64, render_closure: f64) ->
 #[no_mangle]
 pub extern "C" fn perry_ui_lazyvstack_update(handle: i64, count: i64) {
     widgets::lazyvstack::update_count(handle, count);
+}
+
+/// Set the uniform row height on a virtualized LazyVStack.
+#[no_mangle]
+pub extern "C" fn perry_ui_lazyvstack_set_row_height(handle: i64, height: f64) {
+    widgets::lazyvstack::set_row_height(handle, height);
 }
 
 // =============================================================================

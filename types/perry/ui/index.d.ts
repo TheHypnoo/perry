@@ -115,6 +115,19 @@ export function TabBar(onChange: (index: number) => void): Widget;
 /** Create a native window. */
 export function Window(title: string, width: number, height: number): Window;
 
+/**
+ * Virtualized vertical list. `render(index)` is invoked lazily — on macOS,
+ * backed by NSTableView, so only rows currently within the visible rect are
+ * realized. Use this for lists of hundreds or thousands of items; for small
+ * lists a plain `VStack` + `ForEach` is simpler.
+ *
+ * Row height defaults to 44pt (uniform). Override with `lazyvstackSetRowHeight`.
+ * Call `lazyvstackUpdate(handle, newCount)` when the underlying data changes.
+ */
+export function LazyVStack(count: number, render: (index: number) => Widget): Widget;
+export function lazyvstackUpdate(handle: Widget, count: number): void;
+export function lazyvstackSetRowHeight(handle: Widget, height: number): void;
+
 /** Vertical split view. */
 export function SplitView(): Widget;
 
@@ -348,6 +361,21 @@ export function clipboardWrite(text: string): void;
 // ---------------------------------------------------------------------------
 
 export function alert(title: string, message: string): void;
+/**
+ * Show a modal alert with multiple labeled buttons. The callback is invoked
+ * with the 0-based index of the button the user clicked.
+ *
+ * On macOS the first button becomes the default (Return key); on Windows the
+ * native MessageBox API is used with OK/OKCancel/YesNoCancel layouts
+ * depending on button count. Pass a `"destructive"` style via convention by
+ * placing the destructive label last and checking the index in the callback.
+ */
+export function alertWithButtons(
+  title: string,
+  message: string,
+  buttons: string[],
+  callback: (index: number) => void,
+): void;
 export function openFileDialog(callback: (path: string) => void): void;
 export function openFolderDialog(callback: (path: string) => void): void;
 export function saveFileDialog(callback: (path: string) => void, defaultName: string, extension: string): void;
@@ -358,6 +386,25 @@ export function pollOpenFile(): string;
 // ---------------------------------------------------------------------------
 
 export function addKeyboardShortcut(key: string, callback: () => void): void;
+
+// ---------------------------------------------------------------------------
+// App lifecycle hooks
+// ---------------------------------------------------------------------------
+
+/**
+ * Register a callback to run just before the app exits. The macOS backend
+ * wires this to `applicationWillTerminate:`, GTK4 uses `connect_shutdown`,
+ * and Windows uses `WM_DESTROY`. Typical use: flush state, close database
+ * connections, write preferences.
+ */
+export function onTerminate(callback: () => void): void;
+
+/**
+ * Register a callback to run when the app becomes the frontmost app
+ * (initial launch, dock click, cmd-tab). Runs once per activation. Use to
+ * refresh data when the user returns to the app.
+ */
+export function onActivate(callback: () => void): void;
 
 // ---------------------------------------------------------------------------
 // Timer

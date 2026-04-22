@@ -554,6 +554,9 @@ define_class!(
                     unsafe { libc::free(ptr as *mut libc::c_void); }
                 }
             }
+            // process::exit bypasses applicationWillTerminate:, so fire
+            // the user's onTerminate hook manually to mirror a real quit.
+            invoke_terminate_callback();
             use std::io::Write;
             let _ = std::io::stdout().flush();
             let _ = std::io::stderr().flush();
@@ -1186,8 +1189,55 @@ define_class!(
                 }
             });
         }
+
+        /// Called by NSApplication just before the app exits. Invokes the
+        /// user's `onTerminate` callback (if registered) so state/DB cleanup
+        /// can run.
+        #[unsafe(method(applicationWillTerminate:))]
+        fn application_will_terminate(&self, _notification: &AnyObject) {
+            invoke_terminate_callback();
+        }
+
+        /// Called when the app becomes the frontmost app (launch, dock click,
+        /// cmd-tab). Invokes the user's `onActivate` callback if registered.
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn application_did_become_active(&self, _notification: &AnyObject) {
+            invoke_activate_callback();
+        }
     }
 );
+
+fn invoke_terminate_callback() {
+    extern "C" {
+        fn js_closure_call1(closure: *const u8, arg: f64) -> f64;
+        fn js_nanbox_get_pointer(value: f64) -> i64;
+    }
+    let cb = ON_TERMINATE_CALLBACK.with(|c| *c.borrow());
+    if let Some(callback) = cb {
+        unsafe {
+            let ptr = js_nanbox_get_pointer(callback) as *const u8;
+            if !ptr.is_null() {
+                js_closure_call1(ptr, f64::from_bits(0x7FFC_0000_0000_0001)); // undefined
+            }
+        }
+    }
+}
+
+fn invoke_activate_callback() {
+    extern "C" {
+        fn js_closure_call1(closure: *const u8, arg: f64) -> f64;
+        fn js_nanbox_get_pointer(value: f64) -> i64;
+    }
+    let cb = ON_ACTIVATE_CALLBACK.with(|c| *c.borrow());
+    if let Some(callback) = cb {
+        unsafe {
+            let ptr = js_nanbox_get_pointer(callback) as *const u8;
+            if !ptr.is_null() {
+                js_closure_call1(ptr, f64::from_bits(0x7FFC_0000_0000_0001)); // undefined
+            }
+        }
+    }
+}
 
 impl PerryAppDelegate {
     fn new() -> Retained<Self> {

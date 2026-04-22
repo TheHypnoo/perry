@@ -39,11 +39,19 @@ export function keychainDelete(key: string): void;
 // User Preferences (persistent key-value storage)
 // ---------------------------------------------------------------------------
 
-/** Read a numeric preference value. */
-export function preferencesGet(key: string): number;
+/**
+ * Read a preference value. Returns the stored string or number, or `undefined`
+ * if the key is absent. The runtime branches on the NaN-box tag of the stored
+ * NSUserDefaults entry, so callers see the original type back.
+ */
+export function preferencesGet(key: string): string | number | undefined;
 
-/** Write a numeric preference value. */
-export function preferencesSet(key: string, value: number): void;
+/**
+ * Write a preference value. Strings and numbers are stored natively via
+ * NSUserDefaults / GSettings / the Windows registry depending on platform;
+ * the same value round-trips through `preferencesGet`.
+ */
+export function preferencesSet(key: string, value: string | number): void;
 
 // ---------------------------------------------------------------------------
 // Notifications

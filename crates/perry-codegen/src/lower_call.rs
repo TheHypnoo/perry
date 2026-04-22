@@ -3652,6 +3652,17 @@ const PERRY_UI_TABLE: &[UiSig] = &[
             args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64],
             ret: UiReturnKind::Void },
 
+    // ---- LazyVStack (virtualized list) ----
+    // `LazyVStack(count, (i) => Widget)` — on macOS backed by NSTableView
+    // with lazy row rendering. The render closure is invoked only for rows
+    // currently in the visible rect.
+    UiSig { method: "LazyVStack", runtime: "perry_ui_lazyvstack_create",
+            args: &[UiArgKind::F64, UiArgKind::Closure], ret: UiReturnKind::Widget },
+    UiSig { method: "lazyvstackUpdate", runtime: "perry_ui_lazyvstack_update",
+            args: &[UiArgKind::Widget, UiArgKind::I64Raw], ret: UiReturnKind::Void },
+    UiSig { method: "lazyvstackSetRowHeight", runtime: "perry_ui_lazyvstack_set_row_height",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+
     // ---- State ----
     UiSig { method: "State", runtime: "perry_ui_state_create",
             args: &[UiArgKind::F64], ret: UiReturnKind::Widget },
@@ -3822,8 +3833,19 @@ const PERRY_UI_TABLE: &[UiSig] = &[
             args: &[UiArgKind::Str], ret: UiReturnKind::Void },
 
     // ---- Alert ----
-    UiSig { method: "alert", runtime: "perry_ui_alert",
+    // `alert(title, message)` dispatches to a dedicated 2-arg FFI; the prior
+    // entry pointed at the 4-arg `perry_ui_alert` symbol, which was ABI-broken
+    // (buttons/callback read from uninitialized registers, usually segfaulting
+    // inside js_array_get_length).
+    UiSig { method: "alert", runtime: "perry_ui_alert_simple",
             args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Void },
+    // `alertWithButtons(title, message, buttons, cb)` — buttons is a JS array
+    // of labels, callback receives the 0-based button index. Passed as F64
+    // because the runtime extracts the array pointer via
+    // `js_nanbox_get_pointer` just like closures.
+    UiSig { method: "alertWithButtons", runtime: "perry_ui_alert",
+            args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::F64, UiArgKind::Closure],
+            ret: UiReturnKind::Void },
 
     // ---- Window (constructor — receiver-less) ----
     UiSig { method: "Window", runtime: "perry_ui_window_create",
@@ -3891,6 +3913,12 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     // ---- Keyboard shortcuts ----
     UiSig { method: "addKeyboardShortcut", runtime: "perry_ui_add_keyboard_shortcut",
             args: &[UiArgKind::Str, UiArgKind::Closure], ret: UiReturnKind::Void },
+
+    // ---- App lifecycle hooks ----
+    UiSig { method: "onTerminate", runtime: "perry_ui_app_on_terminate",
+            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
+    UiSig { method: "onActivate", runtime: "perry_ui_app_on_activate",
+            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
 
     // ---- App extras ----
     UiSig { method: "appSetTimer", runtime: "perry_ui_app_set_timer",

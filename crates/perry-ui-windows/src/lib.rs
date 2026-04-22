@@ -290,6 +290,10 @@ pub extern "C" fn perry_ui_lazyvstack_update(handle: i64, count: i64) {
     widgets::lazyvstack::update(handle, count);
 }
 
+/// Advisory on Windows — eager-render path doesn't consult row_height yet.
+#[no_mangle]
+pub extern "C" fn perry_ui_lazyvstack_set_row_height(_handle: i64, _height: f64) {}
+
 // Table (stub — not yet implemented on Windows)
 #[no_mangle]
 pub extern "C" fn perry_ui_table_create(_row_count: f64, _col_count: f64, _render: f64) -> i64 { 0 }
@@ -727,10 +731,19 @@ pub extern "C" fn perry_ui_save_file_dialog(callback: f64, default_name_ptr: i64
     dialog::save_file_dialog(callback, default_name_ptr as *const u8, allowed_types_ptr as *const u8);
 }
 
-/// Show an alert dialog.
+/// Show an alert dialog with custom buttons.
+/// `buttons` is a NaN-boxed JS array of string labels; callback receives index.
 #[no_mangle]
-pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons_ptr: i64, callback: f64) {
-    dialog::alert(title_ptr as *const u8, message_ptr as *const u8, buttons_ptr as *const u8, callback);
+pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons: f64, callback: f64) {
+    extern "C" { fn js_nanbox_get_pointer(value: f64) -> i64; }
+    let buttons_ptr = unsafe { js_nanbox_get_pointer(buttons) } as *const u8;
+    dialog::alert(title_ptr as *const u8, message_ptr as *const u8, buttons_ptr, callback);
+}
+
+/// Show a simple alert (title, message, OK button). Called from `alert(title, message)`.
+#[no_mangle]
+pub extern "C" fn perry_ui_alert_simple(title_ptr: i64, message_ptr: i64) {
+    dialog::alert_simple(title_ptr as *const u8, message_ptr as *const u8);
 }
 
 // =============================================================================

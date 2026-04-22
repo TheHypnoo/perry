@@ -1236,8 +1236,13 @@ pub extern "C" fn perry_ui_state_bind_textfield(state_handle: i64, textfield_han
 // =============================================================================
 
 #[no_mangle]
-pub extern "C" fn perry_ui_alert(_title: i64, _message: i64, _buttons: i64, _callback: f64) {
-    // iOS: UIAlertController — stub for now
+pub extern "C" fn perry_ui_alert(_title: i64, _message: i64, _buttons: f64, _callback: f64) {
+    // tvOS: UIAlertController — stub for now
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_alert_simple(_title: i64, _message: i64) {
+    // tvOS: UIAlertController — stub for now
 }
 
 // =============================================================================
