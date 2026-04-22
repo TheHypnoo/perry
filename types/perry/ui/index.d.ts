@@ -109,7 +109,14 @@ export function Section(title: string): Widget;
 /** Navigation stack for push/pop navigation. */
 export function NavStack(): Widget;
 
-/** Tab bar container. */
+/**
+ * Tab bar container.
+ *
+ * **Platform support:** fully implemented on iOS, tvOS, Android. On macOS,
+ * Windows, and GTK4 this is currently a no-op stub (returns handle 0) and
+ * watchOS silently substitutes a VStack. Prefer `NavStack` or a custom
+ * segmented control on desktop until these land.
+ */
 export function TabBar(onChange: (index: number) => void): Widget;
 
 /** Create a native window. */

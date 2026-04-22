@@ -14,7 +14,7 @@ Perry is a native TypeScript compiler written in Rust that compiles TypeScript s
 
 Tracked via the gap test suite (`test-files/test_gap_*.ts`, 22 tests). Compared byte-for-byte against `node --experimental-strip-types`. Run via `/tmp/run_gap_tests.sh` after `cargo build --release -p perry-runtime -p perry-stdlib -p perry`.
 
-**Last sweep:** **22/28 passing**, **29 total diff lines** (v0.5.142, after async closure fix).
+**Last sweep:** **22/28 passing**, **29 total diff lines** (re-validated at v0.5.152, unchanged since v0.5.142's async closure fix).
 
 | Status | Test | Diffs |
 |--------|------|-------|
