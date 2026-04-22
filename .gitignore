@@ -67,6 +67,8 @@ fastify_server
 hono_server
 http_server
 searchbird_*
+image_conv
+issue42_noalloc
 
 # Test output
 test-parity/output/
