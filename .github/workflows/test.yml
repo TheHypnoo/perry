@@ -259,6 +259,13 @@ jobs:
             exit 1
           fi
 
+      # Thread-primitive compile-error tests (#146): checks that closures
+      # passed to perry/thread primitives with outer-variable writes are
+      # rejected. The runtime thread_primitives.ts example is covered by
+      # the doc-tests job below.
+      - name: Thread-primitive compile-error tests
+        run: ./scripts/run_thread_tests.sh
+
   # ---------------------------------------------------------------------------
   # Doc-example tests: compile + run every .ts under docs/examples/.
   # UI examples launch with PERRY_UI_TEST_MODE=1 so they auto-exit after one

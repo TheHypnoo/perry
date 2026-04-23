@@ -1028,6 +1028,11 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_bcrypt_hash", I64, &[I64, DOUBLE]);
     module.declare_function("js_bcrypt_hash_sync", I64, &[I64, DOUBLE]);
 
+    // ========== perry/thread (parallelMap, parallelFilter, spawn) ==========
+    module.declare_function("js_thread_parallel_map", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_thread_parallel_filter", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_thread_spawn", DOUBLE, &[DOUBLE]);
+
     // ========== jsonwebtoken / JWT ==========
     module.declare_function("js_jwt_decode", I64, &[I64]);
     module.declare_function("js_jwt_sign", I64, &[I64, I64, DOUBLE, I64]);

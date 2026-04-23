@@ -2570,6 +2570,53 @@ pub(crate) fn lower_native_method_call(
     // LLVM cutover.
     if object.is_none() {
         if let Some(sig) = native_module_lookup(module, false, method, class_name) {
+            // perry/thread thread-safety check: the closure passed to
+            // parallelMap / parallelFilter / spawn must not write to any
+            // variable declared outside its own body. Each worker thread
+            // gets its own deep-copied snapshot of ordinary captures, and
+            // module-level variables live in global slots that would race
+            // across workers — either way, writes are silently lost or
+            // corrupted relative to user expectations. Enforce at compile
+            // time so the docs' promise is real.
+            //
+            // Note we can't rely on the closure's `mutable_captures` field
+            // alone: the HIR filters module-level IDs out of `captures`
+            // via `filter_module_level_captures` (see lower.rs:457), so a
+            // top-level `let counter = 0; parallelMap(data, () => counter++)`
+            // ends up with `captures: [], mutable_captures: []` even though
+            // the body obviously writes to `counter`. Instead, walk the
+            // body ourselves and flag any LocalSet/Update whose target
+            // isn't a parameter or a `let` introduced inside the body.
+            if module == "perry/thread" {
+                let closure_arg = match method {
+                    "parallelMap" | "parallelFilter" => args.get(1),
+                    "spawn" => args.get(0),
+                    _ => None,
+                };
+                if let Some(Expr::Closure { params, body, .. }) = closure_arg {
+                    let mut inner_ids: std::collections::HashSet<perry_types::LocalId> =
+                        params.iter().map(|p| p.id).collect();
+                    for stmt in body {
+                        collect_closure_introduced_ids(stmt, &mut inner_ids);
+                    }
+                    let mut outer_writes: Vec<perry_types::LocalId> = Vec::new();
+                    for stmt in body {
+                        find_outer_writes_stmt(stmt, &inner_ids, &mut outer_writes);
+                    }
+                    if let Some(&first_outer) = outer_writes.first() {
+                        anyhow::bail!(
+                            "perry/thread: closure passed to `{}` writes to outer variable (LocalId {}) — \
+                             this is not allowed because each worker thread receives a deep-copied \
+                             snapshot of captured values (and module-level slots are not shared across \
+                             workers in the way ordinary TS globals appear to be), so writes would be \
+                             silently lost or corrupted relative to user expectations. Return values \
+                             from the closure and aggregate them on the main thread instead. \
+                             See docs/src/threading/overview.md#no-shared-mutable-state.",
+                            method, first_outer,
+                        );
+                    }
+                }
+            }
             return lower_native_module_dispatch(ctx, sig, None, args);
         }
     }
@@ -2804,6 +2851,40 @@ fn build_headers_from_object(
     Ok(h)
 }
 
+/// Phase 3 compat: extract `{key: value, ...}` pairs from an options
+/// argument in a form that works whether the options literal reached us
+/// as a plain `Expr::Object(props)` (pre-Phase-3 / spread/dynamic shapes)
+/// or as an `Expr::New { class_name: "__AnonShape_N", args }` (Phase 3's
+/// closed-shape synthesis path). For the anon-class form, `ctx.classes`
+/// carries the class with its synthesized constructor — we pair each
+/// constructor param name with its positional arg to recover the literal's
+/// (key, value) view.
+///
+/// Returns `None` when the expression is neither shape — callers should
+/// fall through to whatever they did before when the 2nd arg wasn't an
+/// inline object.
+pub(crate) fn extract_options_fields(
+    ctx: &FnCtx<'_>,
+    e: &Expr,
+) -> Option<Vec<(String, Expr)>> {
+    match e {
+        Expr::Object(props) => Some(props.clone()),
+        Expr::New { class_name, args, .. } if class_name.starts_with("__AnonShape_") => {
+            let class = ctx.classes.get(class_name)?;
+            let ctor = class.constructor.as_ref()?;
+            if ctor.params.len() != args.len() {
+                return None;
+            }
+            let pairs: Vec<(String, Expr)> = ctor.params.iter()
+                .zip(args.iter())
+                .map(|(param, arg)| (param.name.clone(), arg.clone()))
+                .collect();
+            Some(pairs)
+        }
+        _ => None,
+    }
+}
+
 /// Lower `new ClassName(args)` for the built-in Web classes that don't
 /// live in `ctx.classes`. Returns `Ok(None)` if the class isn't one we
 /// handle here (caller should fall through to the default path).
@@ -2847,8 +2928,8 @@ pub(crate) fn lower_builtin_new(
             let mut headers_handle = "0.0".to_string();
 
             if args.len() >= 2 {
-                if let Expr::Object(props) = &args[1] {
-                    for (k, vexpr) in props {
+                if let Some(props) = extract_options_fields(ctx, &args[1]) {
+                    for (k, vexpr) in &props {
                         match k.as_str() {
                             "status" => {
                                 status_val = lower_expr(ctx, vexpr)?;
@@ -2858,10 +2939,10 @@ pub(crate) fn lower_builtin_new(
                             }
                             "headers" => {
                                 // Inline object → build a Headers handle.
-                                // Any other expression → use as a Headers
-                                // handle (numeric f64) directly.
-                                if let Expr::Object(hprops) = vexpr {
-                                    headers_handle = build_headers_from_object(ctx, hprops)?;
+                                // Phase 3 anon-class → same via extract_options.
+                                // Other expressions → use as-is (handle f64).
+                                if let Some(hprops) = extract_options_fields(ctx, vexpr) {
+                                    headers_handle = build_headers_from_object(ctx, &hprops)?;
                                 } else {
                                     headers_handle = lower_expr(ctx, vexpr)?;
                                 }
@@ -2898,8 +2979,8 @@ pub(crate) fn lower_builtin_new(
             // handled so far; anything else falls back to empty.
             let h = ctx.block().call(DOUBLE, "js_headers_new", &[]);
             if !args.is_empty() {
-                if let Expr::Object(props) = &args[0] {
-                    for (k, vexpr) in props {
+                if let Some(props) = extract_options_fields(ctx, &args[0]) {
+                    for (k, vexpr) in &props {
                         let key_expr = Expr::String(k.clone());
                         let key_ptr = get_raw_string_ptr(ctx, &key_expr)?;
                         let val_ptr = get_raw_string_ptr(ctx, vexpr)?;
@@ -2929,8 +3010,8 @@ pub(crate) fn lower_builtin_new(
             let mut headers_handle = "0.0".to_string();
 
             if args.len() >= 2 {
-                if let Expr::Object(props) = &args[1] {
-                    for (k, vexpr) in props {
+                if let Some(props) = extract_options_fields(ctx, &args[1]) {
+                    for (k, vexpr) in &props {
                         match k.as_str() {
                             "method" => {
                                 method_ptr = get_raw_string_ptr(ctx, vexpr)?;
@@ -2939,8 +3020,8 @@ pub(crate) fn lower_builtin_new(
                                 body_ptr = get_raw_string_ptr(ctx, vexpr)?;
                             }
                             "headers" => {
-                                if let Expr::Object(hprops) = vexpr {
-                                    headers_handle = build_headers_from_object(ctx, hprops)?;
+                                if let Some(hprops) = extract_options_fields(ctx, vexpr) {
+                                    headers_handle = build_headers_from_object(ctx, &hprops)?;
                                 } else {
                                     headers_handle = lower_expr(ctx, vexpr)?;
                                 }
@@ -4685,7 +4766,181 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "bcrypt", has_receiver: false, method: "compare",
         class_filter: None,
         runtime: "js_bcrypt_compare", args: &[NA_F64, NA_F64], ret: NR_PTR },
+
+    // ========== perry/thread (parallelMap, parallelFilter, spawn) ==========
+    // Runtime expects both args as NaN-boxed f64 values and returns the same
+    // — no unboxing/reboxing needed on either side. Closure is a POINTER_TAG'd
+    // ClosureHeader; the runtime reads `func_ptr` and calls it per element.
+    NativeModSig { module: "perry/thread", has_receiver: false, method: "parallelMap",
+        class_filter: None,
+        runtime: "js_thread_parallel_map", args: &[NA_F64, NA_F64], ret: NR_F64 },
+    NativeModSig { module: "perry/thread", has_receiver: false, method: "parallelFilter",
+        class_filter: None,
+        runtime: "js_thread_parallel_filter", args: &[NA_F64, NA_F64], ret: NR_F64 },
+    NativeModSig { module: "perry/thread", has_receiver: false, method: "spawn",
+        class_filter: None,
+        runtime: "js_thread_spawn", args: &[NA_F64], ret: NR_F64 },
 ];
+
+/// Walk a statement to collect LocalIds declared inside a closure body —
+/// `Stmt::Let` and `Stmt::For` init `let`s. Used by the perry/thread
+/// thread-safety check to distinguish inner locals (safe to write) from
+/// captures (unsafe). Recurses into nested control-flow but deliberately
+/// NOT into nested closures: those have their own inner-id set.
+fn collect_closure_introduced_ids(
+    stmt: &perry_hir::Stmt,
+    out: &mut std::collections::HashSet<perry_types::LocalId>,
+) {
+    use perry_hir::Stmt;
+    match stmt {
+        Stmt::Let { id, .. } => { out.insert(*id); }
+        Stmt::If { then_branch, else_branch, .. } => {
+            for s in then_branch { collect_closure_introduced_ids(s, out); }
+            if let Some(eb) = else_branch {
+                for s in eb { collect_closure_introduced_ids(s, out); }
+            }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+            for s in body { collect_closure_introduced_ids(s, out); }
+        }
+        Stmt::For { init, body, .. } => {
+            if let Some(init_stmt) = init.as_ref() {
+                collect_closure_introduced_ids(init_stmt, out);
+            }
+            for s in body { collect_closure_introduced_ids(s, out); }
+        }
+        Stmt::Try { body, catch, finally } => {
+            for s in body { collect_closure_introduced_ids(s, out); }
+            if let Some(cc) = catch {
+                if let Some((id, _)) = &cc.param { out.insert(*id); }
+                for s in &cc.body { collect_closure_introduced_ids(s, out); }
+            }
+            if let Some(fb) = finally {
+                for s in fb { collect_closure_introduced_ids(s, out); }
+            }
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                for s in &case.body { collect_closure_introduced_ids(s, out); }
+            }
+        }
+        Stmt::Labeled { body, .. } => collect_closure_introduced_ids(body, out),
+        _ => {} // Expr, Return, Throw, Break, Continue, LabeledBreak/Continue — don't declare locals
+    }
+}
+
+/// Walk a statement looking for LocalSet / Update whose target LocalId is
+/// NOT in `inner_ids` — i.e. the closure is writing to a captured or
+/// module-level variable. Does NOT recurse into nested Closure expressions
+/// (those are a separate scope with their own check when they're passed to
+/// a threading primitive).
+fn find_outer_writes_stmt(
+    stmt: &perry_hir::Stmt,
+    inner_ids: &std::collections::HashSet<perry_types::LocalId>,
+    out: &mut Vec<perry_types::LocalId>,
+) {
+    use perry_hir::Stmt;
+    match stmt {
+        Stmt::Let { init, .. } => {
+            if let Some(expr) = init { find_outer_writes_expr(expr, inner_ids, out); }
+        }
+        Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Throw(e) => {
+            find_outer_writes_expr(e, inner_ids, out);
+        }
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue
+        | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
+        Stmt::If { condition, then_branch, else_branch } => {
+            find_outer_writes_expr(condition, inner_ids, out);
+            for s in then_branch { find_outer_writes_stmt(s, inner_ids, out); }
+            if let Some(eb) = else_branch {
+                for s in eb { find_outer_writes_stmt(s, inner_ids, out); }
+            }
+        }
+        Stmt::While { condition, body } => {
+            find_outer_writes_expr(condition, inner_ids, out);
+            for s in body { find_outer_writes_stmt(s, inner_ids, out); }
+        }
+        Stmt::DoWhile { condition, body } => {
+            for s in body { find_outer_writes_stmt(s, inner_ids, out); }
+            find_outer_writes_expr(condition, inner_ids, out);
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(init_stmt) = init.as_ref() {
+                find_outer_writes_stmt(init_stmt, inner_ids, out);
+            }
+            if let Some(c) = condition { find_outer_writes_expr(c, inner_ids, out); }
+            if let Some(u) = update { find_outer_writes_expr(u, inner_ids, out); }
+            for s in body { find_outer_writes_stmt(s, inner_ids, out); }
+        }
+        Stmt::Try { body, catch, finally } => {
+            for s in body { find_outer_writes_stmt(s, inner_ids, out); }
+            if let Some(cc) = catch {
+                for s in &cc.body { find_outer_writes_stmt(s, inner_ids, out); }
+            }
+            if let Some(fb) = finally {
+                for s in fb { find_outer_writes_stmt(s, inner_ids, out); }
+            }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            find_outer_writes_expr(discriminant, inner_ids, out);
+            for case in cases {
+                if let Some(val) = &case.test {
+                    find_outer_writes_expr(val, inner_ids, out);
+                }
+                for s in &case.body { find_outer_writes_stmt(s, inner_ids, out); }
+            }
+        }
+        Stmt::Labeled { body, .. } => find_outer_writes_stmt(body, inner_ids, out),
+    }
+}
+
+fn find_outer_writes_expr(
+    expr: &perry_hir::Expr,
+    inner_ids: &std::collections::HashSet<perry_types::LocalId>,
+    out: &mut Vec<perry_types::LocalId>,
+) {
+    use perry_hir::Expr;
+    match expr {
+        Expr::LocalSet(id, val) => {
+            if !inner_ids.contains(id) { out.push(*id); }
+            find_outer_writes_expr(val, inner_ids, out);
+        }
+        Expr::Update { id, .. } => {
+            if !inner_ids.contains(id) { out.push(*id); }
+        }
+        Expr::Closure { .. } => {
+            // Stop at nested closure boundary — it has its own scope and
+            // will be checked separately if it's the one being passed to
+            // a threading primitive.
+        }
+        Expr::Binary { left, right, .. } => {
+            find_outer_writes_expr(left, inner_ids, out);
+            find_outer_writes_expr(right, inner_ids, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            find_outer_writes_expr(callee, inner_ids, out);
+            for a in args { find_outer_writes_expr(a, inner_ids, out); }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(o) = object { find_outer_writes_expr(o, inner_ids, out); }
+            for a in args { find_outer_writes_expr(a, inner_ids, out); }
+        }
+        Expr::PropertyGet { object, .. } => {
+            find_outer_writes_expr(object, inner_ids, out);
+        }
+        Expr::IndexGet { object, index } => {
+            find_outer_writes_expr(object, inner_ids, out);
+            find_outer_writes_expr(index, inner_ids, out);
+        }
+        Expr::Array(elems) => for e in elems { find_outer_writes_expr(e, inner_ids, out); }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            find_outer_writes_expr(condition, inner_ids, out);
+            find_outer_writes_expr(then_expr, inner_ids, out);
+            find_outer_writes_expr(else_expr, inner_ids, out);
+        }
+        _ => {} // Literals, LocalGet, GlobalGet, etc. — no writes
+    }
+}
 
 /// Look up a native module method in the static dispatch table.
 /// Entries with `class_filter: Some("Pool")` only match when
