@@ -37,6 +37,14 @@ pub const GC_TYPE_PROMISE: u8 = 5;
 pub const GC_TYPE_BIGINT: u8 = 6;
 pub const GC_TYPE_ERROR: u8 = 7;
 pub const GC_TYPE_MAP: u8 = 8;
+/// Issue #179 Step 2 Phase 2: lazy JSON-parse top-level array.
+/// Arena-allocated, same fast-alloc path as regular arrays.
+/// `js_array_length` and `js_json_stringify` recognize this type and
+/// serve reads / stringify directly from the tape + blob bytes
+/// without materializing the tree. Any other accessor
+/// force-materializes (mutates the header's `materialized` field so
+/// subsequent accesses hit the tree).
+pub const GC_TYPE_LAZY_ARRAY: u8 = 9;
 
 // Flag constants
 pub const GC_FLAG_MARKED: u8 = 0x01;
@@ -1123,6 +1131,7 @@ fn drain_trace_worklist(worklist: &mut Vec<*mut GcHeader>, valid_ptrs: &ValidPoi
                 GC_TYPE_PROMISE => trace_promise(user_ptr, valid_ptrs, worklist),
                 GC_TYPE_ERROR => trace_error(user_ptr, valid_ptrs, worklist),
                 GC_TYPE_MAP => trace_map(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_LAZY_ARRAY => trace_lazy_array(user_ptr, valid_ptrs, worklist),
                 GC_TYPE_STRING | GC_TYPE_BIGINT => {}
                 _ => {}
             }
@@ -1405,6 +1414,46 @@ unsafe fn trace_object(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet, worklist
                 (*keys_header).gc_flags |= GC_FLAG_MARKED;
                 worklist.push(keys_header);
             }
+        }
+    }
+}
+
+/// Trace a lazy array (Issue #179 Phase 2). The tape bytes live
+/// inline in the same arena allocation, so they're reclaimed with
+/// the header. We only need to keep two satellite references alive:
+///
+/// 1. `blob_str` — the input `StringHeader`. Without this the blob
+///    data pointer the tape references would dangle after the first
+///    post-parse GC cycle. The intern table / other caches may or
+///    may not keep it alive; tracing is authoritative.
+/// 2. `materialized` — the `ArrayHeader`-backed tree once forced.
+///    Null until first non-`.length` access.
+unsafe fn trace_lazy_array(
+    user_ptr: *mut u8,
+    valid_ptrs: &ValidPointerSet,
+    worklist: &mut Vec<*mut GcHeader>,
+) {
+    let lazy = user_ptr as *const crate::json_tape::LazyArrayHeader;
+    // Defensive magic check — if somehow mis-tagged, bail.
+    if (*lazy).magic != crate::json_tape::LAZY_ARRAY_MAGIC {
+        return;
+    }
+
+    let blob_ptr = (*lazy).blob_str as usize;
+    if blob_ptr != 0 && valid_ptrs.contains(&blob_ptr) {
+        let hdr = header_from_user_ptr(blob_ptr as *const u8);
+        if (*hdr).gc_flags & GC_FLAG_MARKED == 0 {
+            (*hdr).gc_flags |= GC_FLAG_MARKED;
+            worklist.push(hdr);
+        }
+    }
+
+    let mat_ptr = (*lazy).materialized as usize;
+    if mat_ptr != 0 && valid_ptrs.contains(&mat_ptr) {
+        let hdr = header_from_user_ptr(mat_ptr as *const u8);
+        if (*hdr).gc_flags & GC_FLAG_MARKED == 0 {
+            (*hdr).gc_flags |= GC_FLAG_MARKED;
+            worklist.push(hdr);
         }
     }
 }

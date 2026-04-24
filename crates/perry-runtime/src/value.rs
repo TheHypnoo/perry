@@ -1542,6 +1542,14 @@ pub extern "C" fn js_value_length_f64(value: f64) -> f64 {
             crate::gc::GC_TYPE_ARRAY | crate::gc::GC_TYPE_STRING => {
                 return unsafe { *(handle as *const u32) } as f64;
             }
+            // Issue #179 Phase 2: lazy arrays also have `length` at
+            // offset 0 (cached_length). The inline-length codegen
+            // only recognizes GC_TYPE_ARRAY/STRING in its check so
+            // lazy values land here via the slow path — read the
+            // u32 from offset 0 just like regular arrays.
+            crate::gc::GC_TYPE_LAZY_ARRAY => {
+                return unsafe { *(handle as *const u32) } as f64;
+            }
             // Closures, BigInts, Promises, Errors, plain Objects, Maps:
             // no `.length`. Return 0 to match Perry's existing
             // fallback for missing fields (JS would produce

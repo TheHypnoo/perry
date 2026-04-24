@@ -57,6 +57,27 @@ fn clean_arr_ptr(arr: *const ArrayHeader) -> *const ArrayHeader {
         }
         arr
     };
+    // Issue #179 Phase 2: lazy arrays have a GcHeader with
+    // obj_type == GC_TYPE_LAZY_ARRAY. Their layout's first two u32s
+    // are (magic, cached_length) rather than (length, capacity) —
+    // the sanity check below would reject them. Force-materialize
+    // into a real ArrayHeader and substitute the materialized
+    // pointer for every downstream accessor. O(1) on subsequent
+    // calls (idempotent via the `materialized` cache).
+    unsafe {
+        if (cleaned as usize) >= crate::gc::GC_HEADER_SIZE + 0x1000 {
+            let gc_header = (cleaned as *const u8)
+                .sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+            if (*gc_header).obj_type == crate::gc::GC_TYPE_LAZY_ARRAY {
+                let lazy = cleaned as *mut crate::json_tape::LazyArrayHeader;
+                if (*lazy).magic == crate::json_tape::LAZY_ARRAY_MAGIC {
+                    let materialized =
+                        crate::json_tape::force_materialize_lazy(lazy);
+                    return materialized as *const ArrayHeader;
+                }
+            }
+        }
+    }
     // Length/capacity sanity: a real ArrayHeader has length <= capacity,
     // and length below 100M (800 MB of element payload — well above
     // legitimate large result sets, far below the 775M / 926M patterns
@@ -207,6 +228,29 @@ pub extern "C" fn js_array_alloc_literal(capacity: u32) -> *mut ArrayHeader {
     ptr
 }
 
+/// Issue #179 Phase 2: if `arr` points at a `LazyArrayHeader`
+/// (`GcHeader::obj_type == GC_TYPE_LAZY_ARRAY`), force the lazy
+/// value to materialize and return the real `ArrayHeader` pointer.
+/// Otherwise returns `arr` unchanged. Every array accessor that
+/// doesn't have a lazy-specific fast path (only `.length` does)
+/// should funnel through this so correctness is preserved under
+/// arbitrary JS code.
+#[inline]
+pub(crate) unsafe fn maybe_force_lazy(arr: *const ArrayHeader) -> *const ArrayHeader {
+    if arr.is_null() { return arr; }
+    if (arr as usize) < crate::gc::GC_HEADER_SIZE + 0x1000 { return arr; }
+    let gc_header = (arr as *const u8)
+        .sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+    if (*gc_header).obj_type != crate::gc::GC_TYPE_LAZY_ARRAY {
+        return arr;
+    }
+    let lazy = arr as *mut crate::json_tape::LazyArrayHeader;
+    if (*lazy).magic != crate::json_tape::LAZY_ARRAY_MAGIC {
+        return arr;
+    }
+    crate::json_tape::force_materialize_lazy(lazy) as *const ArrayHeader
+}
+
 /// Get the length of an array
 /// Also handles Sets and Maps via registry check (for-of iteration treats them as arrays)
 #[no_mangle]
@@ -217,6 +261,37 @@ pub extern "C" fn js_array_length(arr: *const ArrayHeader) -> u32 {
         }
         if crate::map::is_registered_map(arr as usize) {
             return crate::map::js_map_size(arr as *const crate::map::MapHeader);
+        }
+    }
+    // Issue #179 Phase 2: lazy array fast path. Check BEFORE
+    // `clean_arr_ptr` because that helper rejects pointers whose
+    // first two u32s look implausible as (length, capacity) — and a
+    // `LazyArrayHeader`'s first fields are (magic, cached_length),
+    // which trip the guard. Strip the NaN-box tag manually first.
+    unsafe {
+        let bits = arr as u64;
+        let top16 = bits >> 48;
+        let raw_ptr = if top16 >= 0x7FF8 {
+            if top16 == 0x7FFC { return 0; }
+            (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader
+        } else {
+            arr
+        };
+        if !raw_ptr.is_null() && (raw_ptr as usize) >= crate::gc::GC_HEADER_SIZE + 0x1000 {
+            let gc_header = (raw_ptr as *const u8)
+                .sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+            if (*gc_header).obj_type == crate::gc::GC_TYPE_LAZY_ARRAY {
+                let lazy = raw_ptr as *const crate::json_tape::LazyArrayHeader;
+                if (*lazy).magic == crate::json_tape::LAZY_ARRAY_MAGIC {
+                    // If we've already materialized (e.g. an indexed
+                    // access forced it), read the authoritative length
+                    // from the materialized tree.
+                    if !(*lazy).materialized.is_null() {
+                        return (*(*lazy).materialized).length;
+                    }
+                    return (*lazy).cached_length;
+                }
+            }
         }
     }
     let arr = clean_arr_ptr(arr);

@@ -603,3 +603,164 @@ impl PartialEq for TapeEntry {
         self.offset == other.offset && self.kind == other.kind && self.link == other.link
     }
 }
+
+// ─── Phase 2 + 4: Lazy array header ───────────────────────────────────────────
+//
+// Representation for a `JSON.parse(blob)` top-level array that
+// hasn't been materialized yet. Arena-allocated (same fast-alloc
+// path as regular arrays), distinguished by `GcHeader::obj_type ==
+// GC_TYPE_LAZY_ARRAY`. The accessor contract:
+//
+// - `js_array_length` on a lazy pointer returns `cached_length`
+//   without touching the tape — O(1), no materialization.
+// - Every other array accessor calls `force_materialize_lazy` to
+//   lower the lazy value to a real `ArrayHeader`-backed tree, then
+//   delegates to the generic path. Once materialized, the tape path
+//   is dead for this value.
+// - `js_json_stringify` checks `materialized.is_null()` — if true,
+//   memcpys the original blob bytes (Phase 4 fast path); if false,
+//   walks the materialized tree.
+//
+// The inline tape bytes (after the header, within the same arena
+// allocation) get reclaimed with the header on the next arena block
+// reset — same lifetime as any arena object.
+
+/// Magic sentinel — paired with `obj_type == GC_TYPE_LAZY_ARRAY` as
+/// a defensive double-check during accessor dispatch.
+pub const LAZY_ARRAY_MAGIC: u32 = 0x4C5A5841; // "LZXA"
+
+#[repr(C)]
+pub struct LazyArrayHeader {
+    /// **Offset 0 is load-bearing**: Perry's codegen inlines `.length`
+    /// reads as a raw `u32` load at offset 0 (it doesn't go through
+    /// `js_array_length`). Putting `cached_length` here means the
+    /// inline-length fast path on an unmaterialized lazy array
+    /// returns the right number without any runtime-function call.
+    /// This layout choice is the whole reason the Phase 2 .length
+    /// fast path is observable in the benchmark.
+    pub cached_length: u32,
+    /// Offset 4: magic sentinel. Also happens to sit where
+    /// `ArrayHeader::capacity` lives on a regular array, so
+    /// `clean_arr_ptr`'s `length > capacity` sanity check passes
+    /// (cached_length is always < magic). Accessors that want to
+    /// distinguish lazy from non-lazy arrays read
+    /// `GcHeader::obj_type` (see `clean_arr_ptr` + `js_array_length`).
+    pub magic: u32,
+    /// Tape index where the root ARR_START sits.
+    pub root_idx: u32,
+    /// Number of `TapeEntry`s that follow inline after this header.
+    pub tape_len: u32,
+    /// Owns-a-reference to the input `StringHeader`. GC must trace
+    /// this to keep the blob alive while this lazy value is
+    /// reachable.
+    pub blob_str: *const crate::StringHeader,
+    /// Null until first access forces materialization. Once non-null,
+    /// the value behaves exactly like a regular array — the lazy
+    /// tape is effectively dead for it.
+    pub materialized: *mut crate::array::ArrayHeader,
+    // Followed by `tape_len` `TapeEntry` elements inline.
+}
+
+impl LazyArrayHeader {
+    /// Slice view over the inline tape bytes. Caller must keep the
+    /// header alive for the slice's lifetime.
+    #[inline]
+    pub unsafe fn tape_slice<'a>(this: *const LazyArrayHeader) -> &'a [TapeEntry] {
+        let base = (this as *const u8).add(std::mem::size_of::<LazyArrayHeader>())
+            as *const TapeEntry;
+        std::slice::from_raw_parts(base, (*this).tape_len as usize)
+    }
+
+    /// Slice view over the blob bytes (data portion of the
+    /// `StringHeader`). Caller must keep `blob_str` alive.
+    #[inline]
+    pub unsafe fn blob_bytes<'a>(this: *const LazyArrayHeader) -> &'a [u8] {
+        let s = (*this).blob_str;
+        let len = (*s).byte_len as usize;
+        let data = (s as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+        std::slice::from_raw_parts(data, len)
+    }
+}
+
+/// Arena-allocate a lazy array header with `tape_entries` copied
+/// inline after the header. Returns the pointer that `JSON.parse`
+/// hands back as a POINTER_TAG'd JSValue.
+pub unsafe fn alloc_lazy_array(
+    tape_entries: &[TapeEntry],
+    root_idx: u32,
+    cached_length: u32,
+    blob_str: *const crate::StringHeader,
+) -> *mut LazyArrayHeader {
+    let tape_bytes = tape_entries.len() * std::mem::size_of::<TapeEntry>();
+    let total = std::mem::size_of::<LazyArrayHeader>() + tape_bytes;
+    let raw = crate::arena::arena_alloc_gc(total, 8, crate::gc::GC_TYPE_LAZY_ARRAY);
+    let hdr = raw as *mut LazyArrayHeader;
+    (*hdr).magic = LAZY_ARRAY_MAGIC;
+    (*hdr).cached_length = cached_length;
+    (*hdr).root_idx = root_idx;
+    (*hdr).tape_len = tape_entries.len() as u32;
+    (*hdr).blob_str = blob_str;
+    (*hdr).materialized = std::ptr::null_mut();
+    let tape_dst = (raw as *mut u8)
+        .add(std::mem::size_of::<LazyArrayHeader>()) as *mut TapeEntry;
+    std::ptr::copy_nonoverlapping(tape_entries.as_ptr(), tape_dst, tape_entries.len());
+    hdr
+}
+
+/// Count top-level elements in the tape's root array. Hops forward
+/// from `root_idx + 1` via the `link` field on container kinds to
+/// skip nested subtrees — O(top-level-count), not O(total-nodes).
+pub fn count_array_length(tape: &[TapeEntry], root_idx: usize) -> u32 {
+    if root_idx >= tape.len() {
+        return 0;
+    }
+    if tape[root_idx].kind != KIND_ARR_START {
+        return 0;
+    }
+    let end = tape[root_idx].link as usize;
+    let mut count: u32 = 0;
+    let mut i = root_idx + 1;
+    while i < end {
+        let k = tape[i].kind;
+        count += 1;
+        if k == KIND_OBJ_START || k == KIND_ARR_START {
+            i = tape[i].link as usize + 1;
+        } else {
+            i += 1;
+        }
+    }
+    count
+}
+
+/// Force-materialize a lazy array into an `ArrayHeader`-backed tree.
+/// Idempotent: subsequent calls return the cached `materialized`
+/// pointer. Callers of array accessors that don't have a lazy path
+/// invoke this first.
+pub unsafe fn force_materialize_lazy(hdr: *mut LazyArrayHeader) -> *mut crate::array::ArrayHeader {
+    if hdr.is_null() {
+        return std::ptr::null_mut();
+    }
+    if !(*hdr).materialized.is_null() {
+        return (*hdr).materialized;
+    }
+    let tape = LazyArrayHeader::tape_slice(hdr);
+    let bytes = LazyArrayHeader::blob_bytes(hdr);
+    let root = (*hdr).root_idx as usize;
+    let js = materialize_from_idx(tape, bytes, root);
+    let arr_ptr = (js.bits() & crate::value::POINTER_MASK) as *mut crate::array::ArrayHeader;
+    (*hdr).materialized = arr_ptr;
+    arr_ptr
+}
+
+/// Materialize starting from an arbitrary tape index — used by
+/// `force_materialize_lazy`. Builds a throwaway `Tape` owning the
+/// entries to reuse the existing recursive helpers.
+pub unsafe fn materialize_from_idx(
+    tape: &[TapeEntry],
+    bytes: &[u8],
+    start_idx: usize,
+) -> JSValue {
+    let owned = Tape { entries: tape.to_vec() };
+    let mut idx = start_idx;
+    materialize_value(&owned, bytes, &mut idx)
+}

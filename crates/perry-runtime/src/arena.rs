@@ -553,7 +553,7 @@ pub fn arena_walk_objects(mut callback: impl FnMut(*mut u8)) {
 
                     // Only process if this looks like a valid GC object
                     let obj_type = (*header).obj_type;
-                    if obj_type >= 1 && obj_type <= 7 {
+                    if obj_type >= 1 && obj_type <= 9 {
                         callback(header_ptr);
                     }
 
@@ -604,7 +604,7 @@ pub fn arena_walk_objects_with_block_index(mut callback: impl FnMut(*mut u8, usi
                         break;
                     }
                     let obj_type = (*header).obj_type;
-                    if obj_type >= 1 && obj_type <= 7 {
+                    if obj_type >= 1 && obj_type <= 9 {
                         callback(header_ptr, block_idx);
                     }
                     offset = aligned + total_size;
@@ -663,7 +663,7 @@ pub fn arena_walk_objects_filtered(
                         break;
                     }
                     let obj_type = (*header).obj_type;
-                    if obj_type >= 1 && obj_type <= 7 {
+                    if obj_type >= 1 && obj_type <= 9 {
                         callback(header_ptr, block_idx);
                     }
                     offset = aligned + total_size;

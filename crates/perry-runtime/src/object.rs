@@ -1941,6 +1941,28 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
             }
             return JSValue::undefined();
         }
+        // Issue #179 Phase 2: lazy array dispatch. `.length` returns
+        // cached_length without materializing; any other property
+        // access force-materializes (via the call into the generic
+        // array path, which goes through `clean_arr_ptr` and hits
+        // the lazy branch there).
+        if gc_type == crate::gc::GC_TYPE_LAZY_ARRAY {
+            if !key.is_null() {
+                let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                let key_len = (*key).byte_len as usize;
+                let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
+                if key_bytes == b"length" {
+                    let arr = obj as *const crate::array::ArrayHeader;
+                    return JSValue::number(crate::array::js_array_length(arr) as f64);
+                }
+            }
+            // Any other property access force-materializes, then
+            // re-enters via the materialized ArrayHeader pointer.
+            let materialized = crate::json_tape::force_materialize_lazy(
+                obj as *mut crate::json_tape::LazyArrayHeader,
+            );
+            return js_object_get_field_by_name(materialized as *const ObjectHeader, key);
+        }
         // Strings: handle `.length` so `(x as string).length` on an
         // unknown-typed local (TypeScript `as` casts are erased in
         // HIR) produces the real codepoint length.

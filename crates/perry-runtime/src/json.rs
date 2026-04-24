@@ -1057,7 +1057,27 @@ unsafe fn try_parse_via_tape(
     crate::gc::gc_suppress();
     let text_root = parse_root_push(JSValue::string_ptr(text_ptr as *mut StringHeader));
 
-    let result = crate::json_tape::materialize(&tape, bytes);
+    // Phase 2: if the top-level value is an array, return a lazy
+    // array header instead of materializing the tree. Every other
+    // shape (objects, scalars) still materializes eagerly — this
+    // commit's scope is top-level arrays only (the shape that
+    // dominates `bench_json_roundtrip` and most realistic JSON.parse
+    // workloads). Extending to top-level objects in a follow-up is a
+    // straightforward mirror of the same construction.
+    let result = if !tape.entries.is_empty()
+        && tape.entries[0].kind == crate::json_tape::KIND_ARR_START
+    {
+        let len = crate::json_tape::count_array_length(&tape.entries, 0);
+        let hdr = crate::json_tape::alloc_lazy_array(
+            &tape.entries,
+            0,
+            len,
+            text_ptr,
+        );
+        JSValue::object_ptr(hdr as *mut u8)
+    } else {
+        crate::json_tape::materialize(&tape, bytes)
+    };
     parse_root_push(result);
 
     parse_root_restore(text_root);
@@ -2145,7 +2165,81 @@ unsafe fn estimate_json_size(value: f64, type_hint: u32) -> usize {
 /// Takes a f64 (NaN-boxed JSValue) and a type_hint (0=unknown, 1=object, 2=array)
 /// Returns a string pointer
 #[no_mangle]
+/// Issue #179 Phase 4: lazy-stringify fast path. If `value` is a
+/// lazy-parse top-level array whose `materialized` is still null (no
+/// indexed access or mutation has forced tree build), memcpy the
+/// original blob bytes into a fresh string — no tree walk, no
+/// escape handling. Returns `None` if `value` is not a
+/// tape-backed-and-unmutated lazy array, in which case the caller
+/// falls through to the generic stringify path.
+///
+/// Correctness invariant: if the lazy value is unmutated, the bytes
+/// spanning `[root.offset .. root_end.offset+1]` in the original
+/// blob are exactly what `JSON.stringify` would produce for that
+/// value (modulo whitespace the user's original blob may contain —
+/// `JSON.stringify` never emits whitespace for the 2-arg form, so
+/// this is only correct when the blob came from `JSON.stringify` or
+/// is otherwise whitespace-free in the array span).
+unsafe fn try_stringify_lazy_array(value: f64) -> Option<*mut StringHeader> {
+    let bits = value.to_bits();
+    let top16 = bits >> 48;
+    let maybe_ptr = if top16 == 0x7FFD {
+        (bits & 0x0000_FFFF_FFFF_FFFF) as *const u8
+    } else if top16 < 0x7FF8 {
+        bits as *const u8
+    } else {
+        return None;
+    };
+    if maybe_ptr.is_null() || (maybe_ptr as usize) < crate::gc::GC_HEADER_SIZE + 0x1000 {
+        return None;
+    }
+    let gc_header = maybe_ptr.sub(crate::gc::GC_HEADER_SIZE)
+        as *const crate::gc::GcHeader;
+    if (*gc_header).obj_type != crate::gc::GC_TYPE_LAZY_ARRAY {
+        return None;
+    }
+    let lazy = maybe_ptr as *const crate::json_tape::LazyArrayHeader;
+    if (*lazy).magic != crate::json_tape::LAZY_ARRAY_MAGIC
+        || !(*lazy).materialized.is_null()
+    {
+        return None;
+    }
+    let tape = crate::json_tape::LazyArrayHeader::tape_slice(lazy);
+    let blob_bytes = crate::json_tape::LazyArrayHeader::blob_bytes(lazy);
+    if tape.is_empty() {
+        return None;
+    }
+    let root = (*lazy).root_idx as usize;
+    let start = tape[root].offset as usize;
+    let end_idx = tape[root].link as usize;
+    let end = tape[end_idx].offset as usize + 1; // +1 includes `]`
+    if end > blob_bytes.len() || start > end {
+        return None;
+    }
+    let slice = &blob_bytes[start..end];
+    let len = slice.len() as u32;
+    let total = std::mem::size_of::<StringHeader>() + slice.len();
+    let raw = crate::arena::arena_alloc_gc(total, 8, crate::gc::GC_TYPE_STRING);
+    let ptr = raw as *mut StringHeader;
+    (*ptr).utf16_len = len;
+    (*ptr).byte_len = len;
+    (*ptr).capacity = len;
+    (*ptr).refcount = 0;
+    if !slice.is_empty() {
+        std::ptr::copy_nonoverlapping(
+            slice.as_ptr(),
+            raw.add(std::mem::size_of::<StringHeader>()),
+            slice.len(),
+        );
+    }
+    Some(ptr)
+}
+
 pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader {
+    if let Some(ptr) = try_stringify_lazy_array(value) {
+        return ptr;
+    }
+
     // Non-reentrant fast path (issue #67): skip the shape_cache save/restore
     // round-trip (two RefCell.borrow_mut's + a Vec mem::take/assign) for the
     // common outermost call. A simple Cell-based depth counter identifies
@@ -3100,6 +3194,24 @@ pub unsafe extern "C" fn js_json_stringify_full(
     // If the value is a closure/function, return undefined per spec
     if is_closure_value(value_bits) {
         return TAG_UNDEFINED as i64;
+    }
+
+    // Issue #179 Phase 4: lazy-stringify fast path for unmutated
+    // lazy arrays — only when no replacer / no indent (matches the
+    // output `JSON.stringify(value)` produces; replacer/indent
+    // require a real tree walk). The bench's 2-arg form (and most
+    // real usage) hits this path.
+    let replacer_bits = replacer_f64.to_bits();
+    let spacer_bits = spacer_f64.to_bits();
+    let no_replacer = replacer_bits == TAG_NULL
+        || replacer_bits == TAG_UNDEFINED;
+    let no_spacer = spacer_bits == TAG_NULL
+        || spacer_bits == TAG_UNDEFINED
+        || spacer_bits == TAG_FALSE;
+    if no_replacer && no_spacer {
+        if let Some(ptr) = try_stringify_lazy_array(value) {
+            return JSValue::string_ptr(ptr).bits() as i64;
+        }
     }
 
     // Determine spacer/indent
