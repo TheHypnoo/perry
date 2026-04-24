@@ -955,21 +955,38 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
     let data_ptr = (text_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
 
-    // Issue #179 Step 2 Phase 1: opt-in tape-based parse path. Builds
-    // a flat tape of structural positions in one pass, then
-    // materializes the same JSValue tree the direct path would
-    // produce. Currently strictly more work (tape build + walk) than
-    // the direct path — its value lands when Phase 2+ intercept
-    // access and skip materialization. Enabled via `PERRY_JSON_TAPE=1`
-    // so production default is unchanged; the flag is the correctness
-    // gate used by tests to verify tape-path parity before the lazy
-    // rollout begins.
-    if std::env::var_os("PERRY_JSON_TAPE").is_some() {
+    // Issue #179 Step 2 Phase 1 → default-on: tape-based lazy parse
+    // is now the default for top-level arrays on blobs larger than
+    // the size threshold. v0.5.209 runtime adaptive handling (walk
+    // cursor + cumulative-walk threshold + sparse cache + force-
+    // materialize-on-mutate) means lazy no longer loses on any
+    // measured access pattern for non-trivial blobs. The blob-size
+    // threshold avoids tape-build overhead on tiny parses where
+    // direct is measurably faster (small-array bench: lazy 35 ms vs
+    // direct 32 ms → below threshold, lazy fires only on
+    // genuine-size payloads).
+    //
+    // Escape hatches: `PERRY_JSON_TAPE=0` forces the direct parser
+    // for every parse (correctness fallback if a workload hits an
+    // unaudited code path on the lazy side). `PERRY_JSON_TAPE=1`
+    // forces tape for every parse including small ones (useful for
+    // testing). Any other value is treated as "auto" (the default).
+    // `@perry-lazy` pragma still forces tape at the codegen level
+    // via `js_json_parse_lazy`, unconditional of size.
+    const LAZY_MIN_BLOB_BYTES: usize = 1024;
+    let tape_mode = tape_mode_from_env();
+    let use_tape = match tape_mode {
+        TapeMode::ForceOn => true,
+        TapeMode::ForceOff => false,
+        TapeMode::Auto => len >= LAZY_MIN_BLOB_BYTES,
+    };
+    if use_tape {
         if let Some(result) = try_parse_via_tape(text_ptr, bytes) {
             return result;
         }
-        // Malformed input — fall through to direct parser, which has
-        // the full error-reporting path.
+        // Malformed input or non-array top-level — fall through to
+        // direct parser, which has the full error-reporting path
+        // and handles non-array roots.
     }
 
     if len == 0 {
@@ -1039,6 +1056,25 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
     }
 
     result
+}
+
+/// v0.5.210: tape-mode selector. Cached at first JSON.parse so we
+/// pay the env-var lookup once per process, not once per parse.
+#[derive(Copy, Clone)]
+enum TapeMode {
+    Auto,
+    ForceOn,
+    ForceOff,
+}
+
+fn tape_mode_from_env() -> TapeMode {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<TapeMode> = OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var("PERRY_JSON_TAPE").as_deref() {
+        Ok("0") | Ok("off") | Ok("false") => TapeMode::ForceOff,
+        Ok("1") | Ok("on") | Ok("true") => TapeMode::ForceOn,
+        _ => TapeMode::Auto,
+    })
 }
 
 /// Issue #179 Step 2 Phase 1: tape-path entry. Builds a tape from
