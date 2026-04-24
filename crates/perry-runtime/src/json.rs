@@ -2356,6 +2356,7 @@ unsafe fn try_stringify_lazy_array(value: f64) -> Option<*mut StringHeader> {
     Some(ptr)
 }
 
+#[no_mangle]
 pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader {
     if let Some(ptr) = try_stringify_lazy_array(value) {
         return ptr;
