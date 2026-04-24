@@ -2010,6 +2010,54 @@ pub fn json_parse_root_scanner(mark: &mut dyn FnMut(f64)) {
     crate::json::scan_parse_roots(mark);
 }
 
+/// Root scanner for the shadow stack (gen-GC Phase A sub-phase 4).
+/// Walks every live slot in every pushed frame and invokes `mark`
+/// with the slot's NaN-boxed f64 value. The mark callback's
+/// `try_mark_value` pipeline already knows how to distinguish
+/// plain numbers / undefined / null / booleans (skipped) from
+/// POINTER_TAG / STRING_TAG / BIGINT_TAG / SHORT_STRING_TAG
+/// values that refer to heap objects.
+///
+/// Runs IN PARALLEL with the conservative stack scanner — this is
+/// the Phase A design: shadow stack adds precise roots that the
+/// conservative scanner would also have found via register/stack
+/// walk, just as a separate direct source. Correctness-safe
+/// overlap: marking an already-marked object is a no-op. Phase B+
+/// will start dropping conservative-scanner coverage for stack
+/// slots that the shadow stack authoritatively covers, reducing
+/// over-promotion in the generational GC.
+///
+/// Zero-slot frames (functions where no local is pointer-typed)
+/// contribute nothing — the inner loop's `slots_count == 0` exits
+/// immediately. Empty shadow stack (no function call currently
+/// active, or PERRY_SHADOW_STACK=0 at compile time so push/pop
+/// never emitted) also contributes nothing.
+pub fn shadow_stack_root_scanner(mark: &mut dyn FnMut(f64)) {
+    SHADOW_STACK.with(|s| {
+        let stack = s.borrow();
+        if stack.is_empty() { return; }
+        // Walk every frame by chasing prev_frame_top pointers from
+        // the current top. Each frame's layout:
+        //   [slot_0 .. slot_{n-1}]  with header at prev
+        //     = [prev_frame_top, slot_count] at (top - 2, top - 1)
+        let mut top = SHADOW_STACK_FRAME_TOP.with(|c| c.get());
+        while top != usize::MAX && top >= SHADOW_STACK_HEADER_SLOTS {
+            let header_base = top - SHADOW_STACK_HEADER_SLOTS;
+            if header_base + 1 >= stack.len() { break; }
+            let slot_count = stack[header_base + 1] as usize;
+            let slots_end = top + slot_count;
+            if slots_end > stack.len() { break; }
+            for i in 0..slot_count {
+                let bits = stack[top + i];
+                if bits != 0 {
+                    mark(f64::from_bits(bits));
+                }
+            }
+            top = stack[header_base] as usize;
+        }
+    });
+}
+
 /// Initialize GC root scanners. Called once at runtime startup.
 pub fn gc_init() {
     gc_register_root_scanner(promise_root_scanner);
@@ -2020,6 +2068,7 @@ pub fn gc_init() {
     gc_register_root_scanner(overflow_fields_root_scanner);
     gc_register_root_scanner(json_parse_root_scanner);
     gc_register_root_scanner(intern_table_root_scanner);
+    gc_register_root_scanner(shadow_stack_root_scanner);
 }
 
 /// Root scanner for the string intern table.
@@ -2340,6 +2389,81 @@ mod tests {
             js_shadow_frame_pop(handles.pop().unwrap());
         }
         assert_eq!(shadow_stack_depth(), 0);
+    }
+
+    #[test]
+    fn test_shadow_stack_root_scanner_empty() {
+        reset_shadow_stack();
+        let mut count = 0;
+        shadow_stack_root_scanner(&mut |_| count += 1);
+        assert_eq!(count, 0, "empty shadow stack yields no roots");
+    }
+
+    #[test]
+    fn test_shadow_stack_root_scanner_single_frame() {
+        reset_shadow_stack();
+        let h = js_shadow_frame_push(4);
+        // Mix of set / unset slots.
+        js_shadow_slot_set(0, 0x7FFD_0000_1234_5678);
+        // slot 1 left zero — must NOT be emitted
+        js_shadow_slot_set(2, 0x7FFF_0000_9ABC_DEF0);
+        js_shadow_slot_set(3, 0x7FFA_0000_DEAD_BEEF);
+        let mut emitted: Vec<u64> = Vec::new();
+        shadow_stack_root_scanner(&mut |v| emitted.push(v.to_bits()));
+        assert_eq!(emitted.len(), 3, "only non-zero slots should be emitted");
+        assert!(emitted.contains(&0x7FFD_0000_1234_5678));
+        assert!(emitted.contains(&0x7FFF_0000_9ABC_DEF0));
+        assert!(emitted.contains(&0x7FFA_0000_DEAD_BEEF));
+        js_shadow_frame_pop(h);
+    }
+
+    #[test]
+    fn test_shadow_stack_root_scanner_nested_frames() {
+        reset_shadow_stack();
+        let outer = js_shadow_frame_push(2);
+        js_shadow_slot_set(0, 0xAAAA);
+        js_shadow_slot_set(1, 0xBBBB);
+        let inner = js_shadow_frame_push(3);
+        js_shadow_slot_set(0, 0xCCCC);
+        js_shadow_slot_set(1, 0xDDDD);
+        js_shadow_slot_set(2, 0xEEEE);
+
+        let mut emitted: Vec<u64> = Vec::new();
+        shadow_stack_root_scanner(&mut |v| emitted.push(v.to_bits()));
+
+        // Scanner should hit BOTH frames — outer frame's slots
+        // must also be reported, not just the innermost. This is
+        // the load-bearing invariant for Phase B+ where the GC
+        // collects while deep in a call chain.
+        assert_eq!(emitted.len(), 5);
+        assert!(emitted.contains(&0xAAAA));
+        assert!(emitted.contains(&0xBBBB));
+        assert!(emitted.contains(&0xCCCC));
+        assert!(emitted.contains(&0xDDDD));
+        assert!(emitted.contains(&0xEEEE));
+
+        js_shadow_frame_pop(inner);
+        js_shadow_frame_pop(outer);
+    }
+
+    #[test]
+    fn test_shadow_stack_root_scanner_zero_slot_frames() {
+        reset_shadow_stack();
+        // Zero-slot frame (function with no pointer-typed locals)
+        // contributes nothing. Nested non-zero frame still works.
+        let a = js_shadow_frame_push(0);
+        let b = js_shadow_frame_push(2);
+        js_shadow_slot_set(0, 0x1234);
+        js_shadow_slot_set(1, 0x5678);
+        let c = js_shadow_frame_push(0);
+
+        let mut emitted: Vec<u64> = Vec::new();
+        shadow_stack_root_scanner(&mut |v| emitted.push(v.to_bits()));
+        assert_eq!(emitted.len(), 2);
+
+        js_shadow_frame_pop(c);
+        js_shadow_frame_pop(b);
+        js_shadow_frame_pop(a);
     }
 
     #[test]
