@@ -296,10 +296,21 @@ pub unsafe fn materialize(tape: &Tape, bytes: &[u8]) -> JSValue {
 
 #[inline]
 unsafe fn materialize_value(tape: &Tape, bytes: &[u8], idx: &mut usize) -> JSValue {
-    if *idx >= tape.entries.len() {
+    materialize_value_slice(&tape.entries, bytes, idx)
+}
+
+/// Slice-backed recursive materializer. Used both by the top-level
+/// `materialize(&Tape, …)` entry (via the thin wrapper above) and by
+/// `materialize_from_idx` in the lazy-array force-materialize path.
+/// Operating on a borrowed slice lets the lazy path materialize
+/// without copying the tape — the inline tape bytes in the
+/// `LazyArrayHeader` are read directly.
+#[inline]
+unsafe fn materialize_value_slice(tape: &[TapeEntry], bytes: &[u8], idx: &mut usize) -> JSValue {
+    if *idx >= tape.len() {
         return JSValue::null();
     }
-    let entry = tape.entries[*idx];
+    let entry = tape[*idx];
     match entry.kind {
         KIND_OBJ_START => {
             let end_idx = entry.link as usize;
@@ -327,16 +338,16 @@ unsafe fn materialize_value(tape: &Tape, bytes: &[u8], idx: &mut usize) -> JSVal
 }
 
 unsafe fn materialize_object(
-    tape: &Tape, bytes: &[u8], idx: &mut usize, end_idx: usize,
+    tape: &[TapeEntry], bytes: &[u8], idx: &mut usize, end_idx: usize,
 ) -> JSValue {
     let obj = crate::object::js_object_alloc(0, 0);
     while *idx < end_idx {
-        let key_entry = tape.entries[*idx];
+        let key_entry = tape[*idx];
         debug_assert_eq!(key_entry.kind, KIND_KEY);
         *idx += 1;
         // Extract and (possibly decode) the key bytes.
         let key_ptr = decode_key_to_interned_string(bytes, key_entry.offset as usize);
-        let value = materialize_value(tape, bytes, idx);
+        let value = materialize_value_slice(tape, bytes, idx);
         if !key_ptr.is_null() {
             crate::object::js_object_set_field_by_name(
                 obj, key_ptr, f64::from_bits(value.bits()),
@@ -349,11 +360,11 @@ unsafe fn materialize_object(
 }
 
 unsafe fn materialize_array(
-    tape: &Tape, bytes: &[u8], idx: &mut usize, end_idx: usize,
+    tape: &[TapeEntry], bytes: &[u8], idx: &mut usize, end_idx: usize,
 ) -> JSValue {
     let mut arr = crate::array::js_array_alloc(16);
     while *idx < end_idx {
-        let value = materialize_value(tape, bytes, idx);
+        let value = materialize_value_slice(tape, bytes, idx);
         arr = crate::array::js_array_push(arr, value);
     }
     *idx = end_idx + 1;
@@ -361,23 +372,37 @@ unsafe fn materialize_array(
 }
 
 /// Decode the string literal starting at `offset` (the opening `"`)
-/// into an interned `*mut StringHeader` — same contract as
-/// `js_string_intern_from_bytes` provides elsewhere. Returns null on
-/// malformed input (shouldn't happen for a tape built from valid
-/// JSON, but defensive).
+/// into an interned `*mut StringHeader`. Uses the existing
+/// `PARSE_KEY_CACHE` (longlived-arena interning) so that repeated
+/// records with the same field names share one allocation per key —
+/// without this, a 10k-record × 5-key parse materializes 50k fresh
+/// longlived strings and the tape path ends up ~3× slower than the
+/// direct parser which always went through the cache (`json.rs:448`
+/// keyed path in `DirectParser::parse_object`).
 unsafe fn decode_key_to_interned_string(
     bytes: &[u8], offset: usize,
 ) -> *mut crate::StringHeader {
     let bytes_at_key = &bytes[offset..];
-    match parse_string_bytes_static(bytes_at_key) {
-        Some(ParsedStr::Borrowed(slice)) => {
-            crate::string::js_string_from_bytes_longlived(slice.as_ptr(), slice.len() as u32)
-        }
-        Some(ParsedStr::Owned(vec)) => {
-            crate::string::js_string_from_bytes_longlived(vec.as_ptr(), vec.len() as u32)
-        }
-        None => std::ptr::null_mut(),
+    let key_bytes: Vec<u8> = match parse_string_bytes_static(bytes_at_key) {
+        Some(ParsedStr::Borrowed(slice)) => slice.to_vec(),
+        Some(ParsedStr::Owned(v)) => v,
+        None => return std::ptr::null_mut(),
+    };
+    // Two-phase lookup: check cache with immutable borrow first, then
+    // allocate OUTSIDE the borrow (allocation may trigger GC →
+    // `scan_parse_roots` → borrow() on same RefCell).
+    let cached = crate::json::PARSE_KEY_CACHE.with(|c| c.borrow().get(&key_bytes).copied());
+    if let Some(p) = cached {
+        return p as *mut crate::StringHeader;
     }
+    let p = crate::string::js_string_from_bytes_longlived(
+        key_bytes.as_ptr(),
+        key_bytes.len() as u32,
+    );
+    crate::json::PARSE_KEY_CACHE.with(|c| {
+        c.borrow_mut().insert(key_bytes, p);
+    });
+    p
 }
 
 unsafe fn materialize_string_value(bytes: &[u8], offset: usize) -> JSValue {
@@ -753,14 +778,17 @@ pub unsafe fn force_materialize_lazy(hdr: *mut LazyArrayHeader) -> *mut crate::a
 }
 
 /// Materialize starting from an arbitrary tape index — used by
-/// `force_materialize_lazy`. Builds a throwaway `Tape` owning the
-/// entries to reuse the existing recursive helpers.
+/// `force_materialize_lazy`. Takes a borrowed slice and walks it in
+/// place (no copy — the earlier implementation allocated a fresh
+/// `Vec<TapeEntry>` on every force-materialize, which on a 10k-record
+/// blob was ~600 KB of throwaway heap per indexed-read iteration
+/// and showed up as a 2-3× slowdown on `bench_json_readonly_indexed`
+/// vs the direct parser).
 pub unsafe fn materialize_from_idx(
     tape: &[TapeEntry],
     bytes: &[u8],
     start_idx: usize,
 ) -> JSValue {
-    let owned = Tape { entries: tape.to_vec() };
     let mut idx = start_idx;
-    materialize_value(&owned, bytes, &mut idx)
+    materialize_value_slice(tape, bytes, &mut idx)
 }

@@ -1696,12 +1696,58 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         let blk = ctx.block();
                         let arr_bits = blk.bitcast_double_to_i64(&arr_box);
                         let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
-                        let idx_i64 = blk.zext(I32, &idx_i32, I64);
-                        let byte_offset = blk.shl(I64, &idx_i64, "3");
-                        let with_header = blk.add(I64, &byte_offset, "8");
-                        let element_addr = blk.add(I64, &arr_handle, &with_header);
-                        let element_ptr = blk.inttoptr(I64, &element_addr);
-                        return Ok(blk.load(DOUBLE, &element_ptr));
+
+                        // Issue #179 Phase 3: lazy-array guard on the
+                        // bounded-index fast path. Same story as the
+                        // generic path above — a LazyArrayHeader has
+                        // unrelated bytes at `arr + 8 + idx*8`, so we
+                        // need to route through the slow path when
+                        // the receiver is lazy. Branchy here but the
+                        // branch is almost always trivially
+                        // well-predicted (same array for the loop's
+                        // duration; LLVM can often hoist the check).
+                        let gc_type_addr = blk.sub(I64, &arr_handle, "8");
+                        let gc_type_ptr = blk.inttoptr(I64, &gc_type_addr);
+                        let gc_type = blk.load(I8, &gc_type_ptr);
+                        let is_lazy = blk.icmp_eq(I8, &gc_type, "9");
+
+                        let lazy_idx = ctx.new_block("bidx.lazy");
+                        let fast_idx = ctx.new_block("bidx.fast");
+                        let merge_idx = ctx.new_block("bidx.merge");
+                        let lazy_label = ctx.block_label(lazy_idx);
+                        let fast_label = ctx.block_label(fast_idx);
+                        let merge_label = ctx.block_label(merge_idx);
+                        ctx.block().cond_br(&is_lazy, &lazy_label, &fast_label);
+
+                        ctx.current_block = lazy_idx;
+                        let lazy_blk = ctx.block();
+                        let lazy_val = lazy_blk.call(
+                            DOUBLE,
+                            "js_array_get_f64",
+                            &[(I64, &arr_handle), (I32, &idx_i32)],
+                        );
+                        let lazy_end_label = lazy_blk.label.clone();
+                        lazy_blk.br(&merge_label);
+
+                        ctx.current_block = fast_idx;
+                        let fast_blk = ctx.block();
+                        let idx_i64 = fast_blk.zext(I32, &idx_i32, I64);
+                        let byte_offset = fast_blk.shl(I64, &idx_i64, "3");
+                        let with_header = fast_blk.add(I64, &byte_offset, "8");
+                        let element_addr = fast_blk.add(I64, &arr_handle, &with_header);
+                        let element_ptr = fast_blk.inttoptr(I64, &element_addr);
+                        let fast_val = fast_blk.load(DOUBLE, &element_ptr);
+                        let fast_end_label = fast_blk.label.clone();
+                        fast_blk.br(&merge_label);
+
+                        ctx.current_block = merge_idx;
+                        return Ok(ctx.block().phi(
+                            DOUBLE,
+                            &[
+                                (&fast_val, &fast_end_label),
+                                (&lazy_val, &lazy_end_label),
+                            ],
+                        ));
                     }
                 }
 
@@ -1711,17 +1757,61 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let arr_bits = blk.bitcast_double_to_i64(&arr_box);
                 let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
                 let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
-                // Bounds check: load length (null-guarded).
-                let len_i32 = blk.safe_load_i32_from_ptr(&arr_handle);
-                let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
+
+                // Issue #179 Phase 3: lazy-array guard on the inline
+                // IndexGet path. A `LazyArrayHeader` lives at the
+                // same pointer but has (magic, root_idx, tape_len,
+                // blob_str, materialized) after offset 0's
+                // `cached_length`, NOT element f64s. Reading `arr +
+                // 8 + idx*8` on a lazy value returns garbage. Check
+                // `GcHeader::obj_type` at `arr - 8` before the
+                // element load; if it's `GC_TYPE_LAZY_ARRAY` (9),
+                // route through `js_array_get_f64` which funnels
+                // every access through `clean_arr_ptr` —
+                // `clean_arr_ptr` force-materializes lazy values
+                // idempotently and returns the `ArrayHeader`-backed
+                // tree. Adds 2 instructions (sub + load i8) + one
+                // comparison + one branch on the fast path; the cost
+                // is in the same order as the existing null-guard
+                // and tag checks.
+                let gc_type_addr = blk.sub(I64, &arr_handle, "8");
+                let gc_type_ptr = blk.inttoptr(I64, &gc_type_addr);
+                let gc_type = blk.load(I8, &gc_type_ptr);
+                let is_lazy = blk.icmp_eq(I8, &gc_type, "9"); // GC_TYPE_LAZY_ARRAY
+
+                let lazy_idx = ctx.new_block("arr.lazy");
+                let fast_idx = ctx.new_block("arr.fast");
+                let merge_idx = ctx.new_block("arr.merge");
+                let lazy_label = ctx.block_label(lazy_idx);
+                let fast_label = ctx.block_label(fast_idx);
+                let merge_label = ctx.block_label(merge_idx);
+                ctx.block().cond_br(&is_lazy, &lazy_label, &fast_label);
+
+                // Lazy branch: js_array_get_f64 → clean_arr_ptr →
+                // force_materialize_lazy → element load on the
+                // materialized tree. Subsequent calls hit the
+                // cached `materialized` pointer — O(1) after the
+                // first access.
+                ctx.current_block = lazy_idx;
+                let lazy_blk = ctx.block();
+                let lazy_val = lazy_blk.call(
+                    DOUBLE,
+                    "js_array_get_f64",
+                    &[(I64, &arr_handle), (I32, &idx_i32)],
+                );
+                let lazy_end_label = lazy_blk.label.clone();
+                lazy_blk.br(&merge_label);
+
+                // Fast branch: unchanged inline load with bounds check.
+                ctx.current_block = fast_idx;
+                let fast_blk = ctx.block();
+                let len_i32 = fast_blk.safe_load_i32_from_ptr(&arr_handle);
+                let in_bounds = fast_blk.icmp_ult(I32, &idx_i32, &len_i32);
                 let ok_idx = ctx.new_block("arr.ok");
                 let oob_idx = ctx.new_block("arr.oob");
-                let merge_idx = ctx.new_block("arr.merge");
                 let ok_label = ctx.block_label(ok_idx);
                 let oob_label = ctx.block_label(oob_idx);
-                let merge_label = ctx.block_label(merge_idx);
                 ctx.block().cond_br(&in_bounds, &ok_label, &oob_label);
-                // In-bounds: inline element load.
                 ctx.current_block = ok_idx;
                 let blk = ctx.block();
                 let idx_i64 = blk.zext(I32, &idx_i32, I64);
@@ -1732,17 +1822,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let val = blk.load(DOUBLE, &element_ptr);
                 let ok_end_label = ctx.block().label.clone();
                 ctx.block().br(&merge_label);
-                // OOB: return TAG_UNDEFINED.
                 ctx.current_block = oob_idx;
                 let undef_bits = crate::nanbox::i64_literal(crate::nanbox::TAG_UNDEFINED);
                 let undef_val = ctx.block().bitcast_i64_to_double(&undef_bits);
                 let oob_end_label = ctx.block().label.clone();
                 ctx.block().br(&merge_label);
-                // Merge with phi.
                 ctx.current_block = merge_idx;
                 return Ok(ctx.block().phi(
                     DOUBLE,
-                    &[(&val, &ok_end_label), (&undef_val, &oob_end_label)],
+                    &[
+                        (&val, &ok_end_label),
+                        (&undef_val, &oob_end_label),
+                        (&lazy_val, &lazy_end_label),
+                    ],
                 ));
             }
             // Generic dynamic object access: stringify the index (no-op
@@ -1840,14 +1932,55 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // dedicated HIR path (TypedArrayGet / TypedArraySet); keep this
             // inline read for the generic Object fallback to avoid regressing
             // test_edge_enums_const / test_edge_iteration.
+            //
+            // Issue #179 Phase 3: if the receiver turns out to be a
+            // lazy JSON-parse array (obj_type == GC_TYPE_LAZY_ARRAY),
+            // reading `obj + 8 + idx*8` returns LazyArrayHeader
+            // fields (root_idx, tape_len, ...) as if they were element
+            // f64s. Same runtime obj_type guard as the typed-array
+            // IndexGet path: route through `js_array_get_f64` →
+            // `clean_arr_ptr` → `force_materialize_lazy` on lazy.
             ctx.current_block = num_idx;
             let idx_i32 = ctx.block().fptosi(DOUBLE, &idx_box, I32);
+            let lazy_gc_type_addr = ctx.block().sub(I64, &obj_handle, "8");
+            let lazy_gc_type_ptr = ctx.block().inttoptr(I64, &lazy_gc_type_addr);
+            let lazy_gc_type = ctx.block().load(I8, &lazy_gc_type_ptr);
+            let is_lazy = ctx.block().icmp_eq(I8, &lazy_gc_type, "9"); // GC_TYPE_LAZY_ARRAY
+            let num_lazy_idx = ctx.new_block("iget.num.lazy");
+            let num_fast_idx = ctx.new_block("iget.num.fast");
+            let num_inner_merge_idx = ctx.new_block("iget.num.merge");
+            let num_lazy_lbl = ctx.block_label(num_lazy_idx);
+            let num_fast_lbl = ctx.block_label(num_fast_idx);
+            let num_inner_merge_lbl = ctx.block_label(num_inner_merge_idx);
+            ctx.block().cond_br(&is_lazy, &num_lazy_lbl, &num_fast_lbl);
+
+            ctx.current_block = num_lazy_idx;
+            let v_num_lazy = ctx.block().call(
+                DOUBLE,
+                "js_array_get_f64",
+                &[(I64, &obj_handle), (I32, &idx_i32)],
+            );
+            let num_lazy_end_lbl = ctx.block().label.clone();
+            ctx.block().br(&num_inner_merge_lbl);
+
+            ctx.current_block = num_fast_idx;
             let idx_i64 = ctx.block().zext(I32, &idx_i32, I64);
             let byte_off = ctx.block().shl(I64, &idx_i64, "3");
             let with_hdr = ctx.block().add(I64, &byte_off, "8");
             let elem_addr = ctx.block().add(I64, &obj_handle, &with_hdr);
             let elem_ptr = ctx.block().inttoptr(I64, &elem_addr);
-            let v_num = ctx.block().load(DOUBLE, &elem_ptr);
+            let v_num_fast = ctx.block().load(DOUBLE, &elem_ptr);
+            let num_fast_end_lbl = ctx.block().label.clone();
+            ctx.block().br(&num_inner_merge_lbl);
+
+            ctx.current_block = num_inner_merge_idx;
+            let v_num = ctx.block().phi(
+                DOUBLE,
+                &[
+                    (&v_num_lazy, &num_lazy_end_lbl),
+                    (&v_num_fast, &num_fast_end_lbl),
+                ],
+            );
             let num_end_lbl = ctx.block().label.clone();
             ctx.block().br(&merge_lbl);
             // Merge.

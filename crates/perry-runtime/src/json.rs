@@ -42,7 +42,10 @@ thread_local! {
     /// Maps key bytes → already-allocated StringHeader pointer.
     /// Avoids re-allocating "id", "name", etc. for every record in a
     /// homogeneous JSON array. Cleared at the end of each top-level parse.
-    static PARSE_KEY_CACHE: RefCell<std::collections::HashMap<Vec<u8>, *const StringHeader>> =
+    /// `pub(crate)` so `json_tape`'s materializer can share the cache —
+    /// without this, each tape-path force-materialize re-allocates every
+    /// key and burns 3× the time + RSS vs the direct parser.
+    pub(crate) static PARSE_KEY_CACHE: RefCell<std::collections::HashMap<Vec<u8>, *const StringHeader>> =
         RefCell::new(std::collections::HashMap::new());
 
     /// Reentrancy depth counter for JSON.stringify (issue #67). 0 means
@@ -2165,6 +2168,41 @@ unsafe fn estimate_json_size(value: f64, type_hint: u32) -> usize {
 /// Takes a f64 (NaN-boxed JSValue) and a type_hint (0=unknown, 1=object, 2=array)
 /// Returns a string pointer
 #[no_mangle]
+/// Issue #179 Step 2 Phase 3: if `value` is a lazy array that's
+/// already been materialized (indexed access forced
+/// `force_materialize_lazy`), return a JSValue pointing at the
+/// materialized `ArrayHeader` tree instead of the `LazyArrayHeader`.
+/// The generic tree-walk stringifier would otherwise read lazy-
+/// header fields (magic, root_idx, blob_str, ...) as if they were
+/// element f64s and crash on the first bogus pointer deref. No-op
+/// for non-lazy values and for lazy values whose `materialized` is
+/// still null (the lazy-stringify fast path handles those).
+#[inline]
+unsafe fn redirect_lazy_to_materialized(value: f64) -> f64 {
+    let bits = value.to_bits();
+    let top16 = bits >> 48;
+    let ptr = if top16 == 0x7FFD {
+        (bits & 0x0000_FFFF_FFFF_FFFF) as *const u8
+    } else {
+        return value;
+    };
+    if ptr.is_null() || (ptr as usize) < crate::gc::GC_HEADER_SIZE + 0x1000 {
+        return value;
+    }
+    let gc_header = ptr.sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+    if (*gc_header).obj_type != crate::gc::GC_TYPE_LAZY_ARRAY {
+        return value;
+    }
+    let lazy = ptr as *const crate::json_tape::LazyArrayHeader;
+    if (*lazy).magic != crate::json_tape::LAZY_ARRAY_MAGIC {
+        return value;
+    }
+    if (*lazy).materialized.is_null() {
+        return value;
+    }
+    f64::from_bits(JSValue::object_ptr((*lazy).materialized as *mut u8).bits())
+}
+
 /// Issue #179 Phase 4: lazy-stringify fast path. If `value` is a
 /// lazy-parse top-level array whose `materialized` is still null (no
 /// indexed access or mutation has forced tree build), memcpy the
@@ -2239,6 +2277,12 @@ pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut S
     if let Some(ptr) = try_stringify_lazy_array(value) {
         return ptr;
     }
+    // If the value is a lazy array that's already been materialized
+    // (indexed access forced it into a real tree), stringify the
+    // tree directly — the generic walker would otherwise read the
+    // LazyArrayHeader's fields as if they were array elements and
+    // crash on the first deref of a bogus pointer.
+    let value = redirect_lazy_to_materialized(value);
 
     // Non-reentrant fast path (issue #67): skip the shape_cache save/restore
     // round-trip (two RefCell.borrow_mut's + a Vec mem::take/assign) for the
@@ -3213,6 +3257,12 @@ pub unsafe extern "C" fn js_json_stringify_full(
             return JSValue::string_ptr(ptr).bits() as i64;
         }
     }
+    // Lazy-but-materialized: the fast path's `materialized.is_null()`
+    // check above returns None; fall back to the tree walk, but
+    // point it at the materialized tree (not the lazy header
+    // whose fields aren't element f64s).
+    let value = redirect_lazy_to_materialized(value);
+    let value_bits = value.to_bits();
 
     // Determine spacer/indent
     let indent_str: String;
