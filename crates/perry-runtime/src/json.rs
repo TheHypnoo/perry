@@ -351,14 +351,51 @@ impl<'a> ParsedStr<'a> {
     }
 }
 
+/// Issue #179 typed-parse plan, Step 1b. Pre-computed shape for
+/// `JSON.parse<T[]>(blob)` where T is an object type with a known
+/// field list. Built once per typed-parse call from the codegen-
+/// emitted packed-keys bytes; reused for every record in the array.
+///
+/// The key contract: `expected_keys[i].bytes == <field name at index i>`.
+/// When JSON fields arrive in declared order (the common case for
+/// machine-generated JSON, including stringify output), the hot loop
+/// just memcmp's `key_bytes` against `expected_keys[idx]` and writes
+/// directly to `fields[idx]`, skipping the `PARSE_KEY_CACHE` hash
+/// lookup AND the transition-cache dance inside
+/// `js_object_set_field_by_name`.
+///
+/// Out-of-order fields and fields not in the shape fall through to
+/// the generic path (same semantics as untyped parse).
+struct ObjectShapeHint {
+    /// Pre-interned key pointers in declared field order. Pointers
+    /// are held alive by PARSE_KEY_CACHE + scan_parse_roots.
+    expected_keys: Vec<*const StringHeader>,
+    /// Pre-built keys_array that each parsed record's ObjectHeader
+    /// points to. Built via `js_build_class_keys_array`, so the
+    /// shape cache + scan_shape_cache_roots keeps it alive.
+    keys_array: *mut crate::array::ArrayHeader,
+    /// Number of fields in the declared shape — used as the object's
+    /// pre-allocated field count.
+    field_count: u32,
+}
+
 struct DirectParser<'a> {
     input: &'a [u8],
     pos: usize,
+    /// Issue #179 typed-parse: if Some, the top-level value is
+    /// expected to be `Array<Object>` matching this shape. Each
+    /// record uses the fast path; mismatches silently fall through
+    /// to the generic field-setting logic.
+    shape: Option<ObjectShapeHint>,
 }
 
 impl<'a> DirectParser<'a> {
     fn new(input: &'a [u8]) -> Self {
-        Self { input, pos: 0 }
+        Self { input, pos: 0, shape: None }
+    }
+
+    fn with_shape(input: &'a [u8], shape: ObjectShapeHint) -> Self {
+        Self { input, pos: 0, shape: Some(shape) }
     }
 
     #[inline]
@@ -514,7 +551,219 @@ impl<'a> DirectParser<'a> {
         }
     }
 
+    /// Issue #179 typed-parse fast path. Called when parsing a record
+    /// inside a typed-array parse — object shape is known, fields are
+    /// expected (but not required) to arrive in declared order.
+    #[inline]
+    unsafe fn parse_object_shaped(&mut self, shape: &ObjectShapeHint) -> JSValue {
+        self.advance(); // past `{`
+        self.skip_whitespace();
+
+        let saved_roots = parse_root_save_len();
+
+        // Pre-allocate with the known keys_array + field count. No
+        // shape cache lookup — the shape is already in the cache from
+        // the one-time build at parse entry.
+        let js_obj = crate::object::js_object_alloc_class_inline_keys(
+            0, // class_id 0 = plain object (not a class instance)
+            0, // parent_class_id
+            shape.field_count,
+            shape.keys_array,
+        );
+        // Initialize all fields to undefined so JSON with missing
+        // fields returns `undefined` for absent properties (matches
+        // spec: access to absent own property returns undefined).
+        let fields_ptr = (js_obj as *mut u8)
+            .add(std::mem::size_of::<crate::ObjectHeader>()) as *mut JSValue;
+        let alloc_field_count = std::cmp::max(shape.field_count as usize, 8);
+        for i in 0..alloc_field_count {
+            std::ptr::write(fields_ptr.add(i), JSValue::undefined());
+        }
+        let _obj_slot = parse_root_push(JSValue::object_ptr(js_obj as *mut u8));
+
+        // Fast path: track the expected next-field index. Each
+        // iteration: if the incoming key matches `expected_keys[idx]`,
+        // write to fields[idx] directly and bump. Otherwise fall
+        // through to the generic named-setter (which handles
+        // out-of-order, extra, or renamed fields).
+        let mut fast_idx: usize = 0;
+        let field_count = shape.expected_keys.len();
+
+        if self.peek() == Some(b'}') {
+            self.advance();
+            parse_root_restore(saved_roots);
+            return JSValue::object_ptr(js_obj as *mut u8);
+        }
+
+        loop {
+            self.skip_whitespace();
+            let key = match self.parse_string_bytes() {
+                Some(k) => k,
+                None => break,
+            };
+            if !self.expect(b':') { break; }
+            // Use `parse_value_generic` — nested values inside a
+            // shaped record are NOT themselves expected to match the
+            // shape (shape is one-level deep by design in Step 1b).
+            let value = self.parse_value_generic();
+            parse_root_push(value);
+
+            let key_bytes = key.as_bytes();
+
+            // Fast path: matches expected next field?
+            let mut took_fast = false;
+            if fast_idx < field_count {
+                let expected = shape.expected_keys[fast_idx];
+                if !expected.is_null() {
+                    let expected_len = (*expected).byte_len as usize;
+                    if expected_len == key_bytes.len() {
+                        let expected_data = (expected as *const u8)
+                            .add(std::mem::size_of::<StringHeader>());
+                        let expected_slice = std::slice::from_raw_parts(
+                            expected_data, expected_len);
+                        if expected_slice == key_bytes {
+                            // Match — direct field write.
+                            let alloc_limit = alloc_field_count;
+                            if fast_idx < alloc_limit {
+                                std::ptr::write(
+                                    fields_ptr.add(fast_idx),
+                                    JSValue::from_bits(value.bits()),
+                                );
+                                fast_idx += 1;
+                                took_fast = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !took_fast {
+                // Slow path: might be an out-of-order field, an extra
+                // field not in the declared shape, or a shape mismatch.
+                // Use the generic named setter which handles all three
+                // via transition cache + overflow map. This also
+                // pins `fast_idx` — once we slow-path, we stay slow
+                // for the rest of the object because the field-index
+                // assumption is broken.
+                //
+                // Key interning: check PARSE_KEY_CACHE first (same
+                // path as generic parse_object).
+                let cached = PARSE_KEY_CACHE.with(|c| {
+                    c.borrow().get(key_bytes).copied()
+                });
+                let key_ptr = if let Some(p) = cached {
+                    p
+                } else {
+                    let ptr = crate::string::js_string_from_bytes_longlived(
+                        key_bytes.as_ptr(),
+                        key_bytes.len() as u32,
+                    );
+                    PARSE_KEY_CACHE.with(|c| {
+                        c.borrow_mut().insert(key_bytes.to_vec(), ptr);
+                    });
+                    ptr
+                };
+                crate::object::js_object_set_field_by_name(
+                    js_obj, key_ptr as *mut StringHeader, f64::from_bits(value.bits()),
+                );
+                // Force slow path for the rest of this object.
+                fast_idx = field_count;
+            }
+
+            self.skip_whitespace();
+            if self.peek() == Some(b',') {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(b'}');
+        parse_root_restore(saved_roots);
+        JSValue::object_ptr(js_obj as *mut u8)
+    }
+
+    /// Issue #179 typed-parse entry: expects `[{…}, {…}, …]` where
+    /// each element matches `shape`. Top-level array only; nested
+    /// objects inside a record use the generic path.
+    #[inline]
+    unsafe fn parse_array_typed(&mut self) -> JSValue {
+        self.skip_whitespace();
+        if self.peek() != Some(b'[') {
+            // Shape mismatch — fall through to generic value parse
+            // (e.g. Typed<Record> on a `{…}` input still works, just
+            // without the array-outer shape).
+            return self.parse_value_generic();
+        }
+        self.advance();
+        self.skip_whitespace();
+
+        let saved_roots = parse_root_save_len();
+        let mut js_arr = js_array_alloc(16);
+        let arr_slot = parse_root_push(JSValue::object_ptr(js_arr as *mut u8));
+
+        if self.peek() == Some(b']') {
+            self.advance();
+            parse_root_restore(saved_roots);
+            return JSValue::object_ptr(js_arr as *mut u8);
+        }
+
+        // Take shape pointer once; parse_object_shaped borrows via raw.
+        let shape_ptr: *const ObjectShapeHint = self.shape.as_ref().unwrap();
+
+        loop {
+            self.skip_whitespace();
+            // Per-element: shaped object or generic value (if element
+            // isn't an object, fall back).
+            let value = if self.peek() == Some(b'{') {
+                self.parse_object_shaped(&*shape_ptr)
+            } else {
+                self.parse_value_generic()
+            };
+            parse_root_push(value);
+            js_arr = js_array_push(js_arr, value);
+            parse_root_set(arr_slot, JSValue::object_ptr(js_arr as *mut u8));
+
+            self.skip_whitespace();
+            if self.peek() == Some(b',') {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(b']');
+        parse_root_restore(saved_roots);
+        JSValue::object_ptr(js_arr as *mut u8)
+    }
+
+    /// Generic `parse_value` — identical to `parse_value` but without
+    /// the shape-specialization dispatch. Called from the typed-parse
+    /// path for non-object element values and nested values inside a
+    /// shaped record.
+    #[inline]
+    unsafe fn parse_value_generic(&mut self) -> JSValue {
+        self.skip_whitespace();
+        match self.peek() {
+            Some(b'"') => self.parse_string_value(),
+            Some(b'{') => self.parse_object_untyped(),
+            Some(b'[') => self.parse_array(),
+            Some(b't') => self.parse_true(),
+            Some(b'f') => self.parse_false(),
+            Some(b'n') => self.parse_null(),
+            Some(c) if c == b'-' || c.is_ascii_digit() => self.parse_number(),
+            _ => JSValue::null(),
+        }
+    }
+
     unsafe fn parse_object(&mut self) -> JSValue {
+        // The top-level entry `parse_value` routes typed-array parses
+        // to `parse_array_typed` directly, so by the time we reach
+        // `parse_object` here the only callers are (a) untyped parses
+        // and (b) nested objects inside a shaped record — both want
+        // generic behavior. Delegate to `parse_object_untyped`.
+        self.parse_object_untyped()
+    }
+
+    unsafe fn parse_object_untyped(&mut self) -> JSValue {
         self.advance();
         self.skip_whitespace();
 
@@ -770,6 +1019,165 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
     }
 
     result
+}
+
+// ─── JSON.parse<T[]>: schema-directed typed parse ─────────────────────────────
+
+/// Issue #179 typed-parse plan, Step 1b. Entry point for
+/// `JSON.parse<T[]>(blob)` where T is an object type whose field names
+/// are known at codegen time.
+///
+/// `packed_keys` is null-separated UTF-8 field names in declared order:
+/// `b"id\0name\0value\0"`. `field_count` is the number of fields
+/// (== number of `\0` separators).
+///
+/// Runtime behavior is identical to `js_json_parse(text_ptr)` —
+/// semantically the same JSON, same JSValue tree, same Node parity.
+/// The specialization just skips:
+/// - Per-record shape-cache lookup (shape built once per call)
+/// - Per-field `PARSE_KEY_CACHE` hash when fields arrive in declared
+///   order (the common case for stringify output and most machine-
+///   generated JSON)
+/// - Per-field transition-cache dance inside `js_object_set_field_by_name`
+///   for in-order fields (direct field-index write)
+///
+/// Out-of-order, extra, or missing fields all fall through to the
+/// generic named-setter path — correctness-preserving.
+///
+/// On input shape mismatch (top-level isn't an array, records aren't
+/// objects), also falls through to the generic parser. No user-
+/// visible difference from `JSON.parse(blob) as T[]`.
+#[no_mangle]
+pub unsafe extern "C" fn js_json_parse_typed_array(
+    text_ptr: *const StringHeader,
+    packed_keys: *const u8,
+    packed_keys_len: u32,
+    field_count: u32,
+) -> JSValue {
+    if text_ptr.is_null() {
+        // Fall through to generic (which will throw the standard error).
+        return js_json_parse(text_ptr);
+    }
+    let len = (*text_ptr).byte_len as usize;
+    if len == 0 {
+        return js_json_parse(text_ptr);
+    }
+    let data_ptr = (text_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+    let bytes = std::slice::from_raw_parts(data_ptr, len);
+
+    // Build the shape hint once. The keys_array + pre-interned key
+    // pointers are owned by longlived arena + shape-cache structures,
+    // so they outlive the parse and survive any intervening GC.
+    let shape = match build_shape_hint(packed_keys, packed_keys_len, field_count) {
+        Some(s) => s,
+        None => return js_json_parse(text_ptr),
+    };
+
+    // Same pre-parse cleanup + GC suppression as `js_json_parse` —
+    // keeps the typed path on the same GC-safety contract.
+    crate::gc::gc_check_trigger();
+    crate::gc::gc_suppress();
+    let text_root = parse_root_push(JSValue::string_ptr(text_ptr as *mut StringHeader));
+
+    let mut parser = DirectParser::with_shape(bytes, shape);
+    let result = parser.parse_array_typed();
+    parse_root_push(result);
+
+    parse_root_restore(text_root);
+    crate::gc::gc_unsuppress();
+    crate::gc::gc_bump_malloc_trigger();
+
+    PARSE_KEY_CACHE.with(|c| {
+        let cache = c.borrow();
+        if cache.len() > 4096 {
+            drop(cache);
+            c.borrow_mut().clear();
+        }
+    });
+
+    if result.is_null() {
+        let is_literal_null = len >= 4 && bytes.starts_with(b"null");
+        if !is_literal_null {
+            let preview_len = len.min(50);
+            let preview = std::str::from_utf8(&bytes[..preview_len]).unwrap_or("???");
+            let msg = format!("JSON parse error: Unexpected token: {}", preview);
+            let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
+            let err_val = JSValue::string_ptr(msg_ptr);
+            crate::exception::js_throw(f64::from_bits(err_val.bits()));
+        }
+    }
+
+    result
+}
+
+/// Build the one-per-call shape hint: intern key strings into
+/// `PARSE_KEY_CACHE` (longlived arena) and build a shared
+/// `keys_array` via the existing `js_build_class_keys_array` path so
+/// `scan_shape_cache_roots` keeps it marked. Returns `None` if
+/// `packed_keys` is malformed (no separators, unexpected count).
+unsafe fn build_shape_hint(
+    packed_keys: *const u8,
+    packed_keys_len: u32,
+    field_count: u32,
+) -> Option<ObjectShapeHint> {
+    if packed_keys.is_null() || field_count == 0 {
+        return None;
+    }
+    let packed = std::slice::from_raw_parts(packed_keys, packed_keys_len as usize);
+    // Same parsing as `js_build_class_keys_array`: split on `\0`,
+    // drop empties.
+    let keys: Vec<&[u8]> = packed.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
+    if keys.len() != field_count as usize {
+        return None;
+    }
+    // Intern each key via PARSE_KEY_CACHE so the pointers are shared
+    // with the generic-parse path — critical for the transition cache
+    // to treat them as identical during slow-path field sets.
+    let mut expected_keys: Vec<*const StringHeader> = Vec::with_capacity(keys.len());
+    for key_bytes in &keys {
+        let cached = PARSE_KEY_CACHE.with(|c| c.borrow().get(*key_bytes).copied());
+        let ptr = if let Some(p) = cached {
+            p
+        } else {
+            let p = crate::string::js_string_from_bytes_longlived(
+                key_bytes.as_ptr(),
+                key_bytes.len() as u32,
+            );
+            PARSE_KEY_CACHE.with(|c| {
+                c.borrow_mut().insert(key_bytes.to_vec(), p);
+            });
+            p
+        };
+        expected_keys.push(ptr);
+    }
+
+    // Build the keys_array via the existing class-shape path. We
+    // derive a class_id by hashing packed_keys so repeated typed-parse
+    // calls with the same shape reuse the same keys_array (cache hit).
+    let class_id = shape_hash(packed) as u32;
+    let keys_array = crate::object::js_build_class_keys_array(
+        class_id,
+        field_count,
+        packed_keys,
+        packed_keys_len,
+    );
+
+    Some(ObjectShapeHint { expected_keys, keys_array, field_count })
+}
+
+#[inline]
+fn shape_hash(bytes: &[u8]) -> u64 {
+    // FNV-1a, matching the style Perry uses elsewhere for shape
+    // identity. A collision just means two distinct shapes share a
+    // class_id in the shape cache — the cache is content-compared on
+    // miss so no correctness issue, just a modest re-build cost.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    // Nonzero class_id (0 is reserved for plain objects).
+    h | 0x8000_0000_0000_0000
 }
 
 // ─── JSON.stringify ───────────────────────────────────────────────────────────

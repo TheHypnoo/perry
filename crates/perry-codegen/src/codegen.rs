@@ -1588,6 +1588,8 @@ fn compile_function(
         clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: ic_base,
         ic_globals: Vec::new(),
+        typed_parse_rodata: Vec::new(),
+        typed_parse_counter: 0,
         buffer_data_slots: HashMap::new(),
         buffer_alias_base,
     };
@@ -1645,6 +1647,7 @@ fn compile_function(
         }
     }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
+    let typed_parse_rodata = std::mem::take(&mut ctx.typed_parse_rodata);
     let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
     let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
@@ -1656,6 +1659,9 @@ fn compile_function(
     }
     for ic_name in &ic_globals {
         llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
+    for raw in &typed_parse_rodata {
+        llmod.add_raw_global(raw.clone());
     }
     Ok(())
 }
@@ -1902,6 +1908,8 @@ fn compile_closure(
         clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: ic_base,
         ic_globals: Vec::new(),
+        typed_parse_rodata: Vec::new(),
+        typed_parse_counter: 0,
         buffer_data_slots: HashMap::new(),
         buffer_alias_base,
     };
@@ -1920,6 +1928,7 @@ fn compile_closure(
         }
     }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
+    let typed_parse_rodata = std::mem::take(&mut ctx.typed_parse_rodata);
     let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
     let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
@@ -1931,6 +1940,9 @@ fn compile_closure(
     }
     for ic_name in &ic_globals {
         llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
+    for raw in &typed_parse_rodata {
+        llmod.add_raw_global(raw.clone());
     }
     Ok(())
 }
@@ -2081,6 +2093,8 @@ fn compile_method(
         clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: ic_base,
         ic_globals: Vec::new(),
+        typed_parse_rodata: Vec::new(),
+        typed_parse_counter: 0,
         buffer_data_slots: HashMap::new(),
         buffer_alias_base,
     };
@@ -2104,6 +2118,7 @@ fn compile_method(
         ctx.block().ret(DOUBLE, "0.0");
     }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
+    let typed_parse_rodata = std::mem::take(&mut ctx.typed_parse_rodata);
     let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
     let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
@@ -2115,6 +2130,9 @@ fn compile_method(
     }
     for ic_name in &ic_globals {
         llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
+    for raw in &typed_parse_rodata {
+        llmod.add_raw_global(raw.clone());
     }
     Ok(())
 }
@@ -2291,6 +2309,8 @@ fn compile_module_entry(
         clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: ic_base,
         ic_globals: Vec::new(),
+        typed_parse_rodata: Vec::new(),
+        typed_parse_counter: 0,
         buffer_data_slots: HashMap::new(),
         buffer_alias_base,
         };
@@ -2382,6 +2402,7 @@ fn compile_module_entry(
             }
         }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
+        let typed_parse_rodata = std::mem::take(&mut ctx.typed_parse_rodata);
         let ic_end = ctx.ic_site_counter;
         let pending = std::mem::take(&mut ctx.pending_declares);
         let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
@@ -2393,6 +2414,9 @@ fn compile_module_entry(
         }
     for ic_name in &ic_globals {
         llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
+    for raw in &typed_parse_rodata {
+        llmod.add_raw_global(raw.clone());
     }
     } else {
         let init_name = format!("{}__init", module_prefix);
@@ -2499,6 +2523,8 @@ fn compile_module_entry(
         clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: ic_base,
         ic_globals: Vec::new(),
+        typed_parse_rodata: Vec::new(),
+        typed_parse_counter: 0,
         buffer_data_slots: HashMap::new(),
         buffer_alias_base,
         };
@@ -2517,6 +2543,7 @@ fn compile_module_entry(
             ctx.block().ret_void();
         }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
+        let typed_parse_rodata = std::mem::take(&mut ctx.typed_parse_rodata);
         let ic_end = ctx.ic_site_counter;
         let pending = std::mem::take(&mut ctx.pending_declares);
         let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
@@ -2528,6 +2555,9 @@ fn compile_module_entry(
         }
     for ic_name in &ic_globals {
         llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
+    for raw in &typed_parse_rodata {
+        llmod.add_raw_global(raw.clone());
     }
     }
     Ok(())
@@ -2863,6 +2893,8 @@ fn compile_static_method(
         clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: ic_base,
         ic_globals: Vec::new(),
+        typed_parse_rodata: Vec::new(),
+        typed_parse_counter: 0,
         buffer_data_slots: HashMap::new(),
         buffer_alias_base,
     };
@@ -2880,6 +2912,7 @@ fn compile_static_method(
         }
     }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
+    let typed_parse_rodata = std::mem::take(&mut ctx.typed_parse_rodata);
     let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
     let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
@@ -2891,6 +2924,9 @@ fn compile_static_method(
     }
     for ic_name in &ic_globals {
         llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
+    for raw in &typed_parse_rodata {
+        llmod.add_raw_global(raw.clone());
     }
     Ok(())
 }

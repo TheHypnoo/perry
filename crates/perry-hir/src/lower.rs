@@ -49,6 +49,21 @@ pub struct LoweringContext {
     pub(crate) interfaces: Vec<(String, InterfaceId)>,
     /// Type aliases: name -> (id, type_params, aliased_type)
     pub(crate) type_aliases: Vec<(String, TypeAliasId, Vec<TypeParam>, Type)>,
+    /// Issue #179 typed-parse: interface name → field names in AST
+    /// source order. Populated alongside `interfaces` during
+    /// `lower_interface_decl`. `ObjectType::properties` is a HashMap
+    /// that loses source order; this side table preserves it so
+    /// `JSON.parse<Item[]>` codegen can emit a shape hint whose order
+    /// matches typical `JSON.stringify` output (source order ≈
+    /// insertion order ≈ what we see on the wire). Lost order would
+    /// still be correct, just not fast-path friendly.
+    pub(crate) interface_source_keys: std::collections::HashMap<String, Vec<String>>,
+    /// Issue #179 typed-parse: interface name → resolved `ObjectType`.
+    /// `resolve_typed_parse_ty` uses this so `JSON.parse<Item[]>`
+    /// lowers to `Array<Object{fields}>` instead of `Array<Named("Item")>`.
+    /// Without this, codegen sees only `Named` and can't extract the
+    /// shape, so the specialized parse path never fires.
+    pub(crate) interface_object_types: std::collections::HashMap<String, perry_types::ObjectType>,
     /// Imported functions: local_name -> original_name (the exported name in the source module)
     pub(crate) imported_functions: Vec<(String, String)>,
     /// Native module imports: local_name -> (module_name, method_name)
@@ -218,6 +233,8 @@ impl LoweringContext {
             enums: Vec::new(),
             interfaces: Vec::new(),
             type_aliases: Vec::new(),
+            interface_source_keys: std::collections::HashMap::new(),
+            interface_object_types: std::collections::HashMap::new(),
             imported_functions: Vec::new(),
             native_modules: Vec::new(),
             builtin_module_aliases: Vec::new(),
@@ -302,6 +319,96 @@ impl LoweringContext {
             .find(|(alias_name, _, type_params, _)| alias_name == name && type_params.is_empty())
             .map(|(_, _, _, ty)| ty.clone())
     }
+}
+
+/// Issue #179 typed-parse: extract the field-name list in source
+/// order from a `JSON.parse<T>` AST type argument. `T` may be:
+/// - A type literal `{id: number, name: string}` — direct extraction
+/// - `Array<T>` / `T[]` — recurse on element
+/// - A named interface reference `Item` — resolve via ctx and re-walk
+///   the interface declaration's member list
+///
+/// Returns None on any unresolved reference or unsupported shape. The
+/// caller treats that as "no fast-path order available" and emits the
+/// slow-path only (still correct, just slower).
+fn extract_typed_parse_source_order(
+    ts_type: &swc_ecma_ast::TsType,
+    ctx: &LoweringContext,
+) -> Option<Vec<String>> {
+    use swc_ecma_ast as ast;
+    match ts_type {
+        ast::TsType::TsArrayType(arr) => {
+            extract_typed_parse_source_order(&arr.elem_type, ctx)
+        }
+        ast::TsType::TsTypeLit(lit) => {
+            let mut keys = Vec::with_capacity(lit.members.len());
+            for member in &lit.members {
+                if let ast::TsTypeElement::TsPropertySignature(prop) = member {
+                    if let ast::Expr::Ident(ident) = prop.key.as_ref() {
+                        keys.push(ident.sym.to_string());
+                    } else {
+                        return None;
+                    }
+                }
+            }
+            if keys.is_empty() { None } else { Some(keys) }
+        }
+        ast::TsType::TsTypeRef(tref) => {
+            // `Array<T>` — recurse on the element type argument.
+            if let Some(type_params) = &tref.type_params {
+                let name = match &tref.type_name {
+                    ast::TsEntityName::Ident(i) => i.sym.as_ref(),
+                    _ => return None,
+                };
+                if name == "Array" && type_params.params.len() == 1 {
+                    return extract_typed_parse_source_order(&type_params.params[0], ctx);
+                }
+            }
+            // Named interface reference — look up the source-order
+            // field list recorded by `lower_interface_decl`.
+            let name = match &tref.type_name {
+                ast::TsEntityName::Ident(i) => i.sym.to_string(),
+                _ => return None,
+            };
+            ctx.interface_source_keys.get(&name).cloned()
+        }
+        _ => None,
+    }
+}
+
+/// Issue #179 typed-parse: fully resolve a `JSON.parse<T>` type argument
+/// down to a structural form codegen can use (ObjectType with fields /
+/// Array of object). Named/interface references are expanded via the
+/// lowering context's type-alias table. Unresolvable references collapse
+/// to `Type::Any` so the caller falls through to the generic parser.
+fn resolve_typed_parse_ty(ctx: &LoweringContext, ty: Type) -> Type {
+    match ty {
+        Type::Named(ref name) => {
+            // Interface reference? Expand to ObjectType from the
+            // typed-parse side table (populated by `lower_interface_decl`).
+            if let Some(obj) = ctx.interface_object_types.get(name) {
+                return Type::Object(obj.clone());
+            }
+            // Type alias? Expand and recurse.
+            match ctx.resolve_type_alias(name) {
+                Some(resolved) => resolve_typed_parse_ty(ctx, resolved),
+                None => Type::Any,
+            }
+        }
+        Type::Array(elem) => {
+            let resolved = resolve_typed_parse_ty(ctx, *elem);
+            Type::Array(Box::new(resolved))
+        }
+        Type::Generic { base, type_args } if base == "Array" && type_args.len() == 1 => {
+            let resolved = resolve_typed_parse_ty(ctx, type_args.into_iter().next().unwrap());
+            Type::Array(Box::new(resolved))
+        }
+        // Object/primitive/tuple types pass through unchanged.
+        other => other,
+    }
+}
+
+impl LoweringContext {
 
     pub(crate) fn fresh_local(&mut self) -> LocalId {
         let id = self.next_local_id;
@@ -5966,7 +6073,41 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 let reviver = iter.next().unwrap();
                                                 return Ok(Expr::JsonParseWithReviver(Box::new(text), Box::new(reviver)));
                                             } else if args.len() >= 1 {
-                                                return Ok(Expr::JsonParse(Box::new(args.into_iter().next().unwrap())));
+                                                let text = args.into_iter().next().unwrap();
+                                                // Issue #179 typed-parse plan: if the call site
+                                                // provides a TypeScript type argument (e.g.
+                                                // `JSON.parse<Item[]>(blob)`), carry it into HIR
+                                                // so codegen can emit a specialized parse path.
+                                                // Semantically identical to JsonParse at runtime
+                                                // (the `<T>` erases — Node-compatible).
+                                                if let Some(type_args) = call.type_args.as_ref() {
+                                                    if let Some(ts_type) = type_args.params.first() {
+                                                        let ty = extract_ts_type_with_ctx(ts_type, Some(ctx));
+                                                        // Resolve Named → structural (interface)
+                                                        // aliases so codegen sees the full
+                                                        // ObjectType without re-walking the alias
+                                                        // table. Array<Named> inner element
+                                                        // also gets resolved.
+                                                        let resolved = resolve_typed_parse_ty(ctx, ty);
+                                                        if !matches!(resolved, Type::Any | Type::Unknown) {
+                                                            // Source-order field list for the
+                                                            // inner Object type, if we can
+                                                            // extract it from the AST. Codegen
+                                                            // uses this for the fast-path
+                                                            // per-field comparison.
+                                                            let ordered_keys =
+                                                                extract_typed_parse_source_order(
+                                                                    ts_type, ctx,
+                                                                );
+                                                            return Ok(Expr::JsonParseTyped {
+                                                                text: Box::new(text),
+                                                                ty: resolved,
+                                                                ordered_keys,
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                                return Ok(Expr::JsonParse(Box::new(text)));
                                             }
                                         }
                                         "stringify" => {

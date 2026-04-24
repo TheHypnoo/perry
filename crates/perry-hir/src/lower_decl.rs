@@ -1399,6 +1399,35 @@ pub(crate) fn lower_interface_decl(ctx: &mut LoweringContext, iface_decl: &ast::
     // Register interface in context
     ctx.interfaces.push((name.clone(), iface_id));
 
+    // Issue #179 typed-parse: record field names in source order so
+    // `JSON.parse<Name[]>` codegen can emit a shape hint that matches
+    // how `JSON.stringify` lays them out on the wire.
+    let source_keys: Vec<String> = properties.iter().map(|p| p.name.clone()).collect();
+    if !source_keys.is_empty() {
+        ctx.interface_source_keys.insert(name.clone(), source_keys);
+    }
+    // Also materialize an ObjectType so `resolve_typed_parse_ty` can
+    // expand `Named("Item")` → `Object{fields}` for codegen.
+    let mut obj_props: std::collections::HashMap<String, perry_types::PropertyInfo>
+        = std::collections::HashMap::new();
+    for p in &properties {
+        obj_props.insert(p.name.clone(), perry_types::PropertyInfo {
+            ty: p.ty.clone(),
+            optional: p.optional,
+            readonly: p.readonly,
+        });
+    }
+    if !obj_props.is_empty() {
+        ctx.interface_object_types.insert(
+            name.clone(),
+            perry_types::ObjectType {
+                name: Some(name.clone()),
+                properties: obj_props,
+                index_signature: None,
+            },
+        );
+    }
+
     Ok(Interface {
         id: iface_id,
         name,

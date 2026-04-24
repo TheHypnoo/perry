@@ -486,6 +486,10 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // JSON.parse returns JSValue (u64) via integer register on ARM64,
     // not f64. Use I64 return + bitcast to avoid ABI mismatch crash.
     module.declare_function("js_json_parse", I64, &[I64]);
+    // JSON.parse<T[]> schema-directed parse: same return semantics.
+    // Args: text_ptr (i64), packed_keys (i64), packed_keys_len (i32),
+    // field_count (i32).
+    module.declare_function("js_json_parse_typed_array", I64, &[I64, I64, I32, I32]);
     // Date string formatters
     module.declare_function("js_date_to_date_string", I64, &[DOUBLE]);
     module.declare_function("js_date_to_time_string", I64, &[DOUBLE]);

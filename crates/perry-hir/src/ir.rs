@@ -1125,6 +1125,22 @@ pub enum Expr {
 
     // JSON operations
     JsonParse(Box<Expr>),                // JSON.parse(string) -> value
+    /// `JSON.parse<T>(string)` with a compile-time type argument
+    /// (issue #179 tier 1 via typed-parse plan). The `ty` carries the
+    /// expected shape so codegen can emit a specialized parse call.
+    /// `ordered_keys`, when present, is the field list in SOURCE order
+    /// (as declared in the TypeScript interface/type literal) —
+    /// preserved from the AST because `ObjectType::properties` is a
+    /// HashMap that loses insertion order. Codegen uses this to emit
+    /// the shape hint in an order that matches how JSON.stringify
+    /// output typically lays out fields (declaration order), so the
+    /// per-field fast path in `parse_object_shaped` actually hits.
+    /// Semantically identical to `JsonParse` (the `<T>` is fully
+    /// erased at runtime — Node-compatible); Perry may opt into a
+    /// faster specialized path per shape. Falls back to the generic
+    /// parser transparently if the input doesn't match the declared
+    /// shape.
+    JsonParseTyped { text: Box<Expr>, ty: Type, ordered_keys: Option<Vec<String>> },
     JsonParseReviver { text: Box<Expr>, reviver: Box<Expr> },
     JsonParseWithReviver(Box<Expr>, Box<Expr>),
     JsonStringify(Box<Expr>),            // JSON.stringify(value) -> string

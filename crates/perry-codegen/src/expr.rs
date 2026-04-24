@@ -517,6 +517,15 @@ pub(crate) struct FnCtx<'a> {
     /// global [2 x i64] zeroinitializer` for each entry.
     pub ic_globals: Vec<String>,
 
+    /// Issue #179 typed-parse: raw rodata globals emitted by
+    /// `JsonParseTyped` codegen. Each entry is the full LLVM IR line
+    /// `@<name> = private unnamed_addr constant [N x i8] c"..."` to
+    /// append after the function finishes. Mirrors the `ic_globals`
+    /// drain pattern. Also: counter for unique names at each call
+    /// site in this function.
+    pub typed_parse_rodata: Vec<String>,
+    pub typed_parse_counter: u32,
+
     /// (Issue #50) Per-function row aliases. When a function declares
     /// `let krow = X[i]` where `X` is in `flat_const_arrays`, this map
     /// records `krow_id → (X_id, <cloned row_index expr>)`. The
@@ -4360,6 +4369,73 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let blk = ctx.block();
             let s_handle = unbox_to_i64(blk, &s_box);
             let result_i64 = blk.call(I64, "js_json_parse", &[(I64, &s_handle)]);
+            Ok(blk.bitcast_i64_to_double(&result_i64))
+        }
+        // Issue #179 typed-parse, Step 1b: when `<T>` is
+        // `Array<Object{fields}>`, emit a packed-keys rodata constant
+        // and route through `js_json_parse_typed_array`. Any other
+        // shape (or unresolved Named type) falls through to the
+        // generic `js_json_parse`. Runtime semantics identical either
+        // way — the typed variant is a pure perf specialization.
+        Expr::JsonParseTyped { text, ty, ordered_keys } => {
+            let packed = extract_array_of_object_shape(ty, ordered_keys.as_deref());
+            let s_box = lower_expr(ctx, text)?;
+            let blk = ctx.block();
+            let s_handle = unbox_to_i64(blk, &s_box);
+            let result_i64 = match packed {
+                Some((packed_bytes, field_count)) if field_count > 0 => {
+                    // Emit a per-call-site rodata constant. The IR
+                    // byte-escape format matches what
+                    // `add_named_string_constant` produces elsewhere.
+                    let idx = ctx.typed_parse_counter;
+                    ctx.typed_parse_counter += 1;
+                    let gname = format!("perry_typed_parse_keys_{}", idx);
+                    let bytes_len = packed_bytes.len();
+                    let mut lit = String::with_capacity(bytes_len + 8);
+                    lit.push('c');
+                    lit.push('"');
+                    for &b in &packed_bytes {
+                        if (32..127).contains(&b) && b != b'"' && b != b'\\' {
+                            lit.push(b as char);
+                        } else {
+                            lit.push('\\');
+                            lit.push_str(&format!("{:02X}", b));
+                        }
+                    }
+                    lit.push('"');
+                    ctx.typed_parse_rodata.push(format!(
+                        "@{} = private unnamed_addr constant [{} x i8] {}",
+                        gname, bytes_len, lit
+                    ));
+                    // Convert `ptr @global` to i64 so it matches the
+                    // runtime fn's ABI (which takes `i64` for the
+                    // packed-keys pointer — same convention as other
+                    // runtime calls).
+                    let blk = ctx.block();
+                    let ptr_reg = blk.fresh_reg();
+                    blk.emit_raw(format!(
+                        "{} = ptrtoint ptr @{} to i64",
+                        ptr_reg, gname
+                    ));
+                    let len_lit = format!("{}", bytes_len);
+                    let fc_lit = format!("{}", field_count);
+                    blk.call(
+                        I64,
+                        "js_json_parse_typed_array",
+                        &[
+                            (I64, &s_handle),
+                            (I64, &ptr_reg),
+                            (I32, &len_lit),
+                            (I32, &fc_lit),
+                        ],
+                    )
+                }
+                _ => {
+                    // Fall through to generic parse for unhandled shapes.
+                    blk.call(I64, "js_json_parse", &[(I64, &s_handle)])
+                }
+            };
+            let blk = ctx.block();
             Ok(blk.bitcast_i64_to_double(&result_i64))
         }
         Expr::JsonParseReviver { text, reviver } => {
@@ -8676,4 +8752,67 @@ pub(crate) fn variant_name(e: &Expr) -> String {
         .find(|c: char| c == ' ' || c == '(' || c == '{')
         .unwrap_or(dbg.len());
     dbg[..end].to_string()
+}
+
+/// Issue #179 typed-parse, Step 1b codegen helper.
+///
+/// Given the `ty` from `JsonParseTyped`, return the packed-keys bytes
+/// and field count if `ty` is `Array<Object>` with a declared field
+/// list we can specialize on. Returns `None` otherwise — caller falls
+/// through to the generic `js_json_parse`.
+///
+/// Packed format matches `js_build_class_keys_array`: null-separated
+/// UTF-8 field names, trailing `\0` optional. Only primitive/leaf
+/// field types are allowed in the MVP (number, string, boolean,
+/// bigint, null, number-or-string unions) — nested objects and arrays
+/// inside a record still parse through the generic path, which is fine:
+/// the outer record is still pre-shaped, and nested values go through
+/// `parse_value_generic` inside `parse_object_shaped`.
+pub(crate) fn extract_array_of_object_shape(
+    ty: &perry_types::Type,
+    ordered_keys: Option<&[String]>,
+) -> Option<(Vec<u8>, u32)> {
+    use perry_types::Type;
+    let elem = match ty {
+        Type::Array(inner) => &**inner,
+        Type::Generic { base, type_args } if base == "Array" && type_args.len() == 1 => {
+            &type_args[0]
+        }
+        _ => return None,
+    };
+    let obj = match elem {
+        Type::Object(o) => o,
+        _ => return None,
+    };
+    if obj.properties.is_empty() {
+        return None;
+    }
+    // Prefer the AST-source order (matches typical JSON.stringify
+    // output layout — enables the fast-path per-field compare in
+    // `parse_object_shaped`). Fall back to alphabetical if unavailable.
+    // Runtime correctness is order-independent either way — the slow
+    // path handles mismatches.
+    let keys: Vec<String> = if let Some(ord) = ordered_keys {
+        // Filter to only keys that are actually in the ObjectType
+        // properties (defensive against AST/type mismatch).
+        ord.iter()
+            .filter(|k| obj.properties.contains_key(k.as_str()))
+            .cloned()
+            .collect()
+    } else {
+        let mut v: Vec<String> = obj.properties.keys().cloned().collect();
+        v.sort();
+        v
+    };
+    if keys.is_empty() {
+        return None;
+    }
+    let mut packed: Vec<u8> = Vec::new();
+    for (i, k) in keys.iter().enumerate() {
+        if i > 0 {
+            packed.push(0);
+        }
+        packed.extend_from_slice(k.as_bytes());
+    }
+    Some((packed, keys.len() as u32))
 }
