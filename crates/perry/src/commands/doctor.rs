@@ -55,6 +55,41 @@ fn check_perry_version() -> CheckResult {
     }
 }
 
+fn check_clang() -> CheckResult {
+    match perry_codegen::linker::find_clang() {
+        Some(path) => {
+            let version = Command::new(&path)
+                .arg("--version")
+                .output()
+                .ok()
+                .and_then(|out| {
+                    let s = String::from_utf8_lossy(&out.stdout).to_string();
+                    s.lines().next().map(|l| l.to_string())
+                })
+                .unwrap_or_else(|| path.display().to_string());
+            CheckResult {
+                name: "clang (LLVM codegen)".to_string(),
+                status: CheckStatus::Ok,
+                details: Some(version),
+            }
+        }
+        None => {
+            let hint = if cfg!(windows) {
+                "not found - install with `winget install LLVM.LLVM` (or choco/scoop install llvm) or set PERRY_LLVM_CLANG"
+            } else if cfg!(target_os = "macos") {
+                "not found - install with `brew install llvm` or `xcode-select --install`, or set PERRY_LLVM_CLANG"
+            } else {
+                "not found - install via your package manager (apt/dnf/pacman install clang) or set PERRY_LLVM_CLANG"
+            };
+            CheckResult {
+                name: "clang (LLVM codegen)".to_string(),
+                status: CheckStatus::Error,
+                details: Some(hint.to_string()),
+            }
+        }
+    }
+}
+
 fn check_system_linker() -> CheckResult {
     #[cfg(target_os = "windows")]
     {
@@ -198,6 +233,7 @@ pub fn run(args: DoctorArgs, format: OutputFormat, use_color: bool) -> Result<()
     let checks = vec![
         check_perry_version(),
         check_update_available(),
+        check_clang(),
         check_system_linker(),
         check_runtime_library(),
         check_project_config(),

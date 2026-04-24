@@ -38,10 +38,24 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
     }
 
     let clang = find_clang().context(if cfg!(windows) {
-        "clang not found. Install LLVM from https://github.com/llvm/llvm-project/releases \
-         or set PERRY_LLVM_CLANG to the path of clang.exe"
+        "clang not found. Install LLVM with one of:\n\
+         \n\
+         \x20   winget install LLVM.LLVM       (Windows Package Manager)\n\
+         \x20   choco install llvm             (Chocolatey)\n\
+         \x20   scoop install llvm             (Scoop)\n\
+         \n\
+         or download the installer from https://github.com/llvm/llvm-project/releases\n\
+         (look for LLVM-<version>-win64.exe). After installation, open a new terminal\n\
+         so the updated PATH takes effect, or set PERRY_LLVM_CLANG to the full path of\n\
+         clang.exe. Run `perry doctor` to verify the install."
+    } else if cfg!(target_os = "macos") {
+        "clang not found. Install LLVM with `brew install llvm` or install Xcode \
+         command-line tools with `xcode-select --install`. Or set PERRY_LLVM_CLANG \
+         to the path of clang. Run `perry doctor` to verify the install."
     } else {
-        "No clang found in PATH. Install LLVM/clang or set PERRY_LLVM_CLANG"
+        "clang not found in PATH. Install LLVM/clang via your package manager \
+         (e.g. `apt install clang`, `dnf install clang`, `pacman -S clang`) or set \
+         PERRY_LLVM_CLANG to the path of clang. Run `perry doctor` to verify the install."
     })?;
 
     let mut cmd = Command::new(&clang);
@@ -110,7 +124,7 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
     Ok(bytes)
 }
 
-fn find_clang() -> Option<PathBuf> {
+pub fn find_clang() -> Option<PathBuf> {
     // Honor explicit override first — useful on systems with multiple clang
     // installs (e.g. Homebrew LLVM vs Xcode).
     if let Ok(p) = env::var("PERRY_LLVM_CLANG") {
