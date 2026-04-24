@@ -2654,25 +2654,34 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // Tag check is platform-independent: same two LLVM ops
             // (`lshr` + `and`) + one `icmp`, branch-predicted taken.
             let obj_tag = ctx.block().lshr(I64, &obj_bits, "48");
+            // SSO receiver fast path (Step 1.5 of SSO migration).
+            // SHORT_STRING_TAG = 0x7FF9 can't pass the POINTER/STRING
+            // check (its masked tag is 0x7FF9, not 0x7FFD) and we
+            // can't widen the mask because the PIC fast path's
+            // `*(obj_handle + 16)` would read arbitrary memory from
+            // the SSO data bits. Instead: check SSO explicitly first,
+            // route to a dedicated block that calls the SSO-aware
+            // `js_object_get_field_by_name_f64` runtime entry (which
+            // handles `.length` directly from the NaN-box length
+            // byte and returns `undefined` for other keys).
+            let is_sso = ctx.block().icmp_eq(I64, &obj_tag, "32761"); // 0x7FF9
             let obj_tag_masked = ctx.block().and(I64, &obj_tag, "65533"); // 0xFFFD
             let is_valid = ctx.block().icmp_eq(I64, &obj_tag_masked, "32765"); // 0x7FFD
-            // NOTE: SSO (SHORT_STRING_TAG = 0x7FF9) intentionally
-            // fails this guard for now — the PIC fast path's
-            // subsequent `*(obj_handle + 16)` read would deref into
-            // arbitrary userspace memory and can crash. Property
-            // access on SSO values returns `undefined` from the
-            // invalid branch, which is correct for string-valued
-            // property access (JS `"x".foo === undefined`) EXCEPT
-            // `.length`. Full SSO-aware PIC dispatch is Step 1.5 of
-            // the SSO migration plan and requires emitting a
-            // dedicated `is_sso` branch that skips the PIC and calls
-            // the SSO-aware miss handler directly.
+            let sso_idx = ctx.new_block("pget.recv_sso");
             let pic_idx = ctx.new_block("pget.recv_ok");
             let invalid_idx = ctx.new_block("pget.recv_bad");
             let final_merge_idx = ctx.new_block("pget.recv_merge");
+            let sso_label = ctx.block_label(sso_idx);
             let pic_label = ctx.block_label(pic_idx);
             let invalid_label = ctx.block_label(invalid_idx);
             let final_merge_label = ctx.block_label(final_merge_idx);
+            // Two-step branch: first check SSO, then check
+            // pointer-validity. Both inverse branches land on
+            // `invalid_idx` except when we dispatch through SSO.
+            let pic_or_invalid_idx = ctx.new_block("pget.check_ptr");
+            let pic_or_invalid_label = ctx.block_label(pic_or_invalid_idx);
+            ctx.block().cond_br(&is_sso, &sso_label, &pic_or_invalid_label);
+            ctx.current_block = pic_or_invalid_idx;
             ctx.block().cond_br(&is_valid, &pic_label, &invalid_label);
 
             ctx.current_block = pic_idx;
@@ -2778,12 +2787,30 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let invalid_end_label = ctx.block().label.clone();
             ctx.block().br(&final_merge_label);
 
-            // Outer merge joins the PIC result with the invalid-receiver
-            // undefined.
+            // SSO receiver: dispatch directly to the runtime by-name
+            // helper, which reads `.length` inline from the NaN-box
+            // payload and returns `undefined` for other keys. Bypasses
+            // the PIC entirely (PIC would read garbage memory). The
+            // key handle has already been extracted above.
+            ctx.current_block = sso_idx;
+            let sso_val = ctx.block().call(
+                DOUBLE,
+                "js_object_get_field_by_name_f64",
+                &[(I64, &obj_bits), (I64, &key_handle)],
+            );
+            let sso_end_label = ctx.block().label.clone();
+            ctx.block().br(&final_merge_label);
+
+            // Outer merge joins PIC result + invalid-receiver undefined
+            // + SSO result.
             ctx.current_block = final_merge_idx;
             Ok(ctx.block().phi(
                 DOUBLE,
-                &[(&pic_val, &pic_end_label), (&undef_val, &invalid_end_label)],
+                &[
+                    (&pic_val, &pic_end_label),
+                    (&undef_val, &invalid_end_label),
+                    (&sso_val, &sso_end_label),
+                ],
             ))
         }
 

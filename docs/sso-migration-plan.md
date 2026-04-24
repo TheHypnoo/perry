@@ -119,8 +119,20 @@ they reach any runtime path — so property access on SSO strings
 other than `.length` (e.g. `.indexOf`, `.slice`) returns
 `undefined` instead of dispatching correctly.
 
-### Step 1.5 — codegen PropertyGet SSO dispatch
+### Step 1.5 — codegen PropertyGet SSO dispatch ✅ landed v0.5.215
 
+Added an explicit three-way branch in `expr.rs::Expr::PropertyGet`
+receiver guard: `is_sso = tag == 0x7FF9` → new `sso_idx` block →
+`js_object_get_field_by_name_f64` → final merge. PIC / invalid /
+SSO all merge via a three-way phi. Also fixed `js_array_join` to
+decode SSO elements inline (was coercing to NaN via the generic
+number path).
+
+**Final result:** 10/10 `test_json_*.ts` tests match Node under
+default AND `PERRY_SSO_FORCE=1`. Runtime tests 136/136. Gap tests
+25/28 (+1 from baseline). Fastify 5/5, thread 4/4.
+
+Historic notes on the failed attempt:
 **Why needed:** `crates/perry-codegen/src/expr.rs` PropertyGet has a
 receiver-validity guard at ~line 2647 that masks `tag & 0xFFFD` and
 checks `== 0x7FFD`. This accepts POINTER_TAG (0x7FFD) + STRING_TAG

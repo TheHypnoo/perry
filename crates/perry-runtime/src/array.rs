@@ -1769,6 +1769,14 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
                 let str_data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len));
                 result.push_str(s);
+            } else if jsvalue.is_short_string() {
+                // v0.5.214 SSO — decode inline into a stack buffer
+                // and push bytes. No heap roundtrip via
+                // materialize_to_heap.
+                let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+                let n = jsvalue.short_string_to_buf(&mut scratch);
+                let s = std::str::from_utf8_unchecked(&scratch[..n]);
+                result.push_str(s);
             } else if jsvalue.is_pointer() {
                 // POINTER_TAG — may be a string stored with the wrong tag (cross-module)
                 let ptr = (element_bits & 0x0000_FFFF_FFFF_FFFF) as *const StringHeader;
