@@ -1172,7 +1172,10 @@ fn find_msvc_link_exe() -> Option<PathBuf> {
 /// with `winget install LLVM.LLVM`. Enables the "lightweight Windows toolchain"
 /// path: LLVM for codegen + linking, xwin'd sysroot for CRT + Windows SDK libs,
 /// no Visual Studio required. See `perry setup windows`.
-#[cfg(target_os = "windows")]
+///
+/// Available on all hosts (not just Windows native): cross-compile callers on
+/// macOS/Linux targeting Windows also want to locate a bundled lld-link
+/// before falling back to vswhere-based MSVC detection.
 fn find_lld_link() -> Option<PathBuf> {
     // Honor explicit override (shared with MSVC path).
     if let Ok(p) = std::env::var("PERRY_LLD_LINK") {
@@ -1208,7 +1211,9 @@ fn find_lld_link() -> Option<PathBuf> {
 /// Default location is `%LOCALAPPDATA%\perry\windows-sdk` on Windows; can be
 /// overridden via `PERRY_WINDOWS_SYSROOT` (same env var already used by the
 /// cross-compile branch, so a single env var works for both hosts).
-#[cfg(target_os = "windows")]
+/// Available on all hosts so the `is_windows` target branch (which fires on
+/// macOS/Linux cross-compiles too) can check for an xwin'd Windows SDK without
+/// needing its own cfg gate.
 fn find_perry_windows_sdk() -> Option<PathBuf> {
     let explicit = std::env::var("PERRY_WINDOWS_SYSROOT")
         .ok()
