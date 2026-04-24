@@ -846,6 +846,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 }
             } else if let Some(slot) = ctx.locals.get(id).cloned() {
                 ctx.block().store(DOUBLE, &v, &slot);
+                // Gen-GC Phase A sub-phase 3b: mirror pointer-typed
+                // writes into the shadow frame. See stmt.rs::Let
+                // for the allocation-site mirror; LocalSet is the
+                // reassignment-site mirror.
+                if let Some(&slot_idx) = ctx.shadow_slot_map.get(id) {
+                    let v_i64 = ctx.block().bitcast_double_to_i64(&v);
+                    ctx.block().call_void(
+                        "js_shadow_slot_set",
+                        &[(I32, &slot_idx.to_string()), (I64, &v_i64)],
+                    );
+                }
                 // Mirror to the parallel i32 slot allocated for int32-stable
                 // locals (issue #48). Without this, the i32 slot would go
                 // stale on every `sum = (sum + i) | 0` write.

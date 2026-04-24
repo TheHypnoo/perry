@@ -458,6 +458,23 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             if let Some(init_expr) = init {
                 let v = lower_expr(ctx, init_expr)?;
                 ctx.block().store(DOUBLE, &v, &slot);
+                // Gen-GC Phase A sub-phase 3b: if this local has a
+                // shadow-frame slot, mirror the store into the
+                // frame. Bitcast double → i64 (NaN-box bits) then
+                // call js_shadow_slot_set. LLVM will fold the
+                // redundant double-alloca and i64-pass through
+                // mem2reg/SROA in many cases; when it can't, the
+                // cost is one bitcast + one call per pointer-typed
+                // Let — measured noise on bench_json_roundtrip.
+                // Only fires when PERRY_SHADOW_STACK=1 is set at
+                // compile time, since the map is empty otherwise.
+                if let Some(&slot_idx) = ctx.shadow_slot_map.get(id) {
+                    let v_i64 = ctx.block().bitcast_double_to_i64(&v);
+                    ctx.block().call_void(
+                        "js_shadow_slot_set",
+                        &[(I32, &slot_idx.to_string()), (I64, &v_i64)],
+                    );
+                }
                 // Seed the i32 slot from the init value when the local has one.
                 // Use fptosi→i64 + trunc→i32 instead of direct fptosi→i32
                 // to handle unsigned values (e.g. `let s = 0x9E3779B9 >>> 0`
