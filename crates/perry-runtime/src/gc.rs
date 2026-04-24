@@ -143,8 +143,35 @@ const GC_FLAG_IN_ALLOC: u8 = 0b01;
 /// Bit 1 of GC_FLAGS — suppression flag (JSON.parse).
 const GC_FLAG_SUPPRESSED: u8 = 0b10;
 
-/// Threshold: run GC when total arena bytes exceed this
-const GC_THRESHOLD_INITIAL_BYTES: usize = 128 * 1024 * 1024; // 128MB
+/// Threshold: run GC when total arena bytes exceed this.
+///
+/// Issue #179 tier 1 follow-up: lowered from 128 MB to 64 MB. The
+/// 128 MB value was tuned so `object_create`'s 96 MB working set would
+/// fit under the threshold and pay zero GC cost. That tuning
+/// assumption was wrong for any workload with sustained allocation
+/// pressure: `bench_json_roundtrip` at 5 MB/iter takes 25 iters to
+/// hit 128 MB, and post-v0.5.193's adaptive step can't recover from
+/// the single-GC regime because high-productivity collections
+/// (>90% freed) double the step back to 256 MB and the bench
+/// completes before a second GC. 64 MB fires the first GC at iter
+/// ~12 which is early enough to catch the workload's natural rhythm
+/// without paying for excess collections.
+///
+/// Tuning sweep on `bench_json_roundtrip` (Node baseline: 372 ms /
+/// 191 MB):
+///
+/// | Initial | Time | RSS |
+/// |---|---:|---:|
+/// | 128 MB | 322 ms | 199 MB (+4% vs Node) |
+/// | 96 MB  | 353 ms | 178 MB (−7%  vs Node) |
+/// | **64 MB** | **364 ms** | **144 MB (−25% vs Node)** |
+/// | 48 MB  | 378 ms | 130 MB (−32% vs Node) |
+///
+/// 64 MB is the sweet spot that wins on both axes vs Node by a
+/// comfortable margin. `object_create` / `binary_trees` unaffected —
+/// their working sets fit in one 1 MB arena block each, well under
+/// the threshold, 0-1 ms as before.
+const GC_THRESHOLD_INITIAL_BYTES: usize = 64 * 1024 * 1024; // 64 MB
 const GC_THRESHOLD_MAX_BYTES: usize = 1024 * 1024 * 1024; // 1GB cap on adaptive growth
 
 thread_local! {

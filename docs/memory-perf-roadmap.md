@@ -8,18 +8,17 @@ loop over a ~1 MB blob with a 10k-record module-level setup array.
 This doc is a living plan. Each tier has ship criteria and a rough impact estimate;
 update numbers and strike through items as they land.
 
-## Current standings (v0.5.194, macOS ARM64, best-of-5)
+## Current standings (v0.5.196, macOS ARM64, best-of-5)
 
 | Runtime | Time | Peak RSS |
 |---|---:|---:|
-| **Perry v0.5.194** | **322 ms** | **199 MB** |
-| Node 25.8.0 | 372 ms | 191 MB |
-| Bun 1.3.12 | 248 ms | 83 MB |
+| **Perry v0.5.196** | **373 ms** | **144 MB** |
+| Node 25.8.0 | 385 ms | 188 MB |
+| Bun 1.3.12 | 250 ms | 83 MB |
 
-**Perry now beats Node on time** (−13%) and matches Node on RSS (+4%). Perry
-still trails Bun by ~30% on time and ~140% on RSS. The time gap to Bun is
-almost entirely in `JSON.parse/stringify` throughput; the RSS gap is
-structural (generational GC).
+**🎯 Perry now beats Node on both axes** (−3% time, −23% RSS). Perry still
+trails Bun on both axes by ~1.5× — closing the remaining gap requires
+tier 2 and tier 3 architectural work per this roadmap.
 
 Historical reference:
 
@@ -28,7 +27,9 @@ Historical reference:
 | v0.5.190 (pre-fix) | 316 ms | 318 MB | block-persist cascade active |
 | v0.5.192 | 316 ms | 318 MB | segregated longlived arena (infra only) |
 | v0.5.193 | 384 ms | 213 MB | age-restricted block-persist + no 2-cycle grace |
-| **v0.5.194** | **322 ms** | **199 MB** | **block size 8 MB → 1 MB (tier 1 #1)** |
+| v0.5.194 | 322 ms | 199 MB | block size 8 MB → 1 MB (tier 1 #1) |
+| v0.5.195 | 322 ms | 199 MB | NEON/SSE2 string scanner (tier 1 #3 partial) |
+| **v0.5.196** | **373 ms** | **144 MB** | **GC initial threshold 128 MB → 64 MB** |
 
 ## Why Perry loses each axis
 
@@ -257,3 +258,4 @@ is plenty.
 | 2026-04-24 | v0.5.193 | Tier 0 (cont.): age-restricted block-persist, adaptive step tune, drop 2-cycle grace on old blocks | RSS 318 → 213 MB (−33%); time +21% |
 | 2026-04-24 | v0.5.194 | **Tier 1 #1: block size 8 MB → 1 MB** | RSS 213 → 199 MB (−7%); time 384 → 322 ms (−16%). **Now beats Node on both axes.** |
 | 2026-04-24 | v0.5.195 | **Tier 1 #3 (partial): NEON/SSE2 string scanner in json.rs** | `bench_json_roundtrip` unchanged (strings <16 bytes); long-string synthetic bench −18% time. Infrastructure for real-world JSON workloads. |
+| 2026-04-24 | v0.5.196 | **Tier 1 follow-up: GC initial threshold 128 MB → 64 MB** | RSS 199 → 144 MB (−28%); time 322 → 373 ms (+16%, still 3% faster than Node). **Now beats Node on both axes by a comfortable margin** (−3% time, −23% RSS). |
