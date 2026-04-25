@@ -3009,8 +3009,45 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             });
             ctx.pop_block_scope(for_scope_mark);
         }
-        _ => {
-            // TODO: handle more statement types
+        // Empty statement (`;`) — nothing to lower.
+        ast::Stmt::Empty(_) => {}
+        // `debugger;` is a no-op in AOT compilation.
+        ast::Stmt::Debugger(_) => {}
+        // Type-only declarations are fully erased at compile time.
+        ast::Stmt::Decl(ast::Decl::TsInterface(_))
+        | ast::Stmt::Decl(ast::Decl::TsTypeAlias(_)) => {}
+        // Body-local enum / namespace are valid TS but Perry only registers them
+        // at module scope (see lower.rs::lower_module). Silently dropping them
+        // here produced runtime ReferenceErrors at the use site instead of a
+        // compile diagnostic — fail loud so the user knows to hoist the decl.
+        ast::Stmt::Decl(ast::Decl::TsEnum(enum_decl)) => {
+            crate::lower_bail!(
+                enum_decl.span,
+                "enum declared inside a function body is not supported; declare it at module scope"
+            );
+        }
+        ast::Stmt::Decl(ast::Decl::TsModule(ts_module)) => {
+            crate::lower_bail!(
+                ts_module.span,
+                "namespace/module declared inside a function body is not supported; declare it at module scope"
+            );
+        }
+        // `with` is forbidden under TS strict-mode (the implicit default for
+        // ES modules) — Perry does not implement dynamic scope chains.
+        ast::Stmt::With(with_stmt) => {
+            crate::lower_bail!(
+                with_stmt.span,
+                "`with` statement is not supported (also forbidden in strict mode)"
+            );
+        }
+        // Final catch-all: any genuinely unexpected variant (e.g. a future
+        // swc Stmt variant we haven't enumerated) bails instead of silently
+        // dropping the statement.
+        other => {
+            return Err(anyhow!(
+                "lower_body_stmt: unhandled statement variant {:?}",
+                std::mem::discriminant(other)
+            ));
         }
     }
 

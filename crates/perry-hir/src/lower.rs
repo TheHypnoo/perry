@@ -4960,7 +4960,9 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 // Global Infinity identifier
                 Ok(Expr::Number(f64::INFINITY))
             } else {
-                // Assume it's a global (like console)
+                // GlobalGet(0) is a sentinel: codegen routes by name from the
+                // parent PropertyGet/Call/Member context. Bare uses lower to
+                // 0.0 (perry-codegen/src/expr.rs Expr::GlobalGet arm).
                 if name != "console" && name != "process" && name != "globalThis" && name != "Buffer"
                     && name != "Date" && name != "JSON" && name != "Math" && name != "Object"
                     && name != "Array" && name != "String" && name != "Number" && name != "Boolean"
@@ -4974,8 +4976,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     && name != "Headers" && name != "fetch" && name != "crypto" && name != "performance"
                     && name != "queueMicrotask" && name != "structuredClone" && name != "atob" && name != "btoa"
                     && name != "BigInt" {
+                    eprintln!(
+                        "  Warning: unknown identifier '{}' — assuming global; member access will dispatch by name at runtime, bare reads lower to 0",
+                        name
+                    );
                 }
-                Ok(Expr::GlobalGet(0)) // TODO: proper global lookup
+                Ok(Expr::GlobalGet(0))
             }
         }
         ast::Expr::Bin(bin) => {
@@ -5898,15 +5904,33 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             let method_name = method_ident.sym.to_string();
                             // Lower the object expression first
                             let object_expr = lower_expr(ctx, &member.obj)?;
-                            // Check if it's a NativeMethodCall for a math library
+                            // Check if it's a NativeMethodCall for a fluent-API native module
                             if let Expr::NativeMethodCall { module, class_name, .. } = &object_expr {
                                 // Methods that return the same type (builder pattern)
                                 let is_math_lib = matches!(module.as_str(), "big.js" | "decimal.js" | "bignumber.js");
-                                let is_fluent_method = matches!(method_name.as_str(),
+                                let is_math_method = matches!(method_name.as_str(),
                                     "plus" | "minus" | "times" | "div" | "mod" |
                                     "pow" | "sqrt" | "abs" | "neg" | "round" | "floor" | "ceil" | "toFixed"
                                 );
-                                if is_math_lib && is_fluent_method {
+                                // commander Command — every fluent method either
+                                // returns the same handle (name/version/description/
+                                // option/requiredOption/action) or a sub-Command with
+                                // the same module + class (.command(name)). Either way
+                                // the next chained call must dispatch through the
+                                // commander NativeModSig table, not the generic
+                                // dynamic-property fallback. Without this branch
+                                // `program.name(...).version(...)` only the first
+                                // call landed as a NativeMethodCall and the rest
+                                // silently no-op'd at codegen — issue #187.
+                                let is_commander = module.as_str() == "commander";
+                                let is_commander_method = matches!(method_name.as_str(),
+                                    "name" | "version" | "description" |
+                                    "option" | "requiredOption" |
+                                    "action" | "command" | "parse" | "opts"
+                                );
+                                if (is_math_lib && is_math_method)
+                                    || (is_commander && is_commander_method)
+                                {
                                     return Ok(Expr::NativeMethodCall {
                                         module: module.clone(),
                                         class_name: class_name.clone(),
