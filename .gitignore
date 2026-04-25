@@ -32,6 +32,13 @@ tests/test-*
 !tests/*/
 bench_*
 !bench_*.ts
+# Polyglot JSON benchmark source files (one per language).
+!benchmarks/json_polyglot/bench_*.cpp
+!benchmarks/json_polyglot/bench_*.go
+!benchmarks/json_polyglot/bench_*.rs
+!benchmarks/json_polyglot/bench_*.swift
+!benchmarks/json_polyglot/bench_*.kt
+!benchmarks/json_polyglot/bench_*.java
 
 # Compiled benchmark binaries in suite/ (01_startup, 05_fibonacci, etc.)
 benchmarks/suite/[0-9][0-9]_*

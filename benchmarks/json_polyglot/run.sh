@@ -126,8 +126,10 @@ compute_stats() {
 # Run a binary RUNS times under the pinning prefix, collect all ms values
 # and the worst-case RSS, write a row to RESULTS_FILE plus a stdout line.
 #
-# Usage: run_bench <profile> <label> <env-string> <command...>
+# Usage: run_bench <workload> <profile> <label> <env-string> <command...>
+#   workload: "roundtrip" or "field_access" — used to group rows in RESULTS.md.
 run_bench() {
+    local workload="$1"; shift
     local profile="$1"; shift
     local label="$1"; shift
     local env_str="$1"; shift
@@ -167,10 +169,10 @@ run_bench() {
     IFS='|' read -r median p95 stddev min max <<< "$stats"
     local rss_mb
     rss_mb=$(awk -v b="$worst_rss" 'BEGIN { printf "%d", b/1048576 }')
-    printf "  %-44s  median=%-4s p95=%-4s σ=%-4s [%s..%s] ms · %s MB\n" \
-        "$label ($profile)" "$median" "$p95" "$stddev" "$min" "$max" "$rss_mb"
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-        "$median" "$label" "$profile" "$p95" "$stddev" "$min" "$max" "$rss_mb" \
+    printf "  [%-12s] %-44s  median=%-4s p95=%-4s σ=%-4s [%s..%s] ms · %s MB\n" \
+        "$workload" "$label ($profile)" "$median" "$p95" "$stddev" "$min" "$max" "$rss_mb"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$workload" "$median" "$label" "$profile" "$p95" "$stddev" "$min" "$max" "$rss_mb" \
         >> "$RESULTS_FILE"
 }
 
@@ -182,10 +184,15 @@ run_bench() {
 # ---------------------------------------------------------------------------
 echo "=== Perry ==="
 if [[ -x "$PERRY" ]]; then
-    "$PERRY" compile bench.ts -o "$TMPDIR/perry_bin" >/dev/null 2>&1
-    if [[ -x "$TMPDIR/perry_bin" ]]; then
-        run_bench "optimized"  "perry (gen-gc + lazy tape)"   ""                      "$TMPDIR/perry_bin"
-        run_bench "idiomatic"  "perry (mark-sweep, no lazy)"  "PERRY_GEN_GC=0 PERRY_JSON_TAPE=0" "$TMPDIR/perry_bin"
+    "$PERRY" compile bench.ts              -o "$TMPDIR/perry_rt"  >/dev/null 2>&1
+    "$PERRY" compile bench_field_access.ts -o "$TMPDIR/perry_fa"  >/dev/null 2>&1
+    if [[ -x "$TMPDIR/perry_rt" ]]; then
+        run_bench "roundtrip"    "optimized" "perry (gen-gc + lazy tape)"  ""                                 "$TMPDIR/perry_rt"
+        run_bench "roundtrip"    "idiomatic" "perry (mark-sweep, no lazy)" "PERRY_GEN_GC=0 PERRY_JSON_TAPE=0" "$TMPDIR/perry_rt"
+    fi
+    if [[ -x "$TMPDIR/perry_fa" ]]; then
+        run_bench "field_access" "optimized" "perry (gen-gc + lazy tape)"  ""                                 "$TMPDIR/perry_fa"
+        run_bench "field_access" "idiomatic" "perry (mark-sweep, no lazy)" "PERRY_GEN_GC=0 PERRY_JSON_TAPE=0" "$TMPDIR/perry_fa"
     fi
 else
     echo "  Perry binary not found at $PERRY — run 'cargo build --release -p perry' first"
@@ -196,7 +203,8 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Bun ==="
 if have bun; then
-    run_bench "idiomatic" "bun (default)" "" bun bench.ts
+    run_bench "roundtrip"    "idiomatic" "bun (default)" "" bun bench.ts
+    run_bench "field_access" "idiomatic" "bun (default)" "" bun bench_field_access.ts
 fi
 
 # ---------------------------------------------------------------------------
@@ -204,8 +212,10 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Node.js ==="
 if have node; then
-    run_bench "idiomatic" "node (default)"        ""  node --experimental-strip-types bench.ts
-    run_bench "optimized" "node --max-old=4096"   ""  node --experimental-strip-types --max-old-space-size=4096 bench.ts
+    run_bench "roundtrip"    "idiomatic" "node (default)"      ""  node --experimental-strip-types bench.ts
+    run_bench "roundtrip"    "optimized" "node --max-old=4096" ""  node --experimental-strip-types --max-old-space-size=4096 bench.ts
+    run_bench "field_access" "idiomatic" "node (default)"      ""  node --experimental-strip-types bench_field_access.ts
+    run_bench "field_access" "optimized" "node --max-old=4096" ""  node --experimental-strip-types --max-old-space-size=4096 bench_field_access.ts
 fi
 
 # ---------------------------------------------------------------------------
@@ -213,14 +223,14 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Go ==="
 if have go; then
-    go build -o "$TMPDIR/bench_go_idio" bench.go 2>&1 | tail -3
-    if [[ -x "$TMPDIR/bench_go_idio" ]]; then
-        run_bench "idiomatic" "go (encoding/json)" "" "$TMPDIR/bench_go_idio"
-    fi
-    go build -ldflags="-s -w" -trimpath -o "$TMPDIR/bench_go_opt" bench.go 2>&1 | tail -3
-    if [[ -x "$TMPDIR/bench_go_opt" ]]; then
-        run_bench "optimized" "go -ldflags=\"-s -w\" -trimpath" "" "$TMPDIR/bench_go_opt"
-    fi
+    go build -o "$TMPDIR/bench_go_rt_idio"  bench.go              2>&1 | tail -3
+    go build -o "$TMPDIR/bench_go_fa_idio"  bench_field_access.go 2>&1 | tail -3
+    go build -ldflags="-s -w" -trimpath -o "$TMPDIR/bench_go_rt_opt" bench.go              2>&1 | tail -3
+    go build -ldflags="-s -w" -trimpath -o "$TMPDIR/bench_go_fa_opt" bench_field_access.go 2>&1 | tail -3
+    [[ -x "$TMPDIR/bench_go_rt_idio" ]] && run_bench "roundtrip"    "idiomatic" "go (encoding/json)"             "" "$TMPDIR/bench_go_rt_idio"
+    [[ -x "$TMPDIR/bench_go_rt_opt"  ]] && run_bench "roundtrip"    "optimized" "go -ldflags=\"-s -w\" -trimpath" "" "$TMPDIR/bench_go_rt_opt"
+    [[ -x "$TMPDIR/bench_go_fa_idio" ]] && run_bench "field_access" "idiomatic" "go (encoding/json)"             "" "$TMPDIR/bench_go_fa_idio"
+    [[ -x "$TMPDIR/bench_go_fa_opt"  ]] && run_bench "field_access" "optimized" "go -ldflags=\"-s -w\" -trimpath" "" "$TMPDIR/bench_go_fa_opt"
 fi
 
 # ---------------------------------------------------------------------------
@@ -229,13 +239,11 @@ fi
 echo "=== Rust ==="
 if have cargo; then
     cargo build --release --target-dir "$TMPDIR/cargo_target" --quiet 2>&1 | tail -5
-    if [[ -x "$TMPDIR/cargo_target/release/bench" ]]; then
-        run_bench "idiomatic" "rust serde_json" "" "$TMPDIR/cargo_target/release/bench"
-    fi
     cargo build --profile release-aggressive --target-dir "$TMPDIR/cargo_target" --quiet 2>&1 | tail -5
-    if [[ -x "$TMPDIR/cargo_target/release-aggressive/bench" ]]; then
-        run_bench "optimized" "rust serde_json (LTO+1cgu)" "" "$TMPDIR/cargo_target/release-aggressive/bench"
-    fi
+    [[ -x "$TMPDIR/cargo_target/release/bench"                            ]] && run_bench "roundtrip"    "idiomatic" "rust serde_json"             "" "$TMPDIR/cargo_target/release/bench"
+    [[ -x "$TMPDIR/cargo_target/release/bench_field_access"               ]] && run_bench "field_access" "idiomatic" "rust serde_json"             "" "$TMPDIR/cargo_target/release/bench_field_access"
+    [[ -x "$TMPDIR/cargo_target/release-aggressive/bench"                 ]] && run_bench "roundtrip"    "optimized" "rust serde_json (LTO+1cgu)" "" "$TMPDIR/cargo_target/release-aggressive/bench"
+    [[ -x "$TMPDIR/cargo_target/release-aggressive/bench_field_access"    ]] && run_bench "field_access" "optimized" "rust serde_json (LTO+1cgu)" "" "$TMPDIR/cargo_target/release-aggressive/bench_field_access"
 fi
 
 # ---------------------------------------------------------------------------
@@ -243,14 +251,14 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Swift ==="
 if have swiftc; then
-    swiftc -O bench.swift -o "$TMPDIR/bench_swift_idio" 2>&1 | tail -3
-    if [[ -x "$TMPDIR/bench_swift_idio" ]]; then
-        run_bench "idiomatic" "swift -O (Foundation)" "" "$TMPDIR/bench_swift_idio"
-    fi
-    swiftc -O -wmo bench.swift -o "$TMPDIR/bench_swift_opt" 2>&1 | tail -3
-    if [[ -x "$TMPDIR/bench_swift_opt" ]]; then
-        run_bench "optimized" "swift -O -wmo (Foundation)" "" "$TMPDIR/bench_swift_opt"
-    fi
+    swiftc -O      bench.swift              -o "$TMPDIR/bench_swift_rt_idio" 2>&1 | tail -3
+    swiftc -O      bench_field_access.swift -o "$TMPDIR/bench_swift_fa_idio" 2>&1 | tail -3
+    swiftc -O -wmo bench.swift              -o "$TMPDIR/bench_swift_rt_opt"  2>&1 | tail -3
+    swiftc -O -wmo bench_field_access.swift -o "$TMPDIR/bench_swift_fa_opt"  2>&1 | tail -3
+    [[ -x "$TMPDIR/bench_swift_rt_idio" ]] && run_bench "roundtrip"    "idiomatic" "swift -O (Foundation)"     "" "$TMPDIR/bench_swift_rt_idio"
+    [[ -x "$TMPDIR/bench_swift_rt_opt"  ]] && run_bench "roundtrip"    "optimized" "swift -O -wmo (Foundation)" "" "$TMPDIR/bench_swift_rt_opt"
+    [[ -x "$TMPDIR/bench_swift_fa_idio" ]] && run_bench "field_access" "idiomatic" "swift -O (Foundation)"     "" "$TMPDIR/bench_swift_fa_idio"
+    [[ -x "$TMPDIR/bench_swift_fa_opt"  ]] && run_bench "field_access" "optimized" "swift -O -wmo (Foundation)" "" "$TMPDIR/bench_swift_fa_opt"
 fi
 
 # ---------------------------------------------------------------------------
@@ -262,12 +270,19 @@ KOTLINC_LIB=$(brew --prefix kotlin 2>/dev/null)/libexec/lib
 if have kotlinc && [[ -d "$GRADLE_LIB" ]] && [[ -d "$KOTLINC_LIB" ]]; then
     SERIALIZATION_CP="$GRADLE_LIB/kotlinx-serialization-core-jvm-1.9.0.jar:$GRADLE_LIB/kotlinx-serialization-json-jvm-1.9.0.jar"
     PLUGIN="$KOTLINC_LIB/kotlinx-serialization-compiler-plugin.jar"
-    kotlinc -Xplugin="$PLUGIN" -classpath "$SERIALIZATION_CP" -include-runtime -d "$TMPDIR/bench_kt.jar" bench.kt 2>&1 | tail -3
-    if [[ -f "$TMPDIR/bench_kt.jar" ]]; then
-        run_bench "idiomatic" "kotlin (kotlinx.serialization)" "" \
-            java -cp "$TMPDIR/bench_kt.jar:$SERIALIZATION_CP" BenchKt
-        run_bench "optimized" "kotlin -server -Xmx512m" "" \
-            java -server -Xmx512m -cp "$TMPDIR/bench_kt.jar:$SERIALIZATION_CP" BenchKt
+    kotlinc -Xplugin="$PLUGIN" -classpath "$SERIALIZATION_CP" -include-runtime -d "$TMPDIR/bench_kt_rt.jar" bench.kt              2>&1 | tail -3
+    kotlinc -Xplugin="$PLUGIN" -classpath "$SERIALIZATION_CP" -include-runtime -d "$TMPDIR/bench_kt_fa.jar" bench_field_access.kt 2>&1 | tail -3
+    if [[ -f "$TMPDIR/bench_kt_rt.jar" ]]; then
+        run_bench "roundtrip" "idiomatic" "kotlin (kotlinx.serialization)" "" \
+            java                  -cp "$TMPDIR/bench_kt_rt.jar:$SERIALIZATION_CP" BenchKt
+        run_bench "roundtrip" "optimized" "kotlin -server -Xmx512m"        "" \
+            java -server -Xmx512m -cp "$TMPDIR/bench_kt_rt.jar:$SERIALIZATION_CP" BenchKt
+    fi
+    if [[ -f "$TMPDIR/bench_kt_fa.jar" ]]; then
+        run_bench "field_access" "idiomatic" "kotlin (kotlinx.serialization)" "" \
+            java                  -cp "$TMPDIR/bench_kt_fa.jar:$SERIALIZATION_CP" Bench_field_accessKt
+        run_bench "field_access" "optimized" "kotlin -server -Xmx512m"        "" \
+            java -server -Xmx512m -cp "$TMPDIR/bench_kt_fa.jar:$SERIALIZATION_CP" Bench_field_accessKt
     fi
 else
     echo "  kotlinc / gradle JARs not found — skipping (brew install kotlin gradle)"
@@ -278,14 +293,14 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== C++ ==="
 if have clang++ && [[ -d "$NLOHMANN_INCLUDE" ]]; then
-    clang++ -std=c++17 -O2 -I"$NLOHMANN_INCLUDE" bench.cpp -o "$TMPDIR/bench_cpp_idio" 2>&1 | tail -3
-    if [[ -x "$TMPDIR/bench_cpp_idio" ]]; then
-        run_bench "idiomatic" "c++ -O2 (nlohmann/json)" "" "$TMPDIR/bench_cpp_idio"
-    fi
-    clang++ -std=c++17 -O3 -flto -I"$NLOHMANN_INCLUDE" bench.cpp -o "$TMPDIR/bench_cpp_opt" 2>&1 | tail -3
-    if [[ -x "$TMPDIR/bench_cpp_opt" ]]; then
-        run_bench "optimized" "c++ -O3 -flto (nlohmann/json)" "" "$TMPDIR/bench_cpp_opt"
-    fi
+    clang++ -std=c++17 -O2          -I"$NLOHMANN_INCLUDE" bench.cpp              -o "$TMPDIR/bench_cpp_rt_idio" 2>&1 | tail -3
+    clang++ -std=c++17 -O2          -I"$NLOHMANN_INCLUDE" bench_field_access.cpp -o "$TMPDIR/bench_cpp_fa_idio" 2>&1 | tail -3
+    clang++ -std=c++17 -O3 -flto    -I"$NLOHMANN_INCLUDE" bench.cpp              -o "$TMPDIR/bench_cpp_rt_opt"  2>&1 | tail -3
+    clang++ -std=c++17 -O3 -flto    -I"$NLOHMANN_INCLUDE" bench_field_access.cpp -o "$TMPDIR/bench_cpp_fa_opt"  2>&1 | tail -3
+    [[ -x "$TMPDIR/bench_cpp_rt_idio" ]] && run_bench "roundtrip"    "idiomatic" "c++ -O2 (nlohmann/json)"      "" "$TMPDIR/bench_cpp_rt_idio"
+    [[ -x "$TMPDIR/bench_cpp_rt_opt"  ]] && run_bench "roundtrip"    "optimized" "c++ -O3 -flto (nlohmann/json)" "" "$TMPDIR/bench_cpp_rt_opt"
+    [[ -x "$TMPDIR/bench_cpp_fa_idio" ]] && run_bench "field_access" "idiomatic" "c++ -O2 (nlohmann/json)"      "" "$TMPDIR/bench_cpp_fa_idio"
+    [[ -x "$TMPDIR/bench_cpp_fa_opt"  ]] && run_bench "field_access" "optimized" "c++ -O3 -flto (nlohmann/json)" "" "$TMPDIR/bench_cpp_fa_opt"
 fi
 
 # ---------------------------------------------------------------------------
@@ -294,19 +309,46 @@ fi
 {
     echo "# JSON Polyglot Benchmark Results"
     echo
-    echo "**Workload:** parse + stringify a 10,000-record (~1 MB) JSON array, 50 iterations per run."
     echo "**Runs per cell:** $RUNS · **Pinning:** $PIN_NOTE"
     echo "**Hardware:** $(uname -srm) on $(hostname -s)."
     echo "**Date:** $(date -u +%Y-%m-%d)."
     echo
-    echo "Each language listed twice — *idiomatic* (default release-mode flags most projects use) and *optimized* (aggressive tuning). Median wall-clock time is the headline number; p95 (worst-of-best-95%), σ (population stddev), min, and max are reported per cell so noise is visible. Lower is better; sorted by median time."
+    echo "Two workloads, each language listed twice (idiomatic / optimized flag profile)."
+    echo "Median wall-clock time is the headline number; p95, σ (population stddev),"
+    echo "min, and max are reported per cell so noise is visible. Lower is better."
+    echo
+    echo "## JSON validate-and-roundtrip"
+    echo
+    echo "Per iteration: parse → stringify → discard. The unmutated parse lets"
+    echo "Perry's lazy tape (v0.5.204+) memcpy the original blob bytes for"
+    echo "stringify, which is why Perry's headline number on this workload is so"
+    echo "low — the lazy path can avoid materializing the parse tree entirely."
+    echo "10k records, ~1 MB blob, 50 iterations per run."
     echo
     echo "| Implementation | Profile | Median (ms) | p95 (ms) | σ | Min | Max | Peak RSS (MB) |"
     echo "|---|---|---:|---:|---:|---:|---:|---:|"
-    sort -t$'\t' -k1 -n "$RESULTS_FILE" | while IFS=$'\t' read -r median label profile p95 stddev mn mx rss; do
-        printf "| %s | %s | %s | %s | %s | %s | %s | %s |\n" \
-            "$label" "$profile" "$median" "$p95" "$stddev" "$mn" "$mx" "$rss"
-    done
+    awk -F'\t' '$1 == "roundtrip"' "$RESULTS_FILE" \
+        | sort -t$'\t' -k2 -n \
+        | while IFS=$'\t' read -r workload median label profile p95 stddev mn mx rss; do
+            printf "| %s | %s | %s | %s | %s | %s | %s | %s |\n" \
+                "$label" "$profile" "$median" "$p95" "$stddev" "$mn" "$mx" "$rss"
+        done
+    echo
+    echo "## JSON parse-and-iterate"
+    echo
+    echo "Per iteration: parse → sum every record's nested.x (touches every element)"
+    echo "→ stringify. The full-tree iteration FORCES Perry's lazy tape to"
+    echo "materialize, so this is the honest comparison for workloads that touch"
+    echo "JSON content. 10k records, ~1 MB blob, 50 iterations per run."
+    echo
+    echo "| Implementation | Profile | Median (ms) | p95 (ms) | σ | Min | Max | Peak RSS (MB) |"
+    echo "|---|---|---:|---:|---:|---:|---:|---:|"
+    awk -F'\t' '$1 == "field_access"' "$RESULTS_FILE" \
+        | sort -t$'\t' -k2 -n \
+        | while IFS=$'\t' read -r workload median label profile p95 stddev mn mx rss; do
+            printf "| %s | %s | %s | %s | %s | %s | %s | %s |\n" \
+                "$label" "$profile" "$median" "$p95" "$stddev" "$mn" "$mx" "$rss"
+        done
 } > RESULTS.md
 
 echo

@@ -161,7 +161,7 @@ run_lang() {
     local lang="$1" cmd="$2"
     local results="$TMPDIR/results_${lang}.tsv"
     : > "$results"
-    for bk in "fibonacci:fibonacci" "loop_overhead:loop_overhead" "array_write:array_write" "array_read:array_read" "math_intensive:math_intensive" "object_create:object_create" "nested_loops:nested_loops" "accumulate:accumulate"; do
+    for bk in "fibonacci:fibonacci" "loop_overhead:loop_overhead" "loop_data_dependent:loop_data_dependent" "array_write:array_write" "array_read:array_read" "math_intensive:math_intensive" "object_create:object_create" "nested_loops:nested_loops" "accumulate:accumulate"; do
         IFS=: read -r bench key <<< "$bk"
         local stats
         stats=$(stats_of "$cmd" "$key")
@@ -172,7 +172,7 @@ run_lang() {
 
 # Perry (per-bench binary)
 : > "$TMPDIR/results_perry.tsv"
-for bk in "fibonacci:05_fibonacci:fibonacci" "loop_overhead:02_loop_overhead:loop_overhead" "array_write:03_array_write:array_write" "array_read:04_array_read:array_read" "math_intensive:06_math_intensive:math_intensive" "object_create:07_object_create:object_create" "nested_loops:10_nested_loops:nested_loops" "accumulate:13_factorial:accumulate"; do
+for bk in "fibonacci:05_fibonacci:fibonacci" "loop_overhead:02_loop_overhead:loop_overhead" "loop_data_dependent:17_loop_data_dependent:loop_data_dependent" "array_write:03_array_write:array_write" "array_read:04_array_read:array_read" "math_intensive:06_math_intensive:math_intensive" "object_create:07_object_create:object_create" "nested_loops:10_nested_loops:nested_loops" "accumulate:13_factorial:accumulate"; do
     IFS=: read -r bench ts key <<< "$bk"
     stats=$(stats_of "$TMPDIR/perry_${ts}" "$key")
     printf "%s\t%s\n" "$bench" "$stats" >> "$TMPDIR/results_perry.tsv"
@@ -181,7 +181,7 @@ echo "  Perry: done"
 
 # Node (per .ts file)
 : > "$TMPDIR/results_node.tsv"
-for bk in "fibonacci:05_fibonacci:fibonacci" "loop_overhead:02_loop_overhead:loop_overhead" "array_write:03_array_write:array_write" "array_read:04_array_read:array_read" "math_intensive:06_math_intensive:math_intensive" "object_create:07_object_create:object_create" "nested_loops:10_nested_loops:nested_loops" "accumulate:13_factorial:accumulate"; do
+for bk in "fibonacci:05_fibonacci:fibonacci" "loop_overhead:02_loop_overhead:loop_overhead" "loop_data_dependent:17_loop_data_dependent:loop_data_dependent" "array_write:03_array_write:array_write" "array_read:04_array_read:array_read" "math_intensive:06_math_intensive:math_intensive" "object_create:07_object_create:object_create" "nested_loops:10_nested_loops:nested_loops" "accumulate:13_factorial:accumulate"; do
     IFS=: read -r bench ts key <<< "$bk"
     stats=$(stats_of "node --experimental-strip-types $SUITE/${ts}.ts" "$key")
     printf "%s\t%s\n" "$bench" "$stats" >> "$TMPDIR/results_node.tsv"
@@ -191,14 +191,14 @@ echo "  Node: done"
 # Bun
 : > "$TMPDIR/results_bun.tsv"
 if [ $HAS_BUN -eq 1 ]; then
-    for bk in "fibonacci:05_fibonacci:fibonacci" "loop_overhead:02_loop_overhead:loop_overhead" "array_write:03_array_write:array_write" "array_read:04_array_read:array_read" "math_intensive:06_math_intensive:math_intensive" "object_create:07_object_create:object_create" "nested_loops:10_nested_loops:nested_loops" "accumulate:13_factorial:accumulate"; do
+    for bk in "fibonacci:05_fibonacci:fibonacci" "loop_overhead:02_loop_overhead:loop_overhead" "loop_data_dependent:17_loop_data_dependent:loop_data_dependent" "array_write:03_array_write:array_write" "array_read:04_array_read:array_read" "math_intensive:06_math_intensive:math_intensive" "object_create:07_object_create:object_create" "nested_loops:10_nested_loops:nested_loops" "accumulate:13_factorial:accumulate"; do
         IFS=: read -r bench ts key <<< "$bk"
         stats=$(stats_of "bun run $SUITE/${ts}.ts" "$key")
         printf "%s\t%s\n" "$bench" "$stats" >> "$TMPDIR/results_bun.tsv"
     done
     echo "  Bun: done"
 else
-    for bench in fibonacci loop_overhead array_write array_read math_intensive object_create nested_loops accumulate; do
+    for bench in fibonacci loop_overhead loop_data_dependent array_write array_read math_intensive object_create nested_loops accumulate; do
         printf "%s\t-|-|-|-|-\n" "$bench" >> "$TMPDIR/results_bun.tsv"
     done
     echo "  Bun: skipped (not installed)"
@@ -207,7 +207,7 @@ fi
 # Hermes
 : > "$TMPDIR/results_hermes.tsv"
 if [ $HAS_SHERMES -eq 1 ]; then
-    for bk in "fibonacci:05_fibonacci:fibonacci" "loop_overhead:02_loop_overhead:loop_overhead" "array_write:03_array_write:array_write" "array_read:04_array_read:array_read" "math_intensive:06_math_intensive:math_intensive" "object_create:07_object_create:object_create" "nested_loops:10_nested_loops:nested_loops" "accumulate:13_factorial:accumulate"; do
+    for bk in "fibonacci:05_fibonacci:fibonacci" "loop_overhead:02_loop_overhead:loop_overhead" "loop_data_dependent:17_loop_data_dependent:loop_data_dependent" "array_write:03_array_write:array_write" "array_read:04_array_read:array_read" "math_intensive:06_math_intensive:math_intensive" "object_create:07_object_create:object_create" "nested_loops:10_nested_loops:nested_loops" "accumulate:13_factorial:accumulate"; do
         IFS=: read -r bench ts key <<< "$bk"
         if [ -x "$TMPDIR/shermes_${ts}" ]; then
             stats=$(stats_of "$TMPDIR/shermes_${ts}" "$key")
@@ -218,7 +218,7 @@ if [ $HAS_SHERMES -eq 1 ]; then
     done
     echo "  Hermes: done"
 else
-    for bench in fibonacci loop_overhead array_write array_read math_intensive object_create nested_loops accumulate; do
+    for bench in fibonacci loop_overhead loop_data_dependent array_write array_read math_intensive object_create nested_loops accumulate; do
         printf "%s\t-|-|-|-|-\n" "$bench" >> "$TMPDIR/results_hermes.tsv"
     done
     echo "  Hermes: skipped (not installed)"
@@ -259,11 +259,11 @@ stats_str() {
     echo
     echo "Headline = median wall-clock ms. Lower is better."
     echo
-    printf "| %-14s | %5s | %5s | %5s | %5s | %5s | %5s | %5s | %5s | %6s | %7s |\n" \
+    printf "| %-19s | %5s | %5s | %5s | %5s | %5s | %5s | %5s | %5s | %6s | %7s |\n" \
         "Benchmark" "Perry" "Rust" "C++" "Go" "Swift" "Java" "Node" "Bun" "Hermes" "Python"
-    echo "|----------------|-------|-------|-------|-------|-------|-------|-------|-------|--------|---------|"
-    for bench in fibonacci loop_overhead array_write array_read math_intensive object_create nested_loops accumulate; do
-        printf "| %-14s | %5s | %5s | %5s | %5s | %5s | %5s | %5s | %5s | %6s | %7s |\n" \
+    echo "|---------------------|-------|-------|-------|-------|-------|-------|-------|-------|--------|---------|"
+    for bench in fibonacci loop_overhead loop_data_dependent array_write array_read math_intensive object_create nested_loops accumulate; do
+        printf "| %-19s | %5s | %5s | %5s | %5s | %5s | %5s | %5s | %5s | %6s | %7s |\n" \
             "$bench" \
             "$(median_of perry  $bench || echo -)" \
             "$(median_of rust   $bench || echo -)" \
@@ -283,7 +283,7 @@ stats_str() {
     echo
     echo "| Benchmark | Runtime | Stats (ms) |"
     echo "|---|---|---|"
-    for bench in fibonacci loop_overhead array_write array_read math_intensive object_create nested_loops accumulate; do
+    for bench in fibonacci loop_overhead loop_data_dependent array_write array_read math_intensive object_create nested_loops accumulate; do
         for lang in perry rust cpp go swift java node bun hermes python; do
             echo "| $bench | $lang | $(stats_str $lang $bench) |"
         done

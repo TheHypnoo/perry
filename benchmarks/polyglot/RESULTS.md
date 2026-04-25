@@ -13,7 +13,7 @@ each delta.
 
 ## Results
 
-**Run date:** 2026-04-25 — Perry commit `main` (v0.5.243).
+**Run date:** 2026-04-25 — Perry commit `main` (v0.5.249).
 **Hardware:** Apple M1 Max (10 cores, 64 GB RAM), macOS 26.4.
 **Methodology:** RUNS=11 per cell. **Median wall-clock ms below**;
 full per-cell stats (median + p95 + σ + min + max) in `RESULTS_AUTO.md`.
@@ -21,16 +21,30 @@ full per-cell stats (median + p95 + σ + min + max) in `RESULTS_AUTO.md`.
 (P-core preferred via throughput/latency tiers, NOT strict affinity —
 Apple does not expose unprivileged hard core pinning). Lower is better.
 
-| Benchmark      | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |   Bun |  Python |
-|----------------|-------|-------|-------|-------|-------|-------|-------|-------|---------|
-| fibonacci      |   312 |   319 |   308 |   454 |   400 |   283 |  1016 |   518 |   15814 |
-| loop_overhead  |    12 |    96 |    97 |    98 |    97 |    99 |    56 |    41 |    2986 |
-| array_write    |     4 |     7 |     3 |     9 |     3 |     9 |     9 |     6 |     396 |
-| array_read     |     4 |     9 |     9 |    11 |     9 |    11 |    13 |    15 |     342 |
-| math_intensive |    14 |    48 |    50 |    51 |    49 |    51 |    49 |    50 |    2244 |
-| object_create  |     1 |     0 |     0 |     0 |     0 |     5 |     8 |     6 |     163 |
-| nested_loops   |    17 |     8 |     8 |    11 |     8 |    10 |    17 |    19 |     485 |
-| accumulate     |    34 |    95 |    95 |    98 |    98 |    98 |   598 |    98 |    5052 |
+| Benchmark           | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |   Bun |  Python |
+|---------------------|------:|------:|------:|------:|------:|------:|------:|------:|--------:|
+| fibonacci           |   318 |   330 |   315 |   451 |   406 |   282 |  1022 |   589 |   16054 |
+| loop_overhead       |    12 |    98 |    98 |    98 |   143 |   100 |    54 |    46 |    3019 |
+| **loop_data_dependent** | **231** | **229** | **247** | **132** | **228** | **231** | **233** | **233** | **10750** |
+| array_write         |     4 |     7 |     3 |     9 |     2 |     7 |     9 |     6 |     401 |
+| array_read          |     4 |     9 |     9 |    11 |     9 |    12 |    13 |    16 |     342 |
+| math_intensive      |    14 |    48 |    51 |    49 |    50 |    74 |    51 |    51 |    2238 |
+| object_create       |     1 |     0 |     0 |     0 |     0 |     5 |    11 |     6 |     164 |
+| nested_loops        |    18 |     8 |     8 |    10 |     8 |    11 |    18 |    21 |     484 |
+| accumulate          |    34 |    98 |    98 |    98 |    98 |   100 |   617 |   100 |    5048 |
+
+**New benchmark in v0.5.249: `loop_data_dependent`.** Same shape as
+`loop_overhead` but with a multiplicative carry through `sum` and
+runtime-loaded array reads, so LLVM cannot apply reassoc, IV-simplify,
+or autovectorization. The Rust version's loop body is verified at
+the asm level (see `bench.rs` line 122) — emits a 4-instruction
+scalar fmul/fadd chain with two array loads, no fold, no vectorize.
+**The result is the honest comparison**: Perry / Rust / C++ / Swift /
+Java / Node / Bun all land within 6 ms of each other (228-233 ms),
+because they're all running the same hardware-bound scalar loop. Go's
+132 ms is the outlier — Go's compiler applies more aggressive
+scheduling/unrolling on this specific kernel; we haven't traced
+exactly why.
 
 **Interesting tails surfaced by RUNS=11:**
 
