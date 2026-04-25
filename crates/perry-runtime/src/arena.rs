@@ -202,6 +202,23 @@ thread_local! {
     /// `scan_transition_cache_roots`) keep them marked.
     static LONGLIVED_ARENA: UnsafeCell<Arena> = UnsafeCell::new(Arena::new());
 
+    /// Generational-GC old-generation arena (gen-GC Phase B per
+    /// `docs/generational-gc-plan.md`). Holds objects PROMOTED from
+    /// the nursery (= the existing `ARENA`, treated as nursery in
+    /// the gen-GC model). Empty in Phase B — Phase C's minor GC
+    /// will populate it via the evacuation path. Same `Arena`
+    /// shape as the others; same walker / tracer integration so
+    /// every existing pass already covers it once `arena_walk_*`
+    /// extends to a third region.
+    ///
+    /// Old-arena blocks are never reset by `arena_reset_empty_blocks`
+    /// (same lifetime contract as longlived blocks — promotion
+    /// implies "expected to live indefinitely"), and never feed
+    /// the inline bump allocator. Major GC will eventually mark-
+    /// sweep them in Phase C+; today they accumulate forever
+    /// because nothing allocates into them.
+    static OLD_ARENA: UnsafeCell<Arena> = UnsafeCell::new(Arena::new());
+
     /// Inline allocator state — a cache of the current arena block's
     /// `(data, offset, size)` triple, exposed via a stable pointer so
     /// codegen can emit inline bump-allocate IR without going through
@@ -390,6 +407,44 @@ pub fn arena_alloc_gc_longlived(size: usize, align: usize, obj_type: u8) -> *mut
     unsafe { raw.add(GC_HEADER_SIZE) }
 }
 
+/// Allocate from the old-generation arena (gen-GC Phase B per
+/// `docs/generational-gc-plan.md`). Reserved for objects PROMOTED
+/// from the nursery (= the general `ARENA`) by Phase C's minor GC.
+/// No caller in Phase B — the promotion path lands in Phase C.
+/// Same layout as `arena_alloc_gc` so every walker/tracer/sweep
+/// already covers it via the `arena_walk_*` family extensions
+/// below.
+///
+/// Routes through a non-inline allocator path (no `INLINE_STATE`
+/// touch) so codegen's hot bump-pointer loop on `new ClassName()`
+/// stays exclusively pinned to the nursery.
+pub fn arena_alloc_old(size: usize, align: usize) -> *mut u8 {
+    OLD_ARENA.with(|a| unsafe {
+        let arena = &mut *a.get();
+        arena.alloc(size, align)
+    })
+}
+
+/// GcHeader-prefixed counterpart of `arena_alloc_old`. See
+/// `arena_alloc_gc_longlived` for the same shape on the longlived
+/// arena — only the backing region differs.
+pub fn arena_alloc_gc_old(size: usize, align: usize, obj_type: u8) -> *mut u8 {
+    use crate::gc::{GcHeader, GC_HEADER_SIZE, GC_FLAG_ARENA};
+
+    let total = GC_HEADER_SIZE + size;
+    let raw = arena_alloc_old(total, align);
+
+    unsafe {
+        let header = raw as *mut GcHeader;
+        (*header).obj_type = obj_type;
+        (*header).gc_flags = GC_FLAG_ARENA;
+        (*header)._reserved = 0;
+        (*header).size = total as u32;
+    }
+
+    unsafe { raw.add(GC_HEADER_SIZE) }
+}
+
 /// Allocate from arena with a GcHeader prepended.
 /// Returns pointer to usable memory AFTER the GcHeader.
 /// The object is NOT added to any tracking list — arena objects are discovered
@@ -489,6 +544,14 @@ pub fn arena_total_bytes() -> usize {
             total += block.size;
         }
     });
+    // Phase B: include old-gen blocks. Empty in Phase B; Phase C
+    // populates via promotion.
+    OLD_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        for block in &arena.blocks {
+            total += block.size;
+        }
+    });
     total
 }
 
@@ -507,6 +570,13 @@ pub fn arena_in_use_bytes() -> usize {
         }
     });
     LONGLIVED_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        for block in &arena.blocks {
+            used += block.offset;
+        }
+    });
+    // Phase B: include old-gen in-use bytes.
+    OLD_ARENA.with(|arena| {
         let arena = unsafe { &*arena.get() };
         for block in &arena.blocks {
             used += block.offset;
@@ -571,6 +641,13 @@ pub fn arena_walk_objects(mut callback: impl FnMut(*mut u8)) {
         let arena = unsafe { &*arena.get() };
         walk_region(&arena.blocks);
     });
+    // Phase B: walk old-gen blocks too. Empty until Phase C
+    // populates them, but the walk is already free in that case
+    // (zero blocks → zero iterations).
+    OLD_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        walk_region(&arena.blocks);
+    });
 }
 
 /// Like `arena_walk_objects` but also passes the block's global index
@@ -617,9 +694,16 @@ pub fn arena_walk_objects_with_block_index(mut callback: impl FnMut(*mut u8, usi
         let arena = unsafe { &*arena.get() };
         walk_region(&arena.blocks, 0);
     });
-    LONGLIVED_ARENA.with(|arena| {
+    let longlived_n = LONGLIVED_ARENA.with(|arena| {
         let arena = unsafe { &*arena.get() };
         walk_region(&arena.blocks, general_n);
+        arena.blocks.len()
+    });
+    // Phase B: old-gen blocks. Indices begin at
+    // `general_n + longlived_n` per the global block-index plan.
+    OLD_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        walk_region(&arena.blocks, general_n + longlived_n);
     });
 }
 
@@ -676,27 +760,50 @@ pub fn arena_walk_objects_filtered(
         let arena = unsafe { &*arena.get() };
         walk_region(&arena.blocks, 0, &mut block_filter, &mut callback);
     });
-    LONGLIVED_ARENA.with(|arena| {
+    let longlived_n = LONGLIVED_ARENA.with(|arena| {
         let arena = unsafe { &*arena.get() };
         walk_region(&arena.blocks, general_n, &mut block_filter, &mut callback);
+        arena.blocks.len()
+    });
+    // Phase B: include old-gen blocks at indices
+    // `general_n + longlived_n..` per the global block-index plan.
+    OLD_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        walk_region(&arena.blocks, general_n + longlived_n, &mut block_filter, &mut callback);
     });
 }
 
 /// How many arena blocks are currently allocated across general +
-/// longlived arenas. Used by the sweep to size its per-block
-/// live-tracking `Vec<bool>` before walking objects.
+/// longlived + old arenas. Used by the sweep to size its per-block
+/// live-tracking `Vec<bool>` before walking objects. Block indices
+/// are global: `0..general_block_count()` for nursery,
+/// `..longlived_end()` for longlived, the rest for old-gen
+/// (gen-GC Phase B).
 pub fn arena_block_count() -> usize {
     let g = ARENA.with(|arena| unsafe { (*arena.get()).blocks.len() });
     let l = LONGLIVED_ARENA.with(|arena| unsafe { (*arena.get()).blocks.len() });
-    g + l
+    let o = OLD_ARENA.with(|arena| unsafe { (*arena.get()).blocks.len() });
+    g + l + o
 }
 
 /// Block-index range boundary: block indices `0..general_block_count()`
 /// belong to the general arena (eligible for reset), the rest belong to
-/// the longlived arena and must never be reset (issue #179).
+/// the longlived OR old-gen arenas and must never be reset (issue #179
+/// for longlived, gen-GC Phase B for old-gen — both are non-reset
+/// regions; only the nursery resets).
 #[inline]
 pub fn general_block_count() -> usize {
     ARENA.with(|arena| unsafe { (*arena.get()).blocks.len() })
+}
+
+/// Boundary between longlived and old-gen blocks. Indices
+/// `general_block_count()..longlived_end()` are longlived;
+/// `longlived_end()..arena_block_count()` are old-gen (gen-GC Phase B).
+#[inline]
+pub fn longlived_end() -> usize {
+    let g = ARENA.with(|arena| unsafe { (*arena.get()).blocks.len() });
+    let l = LONGLIVED_ARENA.with(|arena| unsafe { (*arena.get()).blocks.len() });
+    g + l
 }
 
 /// Fast path for the common case where the entire arena is empty
@@ -901,6 +1008,16 @@ pub fn longlived_in_use_bytes() -> usize {
     })
 }
 
+/// Bytes currently allocated in the old-gen arena (gen-GC Phase B).
+/// Diagnostic-only — empty in Phase B; populated by Phase C's
+/// nursery→old promotion path.
+pub fn old_gen_in_use_bytes() -> usize {
+    OLD_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        arena.blocks.iter().map(|b| b.offset).sum()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1003,5 +1120,99 @@ mod tests {
             }
         });
         assert!(found, "longlived alloc not located in any longlived block");
+    }
+
+    /// Gen-GC Phase B: an old-gen allocation must not land inside
+    /// any general-arena (= nursery) block. Mirror of
+    /// `longlived_pointer_is_disjoint_from_general_blocks`.
+    #[test]
+    fn old_gen_pointer_is_disjoint_from_nursery_blocks() {
+        let _gen_ptr = arena_alloc_gc(32, 8, GC_TYPE_STRING) as usize;
+        let old_ptr = arena_alloc_gc_old(40, 8, GC_TYPE_STRING) as usize;
+        let old_header = old_ptr - GC_HEADER_SIZE;
+        ARENA.with(|a| {
+            let arena = unsafe { &*a.get() };
+            for block in &arena.blocks {
+                let base = block.data as usize;
+                let end = base + block.size;
+                assert!(
+                    old_header < base || old_header >= end,
+                    "old-gen alloc landed inside a nursery block (got {:x}, block [{:x}, {:x}))",
+                    old_header, base, end,
+                );
+            }
+        });
+    }
+
+    /// Gen-GC Phase B: an old-gen allocation must not land inside
+    /// any longlived block either — three regions are pairwise
+    /// disjoint.
+    #[test]
+    fn old_gen_pointer_is_disjoint_from_longlived_blocks() {
+        let _ll = arena_alloc_gc_longlived(40, 8, GC_TYPE_STRING) as usize;
+        let old_ptr = arena_alloc_gc_old(40, 8, GC_TYPE_STRING) as usize;
+        let old_header = old_ptr - GC_HEADER_SIZE;
+        LONGLIVED_ARENA.with(|a| {
+            let arena = unsafe { &*a.get() };
+            for block in &arena.blocks {
+                let base = block.data as usize;
+                let end = base + block.size;
+                assert!(
+                    old_header < base || old_header >= end,
+                    "old-gen alloc landed inside a longlived block",
+                );
+            }
+        });
+    }
+
+    /// Gen-GC Phase B: walker must yield indices for old-gen
+    /// blocks at `>= longlived_end()`. Confirms the global block-
+    /// index plan: nursery first, then longlived, then old-gen.
+    #[test]
+    fn old_gen_walk_yields_indices_after_longlived() {
+        let _gen = arena_alloc_gc(24, 8, GC_TYPE_STRING) as usize;
+        let _ll = arena_alloc_gc_longlived(24, 8, GC_TYPE_STRING) as usize;
+        let old_ptr = arena_alloc_gc_old(24, 8, GC_TYPE_STRING) as usize;
+        let old_header = old_ptr - GC_HEADER_SIZE;
+        let boundary = longlived_end();
+        let mut found_at_idx: Option<usize> = None;
+        arena_walk_objects_with_block_index(|hdr, block_idx| {
+            if hdr as usize == old_header {
+                found_at_idx = Some(block_idx);
+            }
+        });
+        let idx = found_at_idx.expect("old-gen alloc not yielded by walker");
+        assert!(
+            idx >= boundary,
+            "old-gen block index {} should be >= longlived_end() {}",
+            idx, boundary,
+        );
+    }
+
+    /// Gen-GC Phase B: arena_reset_empty_blocks must NEVER touch
+    /// an old-gen block, even when every general/longlived/old
+    /// block is marked dead. Promotion implies indefinite lifetime.
+    #[test]
+    fn reset_never_clears_old_gen_blocks() {
+        let old_ptr = arena_alloc_gc_old(40, 8, GC_TYPE_STRING) as usize;
+        let old_header = old_ptr - GC_HEADER_SIZE;
+        let n_blocks = arena_block_count();
+        let all_dead = vec![false; n_blocks];
+        arena_reset_empty_blocks(&all_dead);
+        let mut still_alive = false;
+        OLD_ARENA.with(|a| {
+            let arena = unsafe { &*a.get() };
+            for block in &arena.blocks {
+                let base = block.data as usize;
+                if old_header >= base && old_header < base + block.size {
+                    assert!(
+                        block.offset > 0,
+                        "old-gen block reset to offset=0 despite reset guard",
+                    );
+                    still_alive = true;
+                }
+            }
+        });
+        assert!(still_alive, "old-gen alloc not located in any old-gen block");
     }
 }
