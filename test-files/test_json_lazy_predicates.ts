@@ -3,10 +3,8 @@
 // line below asserts the claim documented in docs/audit-lazy-json.md
 // Sections 5.6, 5.7, 7 (correctness table).
 
-/** @perry-lazy */
-
-// Build a blob > 1 KB so the lazy path fires under default settings
-// too, not just under the @perry-lazy pragma.
+// Build a blob > 1 KB so the lazy path fires under the auto-default
+// (LAZY_MIN_BLOB_BYTES = 1024).
 const items: any[] = [];
 for (let i = 0; i < 300; i++) {
   items.push({ id: i, n: "item_" + i });

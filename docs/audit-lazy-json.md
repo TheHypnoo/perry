@@ -32,10 +32,7 @@ without touching, the runtime memcpys the original blob bytes.
 user's perspective.** Every user-observable operation (length, indexed access,
 iteration, mutation, identity, stringify) produces byte-for-byte identical output
 compared to Node's `JSON.parse`, verified across an extensive test matrix
-(Section 10). The JSDoc comment `/** @perry-lazy */` that can force-enable the
-tape path is erased by TypeScript's type stripper and by Node's
-`--experimental-strip-types`, so source compiled by `tsc` runs identically on
-Node regardless of whether Perry's pragma is present.
+(Section 10).
 
 The flip from "opt-in via `PERRY_JSON_TAPE=1`" to "default-on above 1024 bytes"
 happened in 0.5.211 after the runtime adaptive handling (Sections 5.4, 5.5)
@@ -129,15 +126,16 @@ its variants are unchanged *except* for two small additions:
   an-unmutated lazy array without walking anything
   (`crates/perry-runtime/src/json.rs:2245-2315`).
 
-### 3.3 The `@perry-lazy` JSDoc pragma
+### 3.3 Removed: `@perry-lazy` JSDoc pragma
 
-A file containing the literal string `@perry-lazy` has every `JSON.parse`
-call lowered to a new HIR variant `Expr::JsonParseLazy` that always invokes
-the tape path at runtime, unconditional of size or env var
-(`crates/perry-hir/src/lower.rs::detect_lazy_json_pragma`,
-`lower_module_with_class_id_types_and_pragmas`). The pragma is semantically
-erased at the TypeScript layer — Node's `--experimental-strip-types` treats
-the JSDoc comment as plain source commentary and strips it entirely.
+Earlier versions (v0.5.207–v0.5.231) supported `/** @perry-lazy */` to
+force every `JSON.parse` in a file onto the tape path regardless of
+blob size. **Removed in v0.5.232** — the runtime auto-threshold
+(lazy ≥ 1024 bytes, direct otherwise) makes the right call without
+developer intervention; measurements showed forced-lazy was strictly
+slower than direct on sub-1KB blobs (the only case the pragma changed).
+The `PERRY_JSON_TAPE=0`/`=1` env-var escape hatch (Section 3.1) covers
+correctness fallback / testing without burdening source files.
 
 ---
 
@@ -608,9 +606,6 @@ is compared byte-for-byte to `node --experimental-strip-types`:
 - `test_json_lazy_iteration.ts` — sequential, reverse, random
   permutation, stringify after iteration, repeated identity across
   loops, adaptive threshold trip.
-- `test_json_pragma_lazy.ts` — `/** @perry-lazy */` pragma verifies
-  HIR routes through `JsonParseLazy` and output matches the
-  `PERRY_JSON_TAPE=1` env-forced path byte-for-byte.
 - `test_json_typed_{basic,array,nested,mismatch}.ts` — typed-parse
   (`JSON.parse<T>()`) correctness alongside lazy.
 
@@ -727,11 +722,8 @@ For reviewers verifying this document against source:
 - [ ] `js_json_parse` dispatch logic (size threshold + env mode):
       `json.rs:967-998`.
 - [ ] `tape_mode_from_env` cached via `OnceLock`: `json.rs:1061-1080`.
-- [ ] `detect_lazy_json_pragma` substring scan: `perry-hir/src/lower.rs`.
-- [ ] `Expr::JsonParseLazy` codegen emits `js_json_parse_lazy`:
-      `perry-codegen/src/expr.rs`.
-- [ ] Every test in `test-files/test_json_{lazy,pragma,typed}_*.ts`
-      passes byte-for-byte vs Node under all three env modes.
+- [ ] Every test in `test-files/test_json_{lazy,typed}_*.ts` passes
+      byte-for-byte vs Node under default + `PERRY_JSON_TAPE=1` modes.
 
 ---
 
@@ -747,6 +739,7 @@ For reviewers verifying this document against source:
   `IndexGet` paths so `parsed[i]` doesn't read `LazyArrayHeader`
   fields as array elements. Added comprehensive edge-case tests.
 - **0.5.207** — `@perry-lazy` JSDoc pragma for per-file opt-in.
+  *(Removed in v0.5.232 — runtime auto-threshold made it redundant.)*
 - **0.5.208** — Per-element sparse materialization + bitmap. Eliminated
   the indexed-access cliff (was 1.3× slower than eager → became
   2.9× faster).

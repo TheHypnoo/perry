@@ -730,7 +730,6 @@ fn collect_closures_in_expr(
         // Reflect.* and other iterator/json wrappers — can carry callbacks.
         Expr::IteratorToArray(o) | Expr::ArrayIsArray(o) => walk(o, seen, out),
         Expr::JsonStringify(o) | Expr::JsonParse(o) => walk(o, seen, out),
-        Expr::JsonParseLazy(o) => walk(o, seen, out),
         Expr::JsonParseTyped { text, .. } => walk(text, seen, out),
         Expr::JsonStringifyPretty { value, replacer, space } => {
             walk(value, seen, out);
@@ -920,7 +919,6 @@ fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
             walk(operand, out);
         }
         Expr::JsonParseTyped { text, .. } => walk(text, out),
-        Expr::JsonParseLazy(text) => walk(text, out),
         Expr::Call { callee, args, .. } => {
             walk(callee, out);
             for a in args {
@@ -2127,7 +2125,6 @@ fn collect_localset_ids_in_expr_filtered(
             walk(operand, out);
         }
         Expr::JsonParseTyped { text, .. } => walk(text, out),
-        Expr::JsonParseLazy(text) => walk(text, out),
         Expr::Call { callee, args, .. } => {
             walk(callee, out);
             for a in args {
@@ -3003,9 +3000,6 @@ fn check_escapes_in_expr(
             check_escapes_in_expr(operand, candidates, classes, escaped);
         }
         Expr::JsonParseTyped { text, .. } => {
-            check_escapes_in_expr(text, candidates, classes, escaped);
-        }
-        Expr::JsonParseLazy(text) => {
             check_escapes_in_expr(text, candidates, classes, escaped);
         }
         Expr::Conditional { condition, then_expr, else_expr } => {

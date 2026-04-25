@@ -1,8 +1,6 @@
 // Per-element sparse materialization edge-case coverage. Must match
 // Node byte-for-byte under direct (default) and lazy
-// (PERRY_JSON_TAPE=1 / @perry-lazy pragma) paths.
-
-/** @perry-lazy */
+// (`PERRY_JSON_TAPE=1` env-var) paths.
 
 interface Rec { id: number; name: string; nested: { x: number }; tags: string[]; }
 

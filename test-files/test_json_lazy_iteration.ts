@@ -1,9 +1,7 @@
-// Full-iteration + random-access patterns for the lazy path.
-// Sequential iteration uses the walk cursor (O(1) per step);
-// random access hits the adaptive threshold and flips to tree
-// access after cumulative walk steps exceed 2× cached_length.
-
-/** @perry-lazy */
+// Full-iteration + random-access patterns. The lazy path is
+// exercised by the regression sweep under `PERRY_JSON_TAPE=1`;
+// here we just verify access patterns are correctness-equivalent
+// to Node regardless of representation.
 
 const blob = JSON.stringify([
   { id: 0, v: 10 },

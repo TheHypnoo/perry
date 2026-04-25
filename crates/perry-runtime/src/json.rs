@@ -990,8 +990,6 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
     // unaudited code path on the lazy side). `PERRY_JSON_TAPE=1`
     // forces tape for every parse including small ones (useful for
     // testing). Any other value is treated as "auto" (the default).
-    // `@perry-lazy` pragma still forces tape at the codegen level
-    // via `js_json_parse_lazy`, unconditional of size.
     const LAZY_MIN_BLOB_BYTES: usize = 1024;
     let tape_mode = tape_mode_from_env();
     let use_tape = match tape_mode {
@@ -1166,30 +1164,6 @@ unsafe fn try_parse_via_tape(
     });
 
     Some(result)
-}
-
-/// Issue #179 Step 2 follow-up: `@perry-lazy` pragma entry point.
-/// Always routes through the tape path, no env-var check. Used by
-/// codegen when the enclosing module has the `@perry-lazy` JSDoc
-/// directive. Falls back to `js_json_parse` on malformed input so
-/// the error-reporting path is identical.
-///
-/// Node compatibility: `@perry-lazy` lives in a JSDoc comment —
-/// `tsc` erases it and Node runs plain `JSON.parse(blob)` with no
-/// observable difference (the lazy representation is semantically
-/// identical to the eager tree for every observable operation).
-#[no_mangle]
-pub unsafe extern "C" fn js_json_parse_lazy(text_ptr: *const StringHeader) -> JSValue {
-    if text_ptr.is_null() {
-        return js_json_parse(text_ptr);
-    }
-    let len = (*text_ptr).byte_len as usize;
-    let data_ptr = (text_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-    let bytes = std::slice::from_raw_parts(data_ptr, len);
-    if let Some(result) = try_parse_via_tape(text_ptr, bytes) {
-        return result;
-    }
-    js_json_parse(text_ptr)
 }
 
 // ─── JSON.parse<T[]>: schema-directed typed parse ─────────────────────────────
