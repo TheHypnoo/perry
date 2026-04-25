@@ -178,6 +178,14 @@ pub struct ImportedClass {
     pub parent_name: Option<String>,
     /// Field names in declaration order (for allocation sizing and field index mapping).
     pub field_names: Vec<String>,
+    /// Field types in the same order as `field_names`. Required for
+    /// `receiver_class_name` to walk through chained `obj.a.b.c` accesses
+    /// where `a` and `b` are fields whose declared type is itself an
+    /// imported class. Without this, every field access on an imported
+    /// class returns `Type::Any` and the dispatch chain breaks at the
+    /// first hop. Empty (or filled with `Type::Any`) is the legacy fallback
+    /// when the source side hasn't been updated to populate it yet.
+    pub field_types: Vec<perry_types::Type>,
     /// Class id assigned by the source module. When present, the importing
     /// module reuses this id in its `class_ids` map so that `instanceof`
     /// on an imported class compares against the same id stamped onto
@@ -393,9 +401,14 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             extends: None,
             extends_name: ic.parent_name.clone(),
             native_extends: None,
-            fields: ic.field_names.iter().map(|name| perry_hir::ClassField {
+            fields: ic.field_names.iter().enumerate().map(|(i, name)| perry_hir::ClassField {
                 name: name.clone(),
-                ty: perry_types::Type::Any,
+                // Use the real declared type when the source-side
+                // populated `field_types`; fall back to `Any` otherwise.
+                // Real types let `receiver_class_name`'s `PropertyGet`
+                // recursion identify chained imported-class field
+                // dispatch (e.g. `vm.viewport.scroll.scrollTop`).
+                ty: ic.field_types.get(i).cloned().unwrap_or(perry_types::Type::Any),
                 init: None,
                 is_private: false,
                 is_readonly: false,

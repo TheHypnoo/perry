@@ -5297,6 +5297,7 @@ pub fn run_with_parse_cache(
                                         setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                                         parent_name: class.extends_name.clone(),
                                         field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                                        field_types: class.fields.iter().map(|f| f.ty.clone()).collect(),
                                         source_class_id: Some(class.id),
                                     });
                                 }
@@ -5357,6 +5358,7 @@ pub fn run_with_parse_cache(
                             setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                             parent_name: class.extends_name.clone(),
                             field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                            field_types: class.fields.iter().map(|f| f.ty.clone()).collect(),
                             source_class_id: Some(class.id),
                         });
                     }
@@ -5457,8 +5459,66 @@ pub fn run_with_parse_cache(
                             setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                             parent_name: class.extends_name.clone(),
                             field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                            field_types: class.fields.iter().map(|f| f.ty.clone()).collect(),
                             source_class_id: Some(class.id),
                         });
+                    }
+                }
+            }
+
+            // Transitive class closure: pull in classes referenced by
+            // field types of already-imported classes. Without this, a
+            // chain like `vm.viewport.scroll.scrollTop` (where vm is
+            // `EditorViewModel`, `viewport: ViewportManager`, `scroll:
+            // ScrollController`) breaks at the first hop because only
+            // `EditorViewModel` lives in `imported_classes` for this
+            // module — `receiver_class_name` can't walk through
+            // `viewport.scroll` because `ViewportManager` isn't in
+            // `class_table` and its field types are unknown. Closing
+            // over field types lets `PropertyGet` recursion resolve
+            // the receiver class at every step of the chain.
+            let mut visited_imports: std::collections::HashSet<String> = imported_classes
+                .iter()
+                .map(|ic| ic.name.clone())
+                .collect();
+            let mut closure_worklist: Vec<String> =
+                visited_imports.iter().cloned().collect();
+            while let Some(name) = closure_worklist.pop() {
+                let ic_idx = imported_classes
+                    .iter()
+                    .position(|ic| ic.name == name);
+                let Some(idx) = ic_idx else { continue };
+                let field_types_clone = imported_classes[idx].field_types.clone();
+                for ty in &field_types_clone {
+                    let ref_name = match ty {
+                        perry_types::Type::Named(n) => n.clone(),
+                        perry_types::Type::Generic { base, .. } => base.clone(),
+                        _ => continue,
+                    };
+                    if visited_imports.contains(&ref_name) {
+                        continue;
+                    }
+                    let found = exported_classes
+                        .iter()
+                        .find(|((_, cname), _)| cname == &ref_name)
+                        .map(|((path, _), class)| (path.clone(), *class));
+                    if let Some((src_path, class)) = found {
+                        let class_prefix = compute_module_prefix(&src_path, &ctx.project_root);
+                        imported_classes.push(perry_codegen::ImportedClass {
+                            name: class.name.clone(),
+                            local_alias: None,
+                            source_prefix: class_prefix,
+                            constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
+                            method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
+                            setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
+                            parent_name: class.extends_name.clone(),
+                            field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                            field_types: class.fields.iter().map(|f| f.ty.clone()).collect(),
+                            source_class_id: Some(class.id),
+                        });
+                        visited_imports.insert(ref_name.clone());
+                        closure_worklist.push(ref_name);
                     }
                 }
             }
@@ -8761,6 +8821,7 @@ mod object_cache_tests {
             setter_names: vec![],
             parent_name: None,
             field_names: vec!["x".into()],
+            field_types: vec![],
             source_class_id: Some(42),
         });
         b.imported_classes.push(ImportedClass {
@@ -8773,6 +8834,7 @@ mod object_cache_tests {
             setter_names: vec![],
             parent_name: None,
             field_names: vec!["x".into()],
+            field_types: vec![],
             source_class_id: Some(42),
         });
         assert_ne!(
