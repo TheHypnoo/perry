@@ -1019,9 +1019,15 @@ pub extern "C" fn js_promise_all_settled(promises_arr: *const crate::array::Arra
 
     for i in 0..count {
         let promise_f64 = js_array_get_f64(promises_arr, i);
-        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
 
-        if promise_ptr.is_null() {
+        // Only treat as a Promise if the value is a POINTER_TAG that walks
+        // back to a GcHeader with obj_type == GC_TYPE_PROMISE. Otherwise
+        // (string, plain number, undefined, null, object, etc.) wrap the
+        // value as already-fulfilled — Promise.allSettled spec passes any
+        // non-thenable through as `{status: "fulfilled", value}`.
+        let is_promise = js_value_is_promise(promise_f64) != 0;
+
+        if !is_promise {
             // Non-promise value — wrap as fulfilled and decrement
             let wrapped = build_settled_fulfilled(promise_f64);
             js_array_set_f64(results_arr, i, wrapped);
@@ -1029,6 +1035,8 @@ pub extern "C" fn js_promise_all_settled(promises_arr: *const crate::array::Arra
             js_array_set_f64(state_arr, 0, remaining);
             continue;
         }
+
+        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
 
         // Fulfill: store {status:"fulfilled", value:v}
         let fulfill_closure = js_closure_alloc(promise_all_settled_fulfill_handler as *const u8, 4);
