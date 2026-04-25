@@ -31,10 +31,6 @@
     "status": "skip",
     "reason": "Compile failure — TLS connect not implemented"
   },
-  "test_edge_rest_spread_defaults": {
-    "status": "bug",
-    "reason": "Rest-parameter array elements interpreted as raw doubles instead of NaN-boxed strings (parts.join() prints scientific-notation numbers)"
-  },
   "test_gap_buffer_ops": {
     "status": "ci-env",
     "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Likely SDK/linker version interaction; perry CLI itself is fine"

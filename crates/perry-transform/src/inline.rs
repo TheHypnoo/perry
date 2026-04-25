@@ -214,6 +214,19 @@ fn is_inlinable(func: &Function) -> bool {
         return false;
     }
 
+    // Don't inline functions with rest parameters. The current call-site
+    // arg-handling maps each formal param to one actual arg via param_map;
+    // a rest param needs the trailing args bundled into a synthetic
+    // `Expr::Array(...)` setup_stmt, which the inliner does not emit.
+    // Without that, only the first trailing arg ends up bound to the
+    // rest param (as a scalar), and the body's `parts.length` /
+    // `parts[i]` / `parts.join(...)` then operate on whatever scalar
+    // value happened to be passed — strings get treated as
+    // single-element arrays, numbers as raw doubles, etc.
+    if func.params.iter().any(|p| p.is_rest) {
+        return false;
+    }
+
     // Don't inline functions that are too large
     if func.body.len() > MAX_INLINE_STMTS {
         return false;
