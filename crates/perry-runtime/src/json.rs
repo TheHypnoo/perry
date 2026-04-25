@@ -2351,8 +2351,16 @@ unsafe fn try_stringify_lazy_array(value: f64) -> Option<*mut StringHeader> {
     let bits = value.to_bits();
     let top16 = bits >> 48;
     let maybe_ptr = if top16 == 0x7FFD {
+        // POINTER_TAG NaN-box: lower 48 bits are the user pointer.
         (bits & 0x0000_FFFF_FFFF_FFFF) as *const u8
-    } else if top16 < 0x7FF8 {
+    } else if top16 == 0 {
+        // Raw heap pointer (no NaN-box tag). User-space addresses on
+        // 64-bit systems fit in the lower 48 bits, so a real raw
+        // pointer has top16 == 0. The previous `top16 < 0x7FF8` check
+        // also accepted regular f64 numbers (e.g. 42.0 has top16
+        // 0x4045) and `gc_header = bits - 8` then dereferenced random
+        // memory, segfaulting `JSON.stringify(42)` at
+        // `0x4044_FFFF_FFFF_FFF8`.
         bits as *const u8
     } else {
         return None;
