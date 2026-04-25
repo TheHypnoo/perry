@@ -62,6 +62,21 @@ pub const GC_FLAG_SHAPE_SHARED: u8 = 0x08;
 /// mutation and allows `js_object_set_field_by_name` to skip the
 /// FNV-1a hash (pointer identity is sufficient for interned strings).
 pub const GC_FLAG_INTERNED: u8 = 0x10;
+/// Gen-GC Phase C4: object has survived at least PROMOTION_AGE
+/// minor GCs and is now logically tenured — minor GC trace skips
+/// recursion into its fields, exactly like an OLD_ARENA-allocated
+/// object. Stored on the GcHeader so the per-object check is one
+/// byte load + one bit-and. Non-moving generational: tenured
+/// objects stay physically in nursery (no copying / forwarding-
+/// pointer machinery), but the trace pretends they're old-gen.
+/// True compacting evacuation lands in Phase C4b.
+pub const GC_FLAG_TENURED: u8 = 0x20;
+/// Gen-GC Phase C4: object has survived exactly one minor GC.
+/// Set during the post-trace age-bump pass; on the next minor GC,
+/// the age-bump pass observes this flag and promotes the object
+/// to TENURED. Two-bit aging (HAS_SURVIVED → TENURED) gives
+/// PROMOTION_AGE=2 without needing a counter field.
+pub const GC_FLAG_HAS_SURVIVED: u8 = 0x40;
 
 // Object flags stored in GcHeader._reserved (u16) for Object.freeze/seal/preventExtensions
 pub const OBJ_FLAG_FROZEN: u16 = 0x01;
@@ -859,6 +874,55 @@ pub fn gc_collect_minor() -> u64 {
     trace_marked_objects_minor(&valid_ptrs);
     mark_block_persisting_arena_objects(&valid_ptrs);
 
+    // === AGE-BUMP PASS (gen-GC Phase C4) ===
+    // After tracing, any nursery object still carrying
+    // GC_FLAG_MARKED has survived this collection. Two-bit aging
+    // (HAS_SURVIVED → TENURED) gives PROMOTION_AGE=2:
+    //   - First survival:  set HAS_SURVIVED.
+    //   - Second survival: set TENURED, clear HAS_SURVIVED.
+    //
+    // Tenured objects are skipped by `drain_trace_worklist_minor`
+    // on subsequent minor GCs — bounded by the time-win
+    // generational design promises. They stay PHYSICALLY in nursery
+    // (no copying) so RSS doesn't drop until Phase C4b lands real
+    // evacuation; this commit is the time-win half of C4.
+    //
+    // Skip OLD_ARENA objects (already old; no aging needed) and
+    // non-arena objects (malloc'd strings/closures/etc. — they
+    // don't go through nursery in this design; their lifetime is
+    // managed by MALLOC_STATE sweep regardless of generation).
+    crate::arena::arena_walk_objects(|header_ptr| {
+        let header = header_ptr as *mut GcHeader;
+        unsafe {
+            let user_ptr = (header as *mut u8).add(GC_HEADER_SIZE);
+            // Skip OLD_ARENA objects.
+            if crate::arena::pointer_in_old_gen(user_ptr as usize) {
+                return;
+            }
+            // Only age objects that survived this trace. MARKED
+            // (reached transitively from roots) OR PINNED (kept
+            // alive by sweep regardless of mark) — the latter
+            // matches block-persist's "still alive" predicate.
+            if (*header).gc_flags & (GC_FLAG_MARKED | GC_FLAG_PINNED) == 0 {
+                return;
+            }
+            let flags = (*header).gc_flags;
+            if flags & GC_FLAG_TENURED != 0 {
+                // Already tenured — nothing to do.
+                return;
+            }
+            if flags & GC_FLAG_HAS_SURVIVED != 0 {
+                // Second survival: promote to tenured, clear the
+                // intermediate aging bit.
+                (*header).gc_flags = (flags | GC_FLAG_TENURED) & !GC_FLAG_HAS_SURVIVED;
+            } else {
+                // First survival: mark HAS_SURVIVED, will tenure
+                // on next minor GC.
+                (*header).gc_flags = flags | GC_FLAG_HAS_SURVIVED;
+            }
+        }
+    });
+
     // === SWEEP PHASE ===
     let freed_bytes = sweep();
 
@@ -1410,19 +1474,22 @@ fn drain_trace_worklist_inner(
 
         unsafe {
             let user_ptr = (header as *mut u8).add(GC_HEADER_SIZE);
-            // C3b generational skip: in minor mode, an object in
-            // the old-gen arena is treated as a black leaf — its
-            // mark bit is set (already done by the caller via
-            // try_mark_value), but we don't recurse into its
-            // fields. Any young-gen pointer it holds was recorded
-            // in the RS at write-barrier time and got its young
-            // child marked separately when `mark_remembered_set_roots`
-            // ran. False-positive RS entries (RS lists a parent
-            // whose write has since been overwritten) are
-            // correctness-safe — extra young objects stay alive
+            // C3b/C4 generational skip: in minor mode, an object
+            // is treated as a black leaf when it lives in OLD_ARENA
+            // (Phase B physical region) OR carries GC_FLAG_TENURED
+            // (Phase C4 logical promotion — non-moving generational).
+            // Either way its fields aren't recursively visited;
+            // young children it holds reach the worklist via the
+            // remembered set scan from C3a. False-positive RS
+            // entries (parent whose write has since been overwritten)
+            // are correctness-safe — extra young objects stay alive
             // for one cycle, swept on the next.
-            if minor_only && crate::arena::pointer_in_old_gen(user_ptr as usize) {
-                continue;
+            if minor_only {
+                let is_old_arena = crate::arena::pointer_in_old_gen(user_ptr as usize);
+                let is_tenured = (*header).gc_flags & GC_FLAG_TENURED != 0;
+                if is_old_arena || is_tenured {
+                    continue;
+                }
             }
             match (*header).obj_type {
                 GC_TYPE_ARRAY => trace_array(user_ptr, valid_ptrs, worklist),
@@ -2855,6 +2922,45 @@ mod tests {
         let _freed = gc_collect_minor();
         assert_eq!(remembered_set_size(), 0,
             "minor GC must clear RS just like full GC does");
+    }
+
+    #[test]
+    fn test_minor_gc_promotes_after_two_survivals() {
+        reset_remembered_set();
+        // Allocate an arena object and pin it so it survives every GC.
+        let user_ptr = crate::arena::arena_alloc_gc(64, 8, GC_TYPE_OBJECT);
+        unsafe {
+            let header = header_from_user_ptr(user_ptr);
+            (*header).gc_flags |= GC_FLAG_PINNED;
+            // Initial state: not yet survived, not tenured.
+            assert_eq!((*header).gc_flags & GC_FLAG_HAS_SURVIVED, 0);
+            assert_eq!((*header).gc_flags & GC_FLAG_TENURED, 0);
+        }
+        // First minor GC: object survives, gets HAS_SURVIVED bit.
+        let _ = gc_collect_minor();
+        unsafe {
+            let header = header_from_user_ptr(user_ptr);
+            assert_ne!((*header).gc_flags & GC_FLAG_HAS_SURVIVED, 0,
+                "first survival should set HAS_SURVIVED");
+            assert_eq!((*header).gc_flags & GC_FLAG_TENURED, 0,
+                "first survival should not yet tenure");
+        }
+        // Second minor GC: HAS_SURVIVED + survives → TENURED, clear HAS_SURVIVED.
+        let _ = gc_collect_minor();
+        unsafe {
+            let header = header_from_user_ptr(user_ptr);
+            assert_ne!((*header).gc_flags & GC_FLAG_TENURED, 0,
+                "second survival should tenure");
+            assert_eq!((*header).gc_flags & GC_FLAG_HAS_SURVIVED, 0,
+                "tenuring should clear HAS_SURVIVED");
+        }
+        // Third minor GC: stays tenured idempotently.
+        let _ = gc_collect_minor();
+        unsafe {
+            let header = header_from_user_ptr(user_ptr);
+            assert_ne!((*header).gc_flags & GC_FLAG_TENURED, 0,
+                "tenured stays tenured across subsequent collections");
+        }
     }
 
     #[test]
