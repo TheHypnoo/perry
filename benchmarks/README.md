@@ -492,9 +492,7 @@ the comparison is honest in both directions.
   (Step 2 partially done; more in flight).
 - **Go's `optimized` ≈ idiomatic.** `-ldflags="-s -w" -trimpath`
   strips debug info; no measurable perf delta. Included so the
-  table doesn't look like Go was unfairly held back. Go has no
-  `-ffast-math` flag; `accumulate` and `loop_overhead` deltas in
-  the compute table are unrecoverable in stock Go.
+  table doesn't look like Go was unfairly held back.
 - **Swift's slow time is real, not a setup problem.** `-O -wmo`
   is what Swift Package Manager release builds use. The Foundation
   JSON pipeline goes through `Mirror`-based reflection on `Codable`
@@ -604,8 +602,11 @@ sweep. Highlights:
   there's no way to expose LLVM's `reassoc` flag on individual
   fadd instructions without nightly's `fadd_fast` intrinsic. With
   manual i64 accumulator + iterator form: 99 → 24 ms (still 2× off).
-- **Go cannot close the gap at all**: no `-ffast-math`, no
-  `reassoc` flag, the Go compiler doesn't ship that pipeline.
+- **Go has no `-ffast-math` flag and can't enable LLVM's reassoc
+  pipeline**; on the optimization-probe kernels in this section,
+  Go can't recover Perry's lead. (Go does win on
+  `loop_data_dependent` via FMA fusion — see TL;DR — so this
+  limitation is workload-specific.)
 - **Swift `-O -wmo` closes 71-75% of the gap** on
   `loop_overhead` / `math_intensive` / `accumulate`.
 
@@ -726,9 +727,9 @@ Where Perry actually wins, and a one-line "why" per item.
 
 - **JSON validate-and-roundtrip — best in dynamic-typing pack**
   (parse → stringify, no intermediate iteration). Perry lands at
-  **75 ms** median (TL;DR §A) — beats every other dynamic-typing
-  runtime in the table: 3.5× over Bun (259 ms), 5.3× over Node
-  (394 ms), 6.0× over Kotlin server JIT (453 ms). simdjson leads
+  **75 ms** median (TL;DR §A) — faster than every other
+  dynamic-typing runtime in the table: Bun 259 ms, Node 394 ms,
+  Kotlin server JIT 453 ms. simdjson leads
   the absolute time at 24 ms — that's the SIMD-accelerated C++
   reference, listed alongside nlohmann/json so the comparison is
   honest in both directions. Perry's win in the dynamic-typing
