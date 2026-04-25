@@ -1018,6 +1018,45 @@ pub fn old_gen_in_use_bytes() -> usize {
     })
 }
 
+/// Gen-GC Phase C: is `addr` inside any nursery (= general
+/// `ARENA`) block? Hot-path predicate for the write barrier —
+/// "is the child of this store a young-gen pointer?". Linear
+/// scan over nursery blocks; typically 5-30 blocks per thread,
+/// each compare is one branch + one less-than. Will be replaced
+/// by a single bit-test on the GcHeader's GC_FLAG_YOUNG once the
+/// nursery alloc path sets that flag (sub-phase C3).
+#[inline]
+pub fn pointer_in_nursery(addr: usize) -> bool {
+    ARENA.with(|a| unsafe {
+        let arena = &*a.get();
+        for block in &arena.blocks {
+            let base = block.data as usize;
+            if addr >= base && addr < base + block.size {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+/// Gen-GC Phase C: is `addr` inside any old-gen arena block?
+/// Mirror of `pointer_in_nursery`. Empty in Phase B (returns
+/// false), populated in Phase C+ as promotion lands objects in
+/// the old region.
+#[inline]
+pub fn pointer_in_old_gen(addr: usize) -> bool {
+    OLD_ARENA.with(|a| unsafe {
+        let arena = &*a.get();
+        for block in &arena.blocks {
+            let base = block.data as usize;
+            if addr >= base && addr < base + block.size {
+                return true;
+            }
+        }
+        false
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

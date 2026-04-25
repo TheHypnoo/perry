@@ -2010,6 +2010,115 @@ pub fn json_parse_root_scanner(mark: &mut dyn FnMut(f64)) {
     crate::json::scan_parse_roots(mark);
 }
 
+// ---------------------------------------------------------------------------
+// Phase C — write barrier + remembered set
+// (docs/generational-gc-plan.md §Phase C)
+// ---------------------------------------------------------------------------
+//
+// Generational GC needs to know which old-gen objects hold
+// references to young-gen objects, so a minor GC can scan just
+// those (the "remembered set") instead of the entire old-gen.
+//
+// The write barrier fires on every heap store. Semantics:
+//   if parent is OLD and child points to YOUNG, add parent to
+//   the remembered set.
+//
+// Sub-phase C1 (this commit): runtime infrastructure — barrier
+// function + remembered set storage + unit tests. No codegen
+// emission yet (sub-phase C2). No minor GC consuming the set
+// yet (sub-phase C3).
+//
+// Bounded false-positive policy: the remembered set is a HashSet
+// of GcHeader pointers (NOT card-marks). False positives are
+// safe (extra scan during minor GC, no correctness impact); false
+// negatives would skip a live young-gen object and break
+// correctness. The current implementation uses HashSet<usize>
+// because pointer-tagged f64 NaN-boxing means the same heap
+// pointer can appear via different tag bytes; storing the
+// canonicalized GcHeader address dedups across tag variants.
+
+thread_local! {
+    /// Set of OLD-gen GcHeader addresses that have been written to
+    /// with a YOUNG-gen pointer since the last minor GC. Cleared
+    /// by minor GC after the remembered-set scan (Phase C3).
+    pub(crate) static REMEMBERED_SET: std::cell::RefCell<std::collections::HashSet<usize>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Gen-GC Phase C1: the write barrier. Called by codegen-emitted
+/// store sites (after sub-phase C2 wires the emission).
+///
+/// Decode the parent + child as raw addresses. If parent's
+/// GcHeader sits in the old-gen arena AND child's NaN-boxed
+/// pointer (any of POINTER / STRING / BIGINT / SHORT_STRING)
+/// resolves to a heap address inside the nursery, record the
+/// parent's GcHeader in the remembered set.
+///
+/// Hot-path constraints: this fires on EVERY heap store in
+/// compiled code once C2 lands. Must be cheap. The current
+/// O(blocks) range checks via `pointer_in_*` will be optimized
+/// to a single bit-test on `GcHeader::gc_flags & GC_FLAG_YOUNG`
+/// in sub-phase C3 — this commit's predicate is the simple
+/// correct-but-slower form so the C2 codegen wiring can land
+/// without a perf cliff (gated behind PERRY_WRITE_BARRIERS=1).
+#[no_mangle]
+pub extern "C" fn js_write_barrier(parent: u64, child: u64) {
+    // Decode the parent — must be a NaN-boxed pointer (POINTER /
+    // STRING / BIGINT / SHORT_STRING) or a raw heap address.
+    let parent_addr = decode_heap_addr(parent);
+    if parent_addr == 0 { return; }
+    // Decode child similarly.
+    let child_addr = decode_heap_addr(child);
+    if child_addr == 0 { return; }
+    // Old → young check.
+    if !crate::arena::pointer_in_old_gen(parent_addr) { return; }
+    if !crate::arena::pointer_in_nursery(child_addr) { return; }
+    // Parent's GcHeader sits at parent_addr - GC_HEADER_SIZE.
+    let header = parent_addr.saturating_sub(GC_HEADER_SIZE);
+    REMEMBERED_SET.with(|s| {
+        s.borrow_mut().insert(header);
+    });
+}
+
+/// Decode a NaN-boxed value into a heap address. Returns 0 for
+/// non-pointer values (numbers / booleans / undefined / null).
+/// Accepts POINTER_TAG / STRING_TAG / BIGINT_TAG / SHORT_STRING_TAG;
+/// SHORT_STRING values return 0 because they're inline data, not
+/// heap pointers.
+#[inline]
+fn decode_heap_addr(bits: u64) -> usize {
+    let tag = bits & TAG_MASK;
+    if tag == POINTER_TAG || tag == STRING_TAG || tag == BIGINT_TAG {
+        (bits & POINTER_MASK) as usize
+    } else if tag < 0x7FF8_0000_0000_0000 {
+        // Plain double — could be a raw bitcast pointer (rare).
+        // Treat as non-pointer in the barrier; minor GC's precise
+        // root scan still catches anything reachable via the
+        // shadow stack.
+        0
+    } else {
+        // SHORT_STRING_TAG (0x7FF9), INT32_TAG (0x7FFE),
+        // primitive (0x7FFC), JS_HANDLE (0x7FFB) — none are
+        // young-gen pointers.
+        0
+    }
+}
+
+/// Gen-GC Phase C: read the current remembered set size — used
+/// by tests and `PERRY_GC_DIAG=1` output to confirm barrier
+/// activity. Returns 0 in Phase C1 since no codegen-emitted
+/// barrier has fired yet.
+pub fn remembered_set_size() -> usize {
+    REMEMBERED_SET.with(|s| s.borrow().len())
+}
+
+/// Gen-GC Phase C: clear the remembered set. Will be called by
+/// minor GC after the rs-scan completes (Phase C3). Test-only
+/// for now to enable test isolation.
+pub fn remembered_set_clear() {
+    REMEMBERED_SET.with(|s| s.borrow_mut().clear());
+}
+
 /// Root scanner for the shadow stack (gen-GC Phase A sub-phase 4).
 /// Walks every live slot in every pushed frame and invokes `mark`
 /// with the slot's NaN-boxed f64 value. The mark callback's
@@ -2464,6 +2573,88 @@ mod tests {
         js_shadow_frame_pop(c);
         js_shadow_frame_pop(b);
         js_shadow_frame_pop(a);
+    }
+
+    /// Helper for write-barrier tests: clear the remembered set
+    /// to a known-empty state.
+    fn reset_remembered_set() {
+        REMEMBERED_SET.with(|s| s.borrow_mut().clear());
+    }
+
+    #[test]
+    fn test_write_barrier_old_to_young_records() {
+        reset_remembered_set();
+        let young = crate::arena::arena_alloc_gc(40, 8, GC_TYPE_OBJECT) as usize;
+        let old = crate::arena::arena_alloc_gc_old(40, 8, GC_TYPE_OBJECT) as usize;
+        let parent_nanbox = POINTER_TAG | (old as u64);
+        let child_nanbox = POINTER_TAG | (young as u64);
+        assert_eq!(remembered_set_size(), 0);
+        js_write_barrier(parent_nanbox, child_nanbox);
+        assert_eq!(remembered_set_size(), 1, "old→young write must record parent");
+        // Same write again should NOT double-count (HashSet dedups).
+        js_write_barrier(parent_nanbox, child_nanbox);
+        assert_eq!(remembered_set_size(), 1, "duplicate barrier call must dedup");
+    }
+
+    #[test]
+    fn test_write_barrier_young_to_young_skipped() {
+        reset_remembered_set();
+        let parent = crate::arena::arena_alloc_gc(40, 8, GC_TYPE_OBJECT) as usize;
+        let child = crate::arena::arena_alloc_gc(40, 8, GC_TYPE_OBJECT) as usize;
+        js_write_barrier(POINTER_TAG | (parent as u64), POINTER_TAG | (child as u64));
+        assert_eq!(remembered_set_size(), 0,
+            "young→young write must not enter remembered set");
+    }
+
+    #[test]
+    fn test_write_barrier_old_to_old_skipped() {
+        reset_remembered_set();
+        let parent = crate::arena::arena_alloc_gc_old(40, 8, GC_TYPE_OBJECT) as usize;
+        let child = crate::arena::arena_alloc_gc_old(40, 8, GC_TYPE_OBJECT) as usize;
+        js_write_barrier(POINTER_TAG | (parent as u64), POINTER_TAG | (child as u64));
+        assert_eq!(remembered_set_size(), 0,
+            "old→old write must not enter remembered set (no inter-gen edge)");
+    }
+
+    #[test]
+    fn test_write_barrier_old_to_young_string_tag() {
+        reset_remembered_set();
+        let young_str = crate::arena::arena_alloc_gc(32, 8, GC_TYPE_STRING) as usize;
+        let old = crate::arena::arena_alloc_gc_old(40, 8, GC_TYPE_OBJECT) as usize;
+        // STRING_TAG should also fire the barrier — strings can be young.
+        js_write_barrier(POINTER_TAG | (old as u64), STRING_TAG | (young_str as u64));
+        assert_eq!(remembered_set_size(), 1);
+    }
+
+    #[test]
+    fn test_write_barrier_non_pointer_child_skipped() {
+        reset_remembered_set();
+        let old = crate::arena::arena_alloc_gc_old(40, 8, GC_TYPE_OBJECT) as usize;
+        // INT32_TAG in child position.
+        let int32_val = 0x7FFE_0000_0000_002A_u64;
+        js_write_barrier(POINTER_TAG | (old as u64), int32_val);
+        assert_eq!(remembered_set_size(), 0,
+            "non-pointer child must not enter remembered set");
+        // SHORT_STRING_TAG (SSO inline) — also not a heap pointer.
+        let sso = 0x7FF9_0500_0000_0000_u64;
+        js_write_barrier(POINTER_TAG | (old as u64), sso);
+        assert_eq!(remembered_set_size(), 0,
+            "SSO child is inline data, not a heap pointer");
+        // Plain double in child position.
+        js_write_barrier(POINTER_TAG | (old as u64), 3.14_f64.to_bits());
+        assert_eq!(remembered_set_size(), 0,
+            "number child must not enter remembered set");
+    }
+
+    #[test]
+    fn test_write_barrier_remembered_set_clear() {
+        reset_remembered_set();
+        let young = crate::arena::arena_alloc_gc(40, 8, GC_TYPE_OBJECT) as usize;
+        let old = crate::arena::arena_alloc_gc_old(40, 8, GC_TYPE_OBJECT) as usize;
+        js_write_barrier(POINTER_TAG | (old as u64), POINTER_TAG | (young as u64));
+        assert_eq!(remembered_set_size(), 1);
+        remembered_set_clear();
+        assert_eq!(remembered_set_size(), 0);
     }
 
     #[test]
