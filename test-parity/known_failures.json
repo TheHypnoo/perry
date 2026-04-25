@@ -11,10 +11,6 @@
     "status": "known_limitation",
     "reason": "Async generators, for-await-of, Promise.allSettled not implemented (segfault)"
   },
-  "test_gap_console_methods": {
-    "status": "known_limitation",
-    "reason": "console.trace stack frame format differs (Node JS call frames vs native C frames); timer values normalized by parity script"
-  },
   "test_net_min": {
     "status": "skip",
     "reason": "Requires live network socket"
