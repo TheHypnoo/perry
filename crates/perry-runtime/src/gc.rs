@@ -819,7 +819,81 @@ pub extern "C" fn gc_check_trigger_export() {
 }
 
 /// Main GC collection
+/// Gen-GC Phase C3b minor-collection entry. Skips old-gen during
+/// the trace phase: old-gen objects are marked-and-skipped (their
+/// fields aren't recursively visited). Young children held by
+/// old-gen parents reach the worklist exclusively via the
+/// remembered set, scanned by `mark_remembered_set_roots`.
+///
+/// **Correctness contract** (per docs/generational-gc-plan.md §C):
+/// - Every old→young write since the last collection MUST have
+///   recorded the parent in the RS (codegen emits the barrier at
+///   every PropertySet / IndexSet / closure-capture-set site —
+///   see `crates/perry-codegen/src/expr.rs::emit_write_barrier`).
+/// - The conservative C-stack scan still runs; any young pointer
+///   reachable via runtime register-roots stays live.
+/// - Old-gen objects' MARK bit gets set during the trace step
+///   (caller pushes them onto the worklist); the MINOR trace just
+///   doesn't recurse through them.
+///
+/// Sweep is unchanged from full GC — `arena_reset_empty_blocks`
+/// already restricts itself to nursery blocks, so old-gen blocks
+/// are structurally untouched. The malloc-side sweep walks
+/// `MALLOC_STATE.objects`; any unmarked entry there is reclaimed
+/// regardless of generation. (Phase C4 will refine this if minor
+/// GC begins running on old-gen-heavy workloads.)
+///
+/// Gated by `PERRY_GEN_GC=1` via `gen_gc_enabled()`. Default OFF —
+/// shipping as opt-in until the bench_json_roundtrip ship criterion
+/// (RSS ≤70 MB direct path) lands and proves out across the gap +
+/// parity test corpus.
+pub fn gc_collect_minor() -> u64 {
+    let start = std::time::Instant::now();
+    let valid_ptrs = build_valid_pointer_set();
+
+    // === MARK PHASE (minor) ===
+    mark_stack_roots(&valid_ptrs);
+    mark_global_roots(&valid_ptrs);
+    mark_registered_roots(&valid_ptrs);
+    mark_remembered_set_roots(&valid_ptrs);
+    trace_marked_objects_minor(&valid_ptrs);
+    mark_block_persisting_arena_objects(&valid_ptrs);
+
+    // === SWEEP PHASE ===
+    let freed_bytes = sweep();
+
+    // RS clear — see gc_collect_inner for the rationale.
+    REMEMBERED_SET.with(|s| s.borrow_mut().clear());
+
+    #[cfg(target_env = "gnu")]
+    unsafe { libc::malloc_trim(0); }
+
+    let elapsed_us = start.elapsed().as_micros() as u64;
+    GC_STATS.with(|stats| {
+        let mut stats = stats.borrow_mut();
+        stats.collection_count += 1;
+        stats.total_freed_bytes += freed_bytes;
+        stats.last_pause_us = elapsed_us;
+    });
+    freed_bytes
+}
+
+/// `PERRY_GEN_GC=1` / `on` / `true` → use minor GC for every
+/// trigger. Default OFF — full mark-sweep until C4 flips the
+/// default.
+pub fn gen_gc_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| matches!(
+        std::env::var("PERRY_GEN_GC").as_deref(),
+        Ok("1") | Ok("on") | Ok("true")
+    ))
+}
+
 fn gc_collect_inner() -> u64 {
+    if gen_gc_enabled() {
+        return gc_collect_minor();
+    }
     let start = std::time::Instant::now();
 
     // Build set of valid heap pointers for conservative stack scan validation
@@ -1307,7 +1381,28 @@ fn mark_remembered_set_roots(valid_ptrs: &ValidPointerSet) {
 
 /// Process a worklist of already-marked headers: follow references iteratively,
 /// marking newly-reached objects and pushing them onto the worklist.
+///
+/// Gen-GC Phase C3b: when `minor_only` is true, skip tracing the
+/// fields of objects whose user address is in the old-gen arena.
+/// The RS already records every old→young edge written since the
+/// last collection, and `mark_remembered_set_roots` enqueued the
+/// relevant old-parents — they're marked live but their children
+/// are NOT recursively traced. This is the time-win core of the
+/// generational design: minor GC's transitive closure is bounded
+/// by `O(young live set + RS roots)` instead of `O(all live)`.
 fn drain_trace_worklist(worklist: &mut Vec<*mut GcHeader>, valid_ptrs: &ValidPointerSet) {
+    drain_trace_worklist_inner(worklist, valid_ptrs, false);
+}
+
+fn drain_trace_worklist_minor(worklist: &mut Vec<*mut GcHeader>, valid_ptrs: &ValidPointerSet) {
+    drain_trace_worklist_inner(worklist, valid_ptrs, true);
+}
+
+fn drain_trace_worklist_inner(
+    worklist: &mut Vec<*mut GcHeader>,
+    valid_ptrs: &ValidPointerSet,
+    minor_only: bool,
+) {
     let mut i = 0;
     while i < worklist.len() {
         let header = worklist[i];
@@ -1315,6 +1410,20 @@ fn drain_trace_worklist(worklist: &mut Vec<*mut GcHeader>, valid_ptrs: &ValidPoi
 
         unsafe {
             let user_ptr = (header as *mut u8).add(GC_HEADER_SIZE);
+            // C3b generational skip: in minor mode, an object in
+            // the old-gen arena is treated as a black leaf — its
+            // mark bit is set (already done by the caller via
+            // try_mark_value), but we don't recurse into its
+            // fields. Any young-gen pointer it holds was recorded
+            // in the RS at write-barrier time and got its young
+            // child marked separately when `mark_remembered_set_roots`
+            // ran. False-positive RS entries (RS lists a parent
+            // whose write has since been overwritten) are
+            // correctness-safe — extra young objects stay alive
+            // for one cycle, swept on the next.
+            if minor_only && crate::arena::pointer_in_old_gen(user_ptr as usize) {
+                continue;
+            }
             match (*header).obj_type {
                 GC_TYPE_ARRAY => trace_array(user_ptr, valid_ptrs, worklist),
                 GC_TYPE_OBJECT => trace_object(user_ptr, valid_ptrs, worklist),
@@ -1358,6 +1467,36 @@ fn trace_marked_objects(valid_ptrs: &ValidPointerSet) {
     });
 
     drain_trace_worklist(&mut worklist, valid_ptrs);
+}
+
+/// Gen-GC Phase C3b minor variant of `trace_marked_objects`.
+/// Builds the same worklist (every currently-marked header) but
+/// drains it via `drain_trace_worklist_minor` — recursion into
+/// old-gen objects is skipped. The old-gen objects themselves
+/// stay marked (so subsequent walks see them as live), but their
+/// fields aren't visited; any young child held by an old-gen
+/// object reaches the worklist via the remembered set instead.
+fn trace_marked_objects_minor(valid_ptrs: &ValidPointerSet) {
+    let mut worklist: Vec<*mut GcHeader> = Vec::new();
+    crate::arena::arena_walk_objects(|header_ptr| {
+        let header = header_ptr as *mut GcHeader;
+        unsafe {
+            if (*header).gc_flags & GC_FLAG_MARKED != 0 {
+                worklist.push(header);
+            }
+        }
+    });
+    MALLOC_STATE.with(|s| {
+        let s = s.borrow();
+        for &header in s.objects.iter() {
+            unsafe {
+                if (*header).gc_flags & GC_FLAG_MARKED != 0 {
+                    worklist.push(header);
+                }
+            }
+        }
+    });
+    drain_trace_worklist_minor(&mut worklist, valid_ptrs);
 }
 
 /// Block-persistence pass: arena block reset is all-or-nothing, so any arena
@@ -2704,6 +2843,34 @@ mod tests {
         assert_eq!(remembered_set_size(), 1);
         remembered_set_clear();
         assert_eq!(remembered_set_size(), 0);
+    }
+
+    #[test]
+    fn test_gc_collect_minor_clears_rs() {
+        reset_remembered_set();
+        let young = crate::arena::arena_alloc_gc(40, 8, GC_TYPE_OBJECT) as usize;
+        let old = crate::arena::arena_alloc_gc_old(40, 8, GC_TYPE_OBJECT) as usize;
+        js_write_barrier(POINTER_TAG | (old as u64), POINTER_TAG | (young as u64));
+        assert_eq!(remembered_set_size(), 1);
+        let _freed = gc_collect_minor();
+        assert_eq!(remembered_set_size(), 0,
+            "minor GC must clear RS just like full GC does");
+    }
+
+    #[test]
+    fn test_gc_collect_minor_runs_without_panic() {
+        // Smoke test: minor GC over an arena with a mix of nursery
+        // and old-gen objects must complete without panic. Real
+        // correctness is checked by the broader regression suite
+        // (test_json_*.ts under PERRY_GEN_GC=1).
+        let _y1 = crate::arena::arena_alloc_gc(64, 8, GC_TYPE_OBJECT);
+        let _y2 = crate::arena::arena_alloc_gc(32, 8, GC_TYPE_STRING);
+        let _o1 = crate::arena::arena_alloc_gc_old(64, 8, GC_TYPE_OBJECT);
+        let _o2 = crate::arena::arena_alloc_gc_old(48, 8, GC_TYPE_ARRAY);
+        let _ = gc_collect_minor();
+        // Following collection runs interleave nicely (cleared marks).
+        let _ = gc_collect_minor();
+        let _ = gc_collect_minor();
     }
 
     #[test]
