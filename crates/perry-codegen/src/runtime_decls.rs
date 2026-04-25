@@ -1283,7 +1283,7 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_commander_new", I64, &[]);
     module.declare_function("js_commander_option", I64, &[I64, I64, I64, I64]);
     module.declare_function("js_commander_opts", I64, &[I64]);
-    module.declare_function("js_commander_parse", I64, &[I64]);
+    module.declare_function("js_commander_parse", I64, &[I64, DOUBLE]);
     module.declare_function("js_commander_required_option", I64, &[I64, I64, I64, I64]);
     module.declare_function("js_commander_version", I64, &[I64, I64]);
 

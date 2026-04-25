@@ -3293,6 +3293,19 @@ pub(crate) fn lower_builtin_new(
     args: &[Expr],
 ) -> Result<Option<String>> {
     match class_name {
+        // commander Command — `new Command()` allocates a real CommanderHandle
+        // via the runtime constructor so subsequent `.command(...).action(...)
+        // .parse(...)` calls operate on a registered handle. Without this,
+        // `lower_new` falls back to an empty placeholder ObjectHeader and the
+        // entire fluent chain dispatches against junk (closes #187).
+        "Command" => {
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_commander_new", &[]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
         "Array" => {
             // `new Array()` → empty array, `new Array(n)` → length-n array
             // (zero-initialized slots), `new Array(a, b, c)` → 3-element array
@@ -4470,6 +4483,8 @@ static PERRY_SYSTEM_TABLE: &[UiSig] = &[
             args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
     UiSig { method: "notificationCancel", runtime: "perry_system_notification_cancel",
             args: &[UiArgKind::Str], ret: UiReturnKind::Void },
+    UiSig { method: "notificationOnTap", runtime: "perry_system_notification_on_tap",
+            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
     UiSig { method: "audioStart", runtime: "perry_system_audio_start",
             args: &[], ret: UiReturnKind::F64 },
     UiSig { method: "audioStop", runtime: "perry_system_audio_stop",
@@ -5091,6 +5106,45 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "lru-cache", has_receiver: true, method: "size",
         class_filter: None,
         runtime: "js_lru_cache_size", args: &[], ret: NR_F64 },
+
+    // ========== commander (CLI parsing) ==========
+    // `new Command()` is dispatched separately by `lower_builtin_new` so it
+    // produces a real CommanderHandle instead of an empty placeholder. The
+    // entries below cover the fluent chain methods + the parse() entry that
+    // actually reads argv and fires the registered .action() callback.
+    NativeModSig { module: "commander", has_receiver: true, method: "name",
+        class_filter: None,
+        runtime: "js_commander_name", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "commander", has_receiver: true, method: "description",
+        class_filter: None,
+        runtime: "js_commander_description", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "commander", has_receiver: true, method: "version",
+        class_filter: None,
+        runtime: "js_commander_version", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "commander", has_receiver: true, method: "command",
+        class_filter: None,
+        runtime: "js_commander_command", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "commander", has_receiver: true, method: "option",
+        class_filter: None,
+        runtime: "js_commander_option", args: &[NA_STR, NA_STR, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "commander", has_receiver: true, method: "requiredOption",
+        class_filter: None,
+        runtime: "js_commander_required_option", args: &[NA_STR, NA_STR, NA_STR], ret: NR_PTR },
+    // .action(cb) — NA_PTR coerces the NaN-boxed closure to its raw i64
+    // pointer so the runtime can call back through `js_closure_call1`.
+    NativeModSig { module: "commander", has_receiver: true, method: "action",
+        class_filter: None,
+        runtime: "js_commander_action", args: &[NA_PTR], ret: NR_PTR },
+    // .parse(argv) — runtime reads std::env::args() directly; user-provided
+    // argv expression evaluates for side effects but is not forwarded.
+    // NA_F64 keeps the LLVM call signature aligned with the runtime decl
+    // (`(I64, DOUBLE) -> I64`).
+    NativeModSig { module: "commander", has_receiver: true, method: "parse",
+        class_filter: None,
+        runtime: "js_commander_parse", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "commander", has_receiver: true, method: "opts",
+        class_filter: None,
+        runtime: "js_commander_opts", args: &[], ret: NR_PTR },
 
     // ========== uuid ==========
     NativeModSig { module: "uuid", has_receiver: false, method: "v4",
