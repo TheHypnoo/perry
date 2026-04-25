@@ -8,21 +8,106 @@ use crate::common::{register_handle, Handle};
 use super::result::{rows_to_pg_result, empty_pg_result};
 use super::types::{parse_pg_config, PgConfig};
 
-/// Wrapper around PgConnection that we can store in the handle registry
+/// Wrapper around PgConnection that we can store in the handle registry.
+///
+/// The npm-pg API has the user construct the client synchronously
+/// (`new Client(config)`) and connect explicitly later (`await
+/// client.connect()`). To support that without making `new` itself
+/// async, we let the handle live in two states:
+///
+/// - **Pre-connect**: `pending_config = Some(...)`, `connection = None`.
+///   Created by `js_pg_client_new`. Holds the parsed config until
+///   `client.connect()` opens the actual TCP connection.
+/// - **Connected**: `pending_config = None`, `connection = Some(...)`.
+///   The state every existing query/end path expected before the split;
+///   created in-place by `js_pg_connect` (the older single-step API
+///   that combines new + connect, kept for back-compat).
 pub struct PgConnectionHandle {
     pub connection: Option<PgConnection>,
+    pub pending_config: Option<PgConfig>,
 }
 
 impl PgConnectionHandle {
     pub fn new(conn: PgConnection) -> Self {
         Self {
             connection: Some(conn),
+            pending_config: None,
+        }
+    }
+
+    /// Pre-connect state: holds config until `.connect()` is called.
+    pub fn pending(config: PgConfig) -> Self {
+        Self {
+            connection: None,
+            pending_config: Some(config),
         }
     }
 
     pub fn take(&mut self) -> Option<PgConnection> {
         self.connection.take()
     }
+}
+
+/// `new Client(config)` — synchronous constructor that parses the config
+/// and registers a handle WITHOUT opening a connection. The user must
+/// call `await client.connect()` (or any query, which will fail with a
+/// helpful error until they do) to actually open the TCP socket.
+///
+/// Mirrors npm pg's `new Client(config)` semantics — the Client object
+/// exists immediately; the connection happens later.
+///
+/// # Safety
+/// The config parameter must be a valid JSValue representing a config object.
+#[no_mangle]
+pub unsafe extern "C" fn js_pg_client_new(config_f: f64) -> Handle {
+    let config = JSValue::from_bits(config_f.to_bits());
+    let pg_config = parse_pg_config(config);
+    register_handle(PgConnectionHandle::pending(pg_config))
+}
+
+/// `client.connect()` — opens the TCP connection using the config that
+/// `js_pg_client_new` previously stored on the handle. Returns a
+/// Promise<undefined> that resolves once the connection is up.
+///
+/// If the handle was already connected (or if it was created via the
+/// older combined `js_pg_connect`), this is a no-op success.
+#[no_mangle]
+pub unsafe extern "C" fn js_pg_client_connect(client_handle: Handle) -> *mut Promise {
+    use crate::common::get_handle_mut;
+
+    let promise = js_promise_new();
+
+    // Snapshot the pending config out of the handle BEFORE entering the
+    // async block — `get_handle_mut` returns a `&mut` that we can't keep
+    // alive across an await point.
+    let pending = if let Some(h) = get_handle_mut::<PgConnectionHandle>(client_handle) {
+        h.pending_config.take()
+    } else {
+        None
+    };
+
+    // Already connected (or back-compat handle from js_pg_connect) — resolve immediately.
+    let Some(pg_config) = pending else {
+        crate::common::spawn_for_promise(promise as *mut u8, async move {
+            Ok(JSValue::undefined().bits())
+        });
+        return promise;
+    };
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let url = pg_config.to_url();
+        match PgConnection::connect(&url).await {
+            Ok(conn) => {
+                if let Some(h) = get_handle_mut::<PgConnectionHandle>(client_handle) {
+                    h.connection = Some(conn);
+                }
+                Ok(JSValue::undefined().bits())
+            }
+            Err(e) => Err(format!("Failed to connect: {}", e)),
+        }
+    });
+
+    promise
 }
 
 /// pg.connect(config) -> Promise<Client>

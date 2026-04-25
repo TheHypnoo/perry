@@ -3355,6 +3355,54 @@ pub(crate) fn lower_builtin_new(
         }
         // (`WebSocketServer` is handled by an earlier branch lower in this
         // file — pre-existing from 2026-04-14. No new branch needed here.)
+        // pg Client — `new Client(config)` matching npm pg's API: synchronous
+        // constructor that stores the config; the user calls
+        // `await client.connect()` separately to open the TCP connection.
+        // Pre-fix `new Client(config)` fell into the empty-placeholder branch
+        // and every chained method (.connect/.query/.end) dispatched against
+        // junk. The runtime's older `js_pg_connect(config) -> Promise<Handle>`
+        // (still wired as the receiver-less `pg.connect(config)` factory)
+        // combines new+connect in one step; this branch maps the npm shape
+        // through the new `js_pg_client_new` (sync, stores config) +
+        // `js_pg_client_connect` (async, opens the connection) split.
+        "Client" => {
+            let config_val = if let Some(arg) = args.first() {
+                lower_expr(ctx, arg)?
+            } else {
+                double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+            };
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_pg_client_new", &[(DOUBLE, &config_val)]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        // pg Pool — `new Pool(config)`. sqlx's `connect_lazy` makes this
+        // synchronous (no actual connections opened until first `.query()`),
+        // matching npm pg Pool's auto-connect-on-first-use semantics. The
+        // older `js_pg_create_pool` factory (returns Promise<Handle>) stays
+        // wired for `pg.Pool(config)` and similar patterns.
+        "Pool" => {
+            let config_val = if let Some(arg) = args.first() {
+                lower_expr(ctx, arg)?
+            } else {
+                double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+            };
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_pg_pool_new", &[(DOUBLE, &config_val)]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        // mongodb MongoClient — `new MongoClient(uri)` matching npm mongodb's
+        // API. URI is a string; runtime stores it and connects later via
+        // `await client.connect()`.
+        "MongoClient" => {
+            let uri_ptr = if let Some(arg) = args.first() {
+                get_raw_string_ptr(ctx, arg)?
+            } else {
+                "0".to_string()
+            };
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_mongodb_client_new", &[(I64, &uri_ptr)]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
         // ioredis Redis — `new Redis()` or `new Redis(opts)`. The runtime's
         // `js_ioredis_new` reads connection settings from REDIS_HOST /
         // REDIS_PORT / REDIS_PASSWORD / REDIS_TLS env vars and ignores its
@@ -4985,12 +5033,38 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         runtime: "js_mysql2_connection_rollback", args: &[], ret: NR_PTR },
 
     // ========== PostgreSQL (pg) ==========
+    // `new Client(config)` and `new Pool(config)` are dispatched by
+    // `lower_builtin_new` (sync constructors that produce real handles).
+    // The factory-style entries below stay wired for `pg.connect(config)` /
+    // `pg.Pool(config)` patterns that some npm code uses.
     NativeModSig { module: "pg", has_receiver: false, method: "connect",
         class_filter: None,
         runtime: "js_pg_connect", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "pg", has_receiver: false, method: "Pool",
         class_filter: None,
         runtime: "js_pg_create_pool", args: &[NA_F64], ret: NR_PTR },
+    // `client.connect()` — async, opens the TCP connection on a handle that
+    // `new Client(config)` previously created in the pre-connect state.
+    // No-op if the handle was already connected (e.g. came from the
+    // older `pg.connect(config)` factory). Class-filtered to Client so
+    // `pool.connect()` (which has different semantics — checkout a pooled
+    // connection — not yet implemented) doesn't accidentally land here.
+    NativeModSig { module: "pg", has_receiver: true, method: "connect",
+        class_filter: Some("Client"),
+        runtime: "js_pg_client_connect", args: &[], ret: NR_PTR },
+    // Pool-specific query/end — different runtime fns from the Client paths.
+    // Pre-existing dispatch was unfiltered and routed both Pool and Client
+    // through the Client query/end fns (latent bug: pool.query() against a
+    // Pool handle would fail because js_pg_client_query expects a Connection
+    // handle). Class-filtered Pool rows take precedence over the unfiltered
+    // Client/default rows below thanks to native_module_lookup's two-pass
+    // search (exact class_filter match first, then None fallback).
+    NativeModSig { module: "pg", has_receiver: true, method: "query",
+        class_filter: Some("Pool"),
+        runtime: "js_pg_pool_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "pg", has_receiver: true, method: "end",
+        class_filter: Some("Pool"),
+        runtime: "js_pg_pool_end", args: &[], ret: NR_PTR },
     NativeModSig { module: "pg", has_receiver: true, method: "query",
         class_filter: None,
         runtime: "js_pg_client_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
@@ -5038,54 +5112,77 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         runtime: "js_ioredis_quit", args: &[], ret: NR_PTR },
 
     // ========== MongoDB ==========
+    // `new MongoClient(uri)` is dispatched by `lower_builtin_new` (sync ctor
+    // that stores the URI). `client.connect()` opens the connection on the
+    // pre-connect handle. The receiver-less factory `mongodb.connect(uri)`
+    // (combines new+connect, returns Promise<Handle>) stays wired below.
     NativeModSig { module: "mongodb", has_receiver: false, method: "connect",
         class_filter: None,
         runtime: "js_mongodb_connect", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mongodb", has_receiver: true, method: "connect",
+        class_filter: None,
+        runtime: "js_mongodb_client_connect", args: &[], ret: NR_PTR },
+    // Symbol-name fix: every row below previously emitted a stripped-name
+    // form (`js_mongodb_db`, `js_mongodb_insert_one`, etc.) but the actual
+    // stdlib functions carry a `_client_` / `_db_` / `_collection_` infix
+    // (`js_mongodb_client_db`, `js_mongodb_collection_insert_one`, ...).
+    // Pre-#187 nobody hit it because `new MongoClient()` produced a junk
+    // handle and method calls against it never linked the symbols. With the
+    // v0.5.270-era ctor making the receiver real, these dispatch rows now
+    // actually link — so they have to point at the real functions. Same
+    // family as the v0.5.270 ioredis row fix.
     NativeModSig { module: "mongodb", has_receiver: true, method: "db",
         class_filter: None,
-        runtime: "js_mongodb_db", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_mongodb_client_db", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "collection",
         class_filter: None,
-        runtime: "js_mongodb_collection", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_mongodb_db_collection", args: &[NA_STR], ret: NR_PTR },
+    // `_value` wrapper variants — every collection method that accepts an
+    // object/filter arg goes through a wrapper that JSON-stringifies the
+    // NaN-boxed JSValue (NA_F64) before forwarding to the existing
+    // JSON-string-taking runtime fn. Without the wrapper, codegen passed
+    // the JSValue f64 bits directly into a fn signed to receive a
+    // *const StringHeader — every doc/filter looked like garbage and the
+    // user saw "Invalid document" / "Invalid JSON".
     NativeModSig { module: "mongodb", has_receiver: true, method: "insertOne",
         class_filter: None,
-        runtime: "js_mongodb_insert_one", args: &[NA_F64], ret: NR_PTR },
+        runtime: "js_mongodb_collection_insert_one_value", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "insertMany",
         class_filter: None,
-        runtime: "js_mongodb_insert_many", args: &[NA_F64], ret: NR_PTR },
+        runtime: "js_mongodb_collection_insert_many_value", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "find",
         class_filter: None,
-        runtime: "js_mongodb_find", args: &[NA_F64], ret: NR_PTR },
+        runtime: "js_mongodb_collection_find_value", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "findOne",
         class_filter: None,
-        runtime: "js_mongodb_find_one", args: &[NA_F64], ret: NR_PTR },
+        runtime: "js_mongodb_collection_find_one_value", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "updateOne",
         class_filter: None,
-        runtime: "js_mongodb_update_one", args: &[NA_F64, NA_F64], ret: NR_PTR },
+        runtime: "js_mongodb_collection_update_one_value", args: &[NA_F64, NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "updateMany",
         class_filter: None,
-        runtime: "js_mongodb_update_many", args: &[NA_F64, NA_F64], ret: NR_PTR },
+        runtime: "js_mongodb_collection_update_many_value", args: &[NA_F64, NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "deleteOne",
         class_filter: None,
-        runtime: "js_mongodb_delete_one", args: &[NA_F64], ret: NR_PTR },
+        runtime: "js_mongodb_collection_delete_one_value", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "deleteMany",
         class_filter: None,
-        runtime: "js_mongodb_delete_many", args: &[NA_F64], ret: NR_PTR },
+        runtime: "js_mongodb_collection_delete_many_value", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "countDocuments",
         class_filter: None,
-        runtime: "js_mongodb_count_documents", args: &[NA_F64], ret: NR_PTR },
-    NativeModSig { module: "mongodb", has_receiver: true, method: "aggregate",
-        class_filter: None,
-        runtime: "js_mongodb_aggregate", args: &[NA_F64], ret: NR_PTR },
-    NativeModSig { module: "mongodb", has_receiver: true, method: "createIndex",
-        class_filter: None,
-        runtime: "js_mongodb_create_index", args: &[NA_F64], ret: NR_PTR },
+        runtime: "js_mongodb_collection_count_value", args: &[NA_F64], ret: NR_PTR },
+    // aggregate / createIndex / toArray runtime functions don't exist in
+    // perry-stdlib yet — listed as commented-out so the dispatch table
+    // doesn't reference undefined symbols. User code calling these methods
+    // falls through to the unknown-method sentinel returning TAG_UNDEFINED;
+    // that's better than a hard link failure for code that happens to
+    // import mongodb but doesn't call the methods.
+    //   NativeModSig { module: "mongodb", method: "aggregate",   ... },
+    //   NativeModSig { module: "mongodb", method: "createIndex", ... },
+    //   NativeModSig { module: "mongodb", method: "toArray",     ... },
     NativeModSig { module: "mongodb", has_receiver: true, method: "close",
         class_filter: None,
-        runtime: "js_mongodb_close", args: &[], ret: NR_PTR },
-    NativeModSig { module: "mongodb", has_receiver: true, method: "toArray",
-        class_filter: None,
-        runtime: "js_mongodb_to_array", args: &[], ret: NR_PTR },
+        runtime: "js_mongodb_client_close", args: &[], ret: NR_PTR },
 
     // ========== better-sqlite3 ==========
     NativeModSig { module: "better-sqlite3", has_receiver: false, method: "default",

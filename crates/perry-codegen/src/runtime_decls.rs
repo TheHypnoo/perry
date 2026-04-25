@@ -1005,12 +1005,15 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_https_request", I64, &[DOUBLE, I64]);
 
     // ========== PostgreSQL (pg) ==========
+    module.declare_function("js_pg_client_connect", I64, &[I64]);
     module.declare_function("js_pg_client_end", I64, &[I64]);
+    module.declare_function("js_pg_client_new", I64, &[I64]);
     module.declare_function("js_pg_client_query", I64, &[I64, I64]);
     module.declare_function("js_pg_client_query_params", I64, &[I64, I64, I64]);
     module.declare_function("js_pg_connect", I64, &[I64]);
     module.declare_function("js_pg_create_pool", I64, &[I64]);
     module.declare_function("js_pg_pool_end", I64, &[I64]);
+    module.declare_function("js_pg_pool_new", I64, &[I64]);
     module.declare_function("js_pg_pool_query", I64, &[I64, I64]);
 
     // ========== Redis / ioredis ==========
@@ -1035,8 +1038,20 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
 
     // ========== MongoDB ==========
     module.declare_function("js_mongodb_client_close", I64, &[I64]);
+    module.declare_function("js_mongodb_client_connect", I64, &[I64]);
     module.declare_function("js_mongodb_client_db", I64, &[I64, I64]);
     module.declare_function("js_mongodb_client_list_databases", I64, &[I64]);
+    module.declare_function("js_mongodb_client_new", I64, &[I64]);
+    // _value wrappers (JSON-stringify f64 JSValue arg, forward to existing fns)
+    module.declare_function("js_mongodb_collection_count_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_delete_many_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_delete_one_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_find_one_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_find_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_insert_many_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_insert_one_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_update_many_value", I64, &[I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_mongodb_collection_update_one_value", I64, &[I64, DOUBLE, DOUBLE]);
     module.declare_function("js_mongodb_collection_count", I64, &[I64, I64]);
     module.declare_function("js_mongodb_collection_delete_many", I64, &[I64, I64]);
     module.declare_function("js_mongodb_collection_delete_one", I64, &[I64, I64]);
