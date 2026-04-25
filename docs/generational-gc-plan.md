@@ -496,3 +496,98 @@ JS frames stay covered.
   nothing tenures (so the work it does is overhead, not benefit).
   Flipping benefits from production-soak data on programs where
   evacuation actually fires.
+
+## Appendix: academic + industry lineage
+
+Perry's GC is a synthesis of well-established techniques. Each
+phase maps cleanly to canonical papers and real-world VM
+implementations — none of the design is novel; the contribution
+is the specific combination targeted at TypeScript-on-Rust.
+
+### Single strongest reference
+
+**Bartlett 1988, *Mostly Copying Garbage Collection*** (DEC SRC
+Technical Note TN-13). This describes Perry's C4b almost
+verbatim:
+
+- Conservative scan of registers and the C stack discovers candidate
+  pointers; objects reached this way get **pinned** (cannot move).
+- Precise scan of heap fields (and any other source the runtime
+  knows about authoritatively) discovers **movable** objects.
+- Forwarding pointers stored in evacuated objects' headers; pinned
+  objects stay in place.
+
+Perry's `CONS_PINNED` HashSet + `pin_currently_marked_as_conservative`
++ `GC_FLAG_FORWARDED` + `rewrite_forwarded_references` is Bartlett's
+algorithm in Rust, extended to a generational layout (Bartlett's
+original was single-generation; the extension follows Ungar's
+template below).
+
+### Phase-by-phase references
+
+| Phase | Concept | Reference |
+|---|---|---|
+| A — shadow stack | Precise stack roots in a language without GC support | Henderson 2002, *Accurate Garbage Collection in an Uncooperative Environment* (ICCC) |
+| B — young/old split | Generational hypothesis + nursery design | **Ungar 1984**, *Generation Scavenging: A Non-Disruptive High-Performance Storage Reclamation Algorithm* (SIGPLAN); Lieberman & Hewitt 1983 (predecessor) |
+| C — write barriers + RS | Tracking inter-generational pointers | Hosking & Moss 1992, *Remembered Sets Can Also Play Cards in Garbage Collection* (OOPSLA) |
+| C4 — tenuring | Age-based promotion to old-gen | Ungar (above); HotSpot's `TenuringThreshold`; V8's "quick promotion" |
+| C4b — copying evacuation | Mostly-copying with conservative pinning | **Bartlett 1988** (above); Smith & Morrisett 1998, *Comparing Mostly-Copying and Mark-Sweep Conservation* |
+| (evacuation core) | Forwarding-pointer copying | **Cheney 1970**, *A Nonrecursive List Compacting Algorithm* (CACM) — every copying collector since 1970 |
+| Conservative + precise hybrid | Discovering roots via mixed precise/conservative scan | Boehm-Demers-Weiser 1988 (canonical conservative GC); Bartlett 1988 (canonical hybrid) |
+
+### Industry implementations using the same techniques
+
+| Runtime | Family | Vs Perry |
+|---|---|---|
+| **V8** (Chrome / Node) | Generational, semi-space young + mark-compact old | Fully precise (no conservative); compacts old-gen; uses card-marking + slot-buffer for RS |
+| **JSC** (Safari / Bun) | Generational, Eden + Old | Card-marking write barrier; compacts old-gen |
+| **HotSpot** (Java) | Eden + Survivor + Old; G1, ZGC, Shenandoah, etc. | OOP maps (compiler-integrated precise stack maps); compacts |
+| **SpiderMonkey** (Firefox) | Generational, nursery → tenured | `Rooted<T>` / `Handle<T>` for precise roots (analogous to shadow stack); compacts |
+| **.NET CLR** | Gen 0 / Gen 1 / Gen 2 | Same family; card-marking; compacts |
+| **OCaml** | Generational, minor heap + major heap | Stop-and-copy minor; mark-sweep + compact major |
+| **Boehm-Demers-Weiser** | Single-gen, fully conservative | No precise roots; doesn't move objects (pure mark-sweep) |
+| **Mono (early)** | Bartlett-style hybrid | Most direct precedent for Perry's design |
+| **Go** | Concurrent tricolor mark-sweep, no generations | Different design philosophy (pacer-driven) |
+| **LuaJIT** | Incremental mark-sweep, no nursery | Different design philosophy |
+
+### Where Perry sits in the design space
+
+Perry's specific combination is on the **simpler / more conservative
+end** of the production-VM design space:
+
+| Choice | Perry | What we don't do |
+|---|---|---|
+| Generations | 2 (nursery + old) | HotSpot has 3+ (Eden + Survivor + Old + Permanent variants) |
+| Old-gen compaction | None | V8 / JSC / HotSpot all compact old-gen |
+| Concurrent marking | None | HotSpot G1, ZGC, Shenandoah; Go |
+| Write barrier | Per-object RS | Card marking (HotSpot, .NET, JSC) |
+| Stack roots | Hybrid (shadow stack + conservative scan with pinning) | Fully precise (V8, HotSpot via OOP maps) |
+| Old-gen sweep | Mark-sweep with block reset + dealloc | In-place free list (most VMs); region-based (G1) |
+
+Each of these choices has a clear documented trade-off in the plan
+or commit log: e.g. card marking is an open follow-up gated on
+"data showing the simple remembered-set approach is the bottleneck";
+old-gen compaction is parked until "fragmentation bothers" something
+in measurement.
+
+The point of this appendix isn't to claim novelty — it's the
+opposite. Every design decision can be traced to a paper or a
+shipping VM that does the same thing. The contribution Perry makes
+is engineering: gluing these well-understood pieces together inside
+a Rust runtime that compiles TypeScript to native code, without
+inventing anything in the GC literature.
+
+### Bibliography
+
+- **Bartlett, J. F.** (1988). *Compacting Garbage Collection with Ambiguous Roots.* DEC SRC Research Report 88/2 / Technical Note TN-13. Western Research Laboratory.
+- **Boehm, H. & Weiser, M.** (1988). *Garbage Collection in an Uncooperative Environment.* Software: Practice and Experience, 18(9), 807–820.
+- **Cheney, C. J.** (1970). *A Nonrecursive List Compacting Algorithm.* Communications of the ACM, 13(11), 677–678.
+- **Henderson, F.** (2002). *Accurate Garbage Collection in an Uncooperative Environment.* Proceedings of the 3rd International Symposium on Memory Management (ISMM).
+- **Hosking, A. L. & Moss, J. E. B.** (1992). *Remembered Sets Can Also Play Cards in Garbage Collection.* Proceedings of OOPSLA '92.
+- **Lieberman, H. & Hewitt, C.** (1983). *A Real-Time Garbage Collector Based on the Lifetimes of Objects.* Communications of the ACM, 26(6), 419–429.
+- **Smith, F. & Morrisett, G.** (1998). *Comparing Mostly-Copying and Mark-Sweep Conservation.* Proceedings of ISMM '98.
+- **Ungar, D.** (1984). *Generation Scavenging: A Non-Disruptive High-Performance Storage Reclamation Algorithm.* ACM SIGPLAN/SIGSOFT Software Engineering Symposium on Practical Software Development Environments.
+
+For a comprehensive textbook treatment, see:
+
+- **Jones, R., Hosking, A., & Moss, E.** (2011). *The Garbage Collection Handbook: The Art of Automatic Memory Management.* Chapman and Hall / CRC. — Chapter 5 (generational), Chapter 17 (conservative), Chapter 8 (copying).

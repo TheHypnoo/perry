@@ -2,6 +2,26 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.240 — Gen-GC docs: academic + industry lineage appendix. Adds a defensibility section to `docs/generational-gc-plan.md` mapping each phase of Perry's GC architecture to its canonical paper and a list of shipping VMs that use the same techniques. The point of the appendix isn't to claim novelty — the opposite: every design decision traces to a paper or a real-world VM that does the same thing. The contribution Perry makes is engineering, not algorithms.
+
+**Single strongest reference: Bartlett 1988, *Mostly Copying Garbage Collection*** (DEC SRC Technical Note TN-13). This describes Perry's C4b almost verbatim — conservative scan of registers + C stack discovers candidate pointers and pins them; precise scan of heap fields finds movable objects; forwarding pointers in evacuated objects' headers; pinned objects stay in place. Perry's `CONS_PINNED` HashSet, `pin_currently_marked_as_conservative` helper, `GC_FLAG_FORWARDED` flag, and `rewrite_forwarded_references` walker collectively implement Bartlett's algorithm in Rust. The generational extension follows Ungar 1984 (*Generation Scavenging*).
+
+**Phase-by-phase reference table:**
+- Phase A (shadow stack) → Henderson 2002, *Accurate Garbage Collection in an Uncooperative Environment* (ICCC).
+- Phase B (young/old split) → Ungar 1984; Lieberman & Hewitt 1983 predecessor.
+- Phase C (write barriers + RS) → Hosking & Moss 1992, *Remembered Sets Can Also Play Cards in Garbage Collection* (OOPSLA).
+- Phase C4 (tenuring) → Ungar; HotSpot's `TenuringThreshold`; V8 quick-promotion.
+- Phase C4b (mostly-copying with conservative pinning) → Bartlett 1988; Smith & Morrisett 1998.
+- Evacuation core (forwarding-pointer copying) → Cheney 1970, *A Nonrecursive List Compacting Algorithm* (CACM).
+
+**Industry parallels documented:** V8 (Chrome/Node — generational, semi-space young, mark-compact old), JSC (Safari/Bun — Eden + Old, card-marking), HotSpot (Java — Eden + Survivor + Old, OOP maps), SpiderMonkey (Firefox — `Rooted<T>`/`Handle<T>` for precise roots), .NET CLR (Gen 0/1/2, card-marking), OCaml (minor + major heap), Boehm-Demers-Weiser (canonical conservative GC, no movement), Mono early (Bartlett-style hybrid — most direct precedent for Perry), Go (concurrent tricolor mark-sweep, no generations), LuaJIT (incremental mark-sweep, no nursery).
+
+**Where Perry sits in the design space:** simpler / more conservative end. 2 generations (vs HotSpot's 3+), no old-gen compaction (V8/JSC/HotSpot all compact), no concurrent marking (HotSpot G1/ZGC/Shenandoah/Go all do), per-object remembered set (vs card marking in HotSpot/JSC/.NET), hybrid stack roots (vs fully precise via OOP maps). Each choice has an open follow-up in the plan's "Other parked items" section gated on production-soak data showing the simpler approach is the bottleneck.
+
+**Bibliography:** 8 primary papers (Bartlett 1988, Boehm & Weiser 1988, Cheney 1970, Henderson 2002, Hosking & Moss 1992, Lieberman & Hewitt 1983, Smith & Morrisett 1998, Ungar 1984) + textbook reference to Jones/Hosking/Moss *The Garbage Collection Handbook* (Chapman and Hall / CRC, 2011) — chapters 5 (generational), 8 (copying), 17 (conservative).
+
+No code changes. Pure documentation. Build clean, all v0.5.239 regressions still passing.
+
 ## v0.5.239 — Gen-GC **roadmap complete (architectural)** — closing commit on the multi-week generational GC migration started in v0.5.217. Updates `docs/generational-gc-plan.md`: the previously-empty Log table now contains 21 entries spanning Phases A → D, dated and version-tagged with one-line summaries; the original "Follow-ups / parked items" section is consolidated under a new "Other parked items" with the addition of "Flip `PERRY_GEN_GC_EVACUATE=1` default" (gated on production-soak data); a new "Deferred follow-ups" section explains why the conservative-scanner shrink originally listed in Phase D is deferred.
 
 **The conservative-scanner shrink rationale, captured in the plan and reproduced here for the changelog record:** the original Phase D scope said "Conservative scanner shrinks to 'scan only the C stack below JS frames' (the Rust runtime's local variables)". The intent was clear — drop conservative coverage where the shadow stack authoritatively covers — but the implementation is correctness-sensitive in a way the plan underestimated.
