@@ -8271,7 +8271,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 /// for integer-arithmetic hot paths — saving 5 instructions per bitwise op.
 fn is_known_finite(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
-        Expr::Integer(_) | Expr::Number(_) => true,
+        Expr::Integer(_) => true,
+        // Number literals can be NaN or ±Infinity (e.g., `Number(NaN)`,
+        // `Number(f64::INFINITY)`). Inspect the value: only true f64
+        // finites can use the toint32_fast path. Without this check
+        // `(NaN) | 0` and `(Infinity) | 0` hit fast-path `fptosi NaN`,
+        // which is poison in LLVM and produced subnormal-double output
+        // (which downstream code interpreted as a NaN-boxed string with
+        // STRING_TAG bits, leading to garbled `console.log` output).
+        Expr::Number(n) => n.is_finite(),
         Expr::LocalGet(id) => ctx.integer_locals.contains(id),
         Expr::Update { id, .. } => ctx.integer_locals.contains(id),
         Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
