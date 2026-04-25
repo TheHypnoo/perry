@@ -2,6 +2,8 @@ package com.perry.app
 
 import android.Manifest
 import android.app.Activity
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -15,6 +17,7 @@ import android.location.LocationManager
 import android.media.ImageReader
 import android.net.Uri
 import android.view.PixelCopy
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -28,6 +31,8 @@ import android.view.TextureView
 import android.view.View
 import android.widget.*
 import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -804,4 +809,72 @@ object PerryBridge {
 
     @JvmStatic
     external fun nativeMenuItemSelected(menuHandle: Long, index: Int)
+
+    // --- Notifications (#94) ---
+
+    /**
+     * Show a fire-and-forget local notification. Called from native via JNI:
+     * `sendNotification(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;)V`.
+     *
+     * Posts under a single fixed channel id ("perry-default") and a fixed
+     * notification id (`PERRY_DEFAULT_NOTIFICATION_ID = 1`) so subsequent
+     * calls replace the previous notification — matches iOS / macOS where
+     * `notificationSend` reuses the same `requestWithIdentifier:` slot.
+     *
+     * Silently no-ops if `POST_NOTIFICATIONS` (API 33+) isn't granted; the
+     * Rust-side `notificationSend` API doesn't surface a result so there's
+     * nowhere to plumb a "permission denied" signal. Apps that need that
+     * feedback should request the permission explicitly via the upcoming
+     * `notificationRequestPermission` API (#95-area follow-up).
+     */
+    @JvmStatic
+    fun sendNotification(activity: Activity, title: String, body: String) {
+        val notificationManager = NotificationManagerCompat.from(activity)
+
+        // Channel creation: idempotent on API 26+, no-op on older.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                PERRY_DEFAULT_CHANNEL_ID,
+                "Notifications",
+                NotificationManager.IMPORTANCE_DEFAULT
+            )
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        // POST_NOTIFICATIONS gate (API 33+).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    activity,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                Log.w(
+                    "PerryBridge",
+                    "sendNotification: POST_NOTIFICATIONS not granted; notification dropped"
+                )
+                return
+            }
+        }
+
+        val notification = NotificationCompat.Builder(activity, PERRY_DEFAULT_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .build()
+
+        try {
+            notificationManager.notify(PERRY_DEFAULT_NOTIFICATION_ID, notification)
+        } catch (e: SecurityException) {
+            Log.w(
+                "PerryBridge",
+                "sendNotification: SecurityException (permission revoked or channel disabled)",
+                e
+            )
+        }
+    }
+
+    private const val PERRY_DEFAULT_CHANNEL_ID: String = "perry-default"
+    private const val PERRY_DEFAULT_NOTIFICATION_ID: Int = 1
 }
