@@ -13,6 +13,25 @@ fn is_negative_zero(n: f64) -> bool {
     n.to_bits() == 0x8000_0000_0000_0000u64
 }
 
+/// Format a finite, non-zero, non-integer-like f64 per ECMAScript
+/// NumberToString. Caller has already filtered NaN / ±Infinity / ±0 /
+/// integer-shaped values; this only decides decimal vs scientific
+/// notation per the |n| < 10^-6 / |n| >= 10^21 thresholds.
+///
+/// Without the threshold split, Rust's Display impl produces 300-digit
+/// decimals for `Number.MAX_VALUE` (`1.7976931348623157e+308` → 309
+/// zeros) and 16-digit `0.000…0002…` decimals for `Number.EPSILON`,
+/// neither of which matches Node.
+#[inline]
+fn format_finite_number_js(value: f64) -> String {
+    let abs = value.abs();
+    if abs >= 1e21 || abs < 1e-6 {
+        crate::string::fix_exponent_format(&format!("{:e}", value))
+    } else {
+        format!("{}", value)
+    }
+}
+
 /// Decode the textual content of any string-shaped JSValue (heap
 /// `STRING_TAG` or inline `SHORT_STRING_TAG`) into a fresh `String`.
 /// Returns `None` for non-string values. SSO values are decoded
@@ -58,7 +77,7 @@ pub extern "C" fn js_console_log(value: JSValue) {
             // Print integers without decimal point
             println!("{}", n as i64);
         } else {
-            println!("{}", n);
+            println!("{}", format_finite_number_js(n));
         }
     } else if value.is_int32() {
         println!("{}", value.as_int32());
@@ -142,7 +161,7 @@ pub extern "C" fn js_console_log_number(value: f64) {
     } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
         println!("{}", value as i64);
     } else {
-        println!("{}", value);
+        println!("{}", format_finite_number_js(value));
     }
 }
 
@@ -184,7 +203,7 @@ pub extern "C" fn js_console_error_dynamic(value: f64) {
         } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
             eprintln!("{}", n as i64);
         } else {
-            eprintln!("{}", n);
+            eprintln!("{}", format_finite_number_js(n));
         }
     }
 }
@@ -197,7 +216,7 @@ pub extern "C" fn js_console_error_number(value: f64) {
     } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
         eprintln!("{}", value as i64);
     } else {
-        eprintln!("{}", value);
+        eprintln!("{}", format_finite_number_js(value));
     }
 }
 
@@ -239,7 +258,7 @@ pub extern "C" fn js_console_warn_dynamic(value: f64) {
         } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
             eprintln!("{}", n as i64);
         } else {
-            eprintln!("{}", n);
+            eprintln!("{}", format_finite_number_js(n));
         }
     }
 }
@@ -252,7 +271,7 @@ pub extern "C" fn js_console_warn_number(value: f64) {
     } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
         eprintln!("{}", value as i64);
     } else {
-        eprintln!("{}", value);
+        eprintln!("{}", format_finite_number_js(value));
     }
 }
 
@@ -460,7 +479,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
                 (n as i64).to_string()
             } else {
-                n.to_string()
+                format_finite_number_js(n)
             }
         }
     }
@@ -700,7 +719,7 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
             } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
                 (n as i64).to_string()
             } else {
-                n.to_string()
+                format_finite_number_js(n)
             }
         }
     }
@@ -848,7 +867,15 @@ pub extern "C" fn js_eq(a: JSValue, b: JSValue) -> JSValue {
 /// - string == number: coerce string to number
 #[no_mangle]
 pub extern "C" fn js_loose_eq(a: JSValue, b: JSValue) -> JSValue {
-    // Same bits → always equal (handles null==null, undefined==undefined, etc.)
+    // Both numbers FIRST: IEEE 754 equality correctly handles NaN!=NaN
+    // (NaN has well-defined bits, so the later same-bits fast path
+    // would otherwise incorrectly return true for NaN==NaN). Also
+    // handles +0 == -0 correctly (different bits, IEEE 754 says equal).
+    if a.is_number() && b.is_number() {
+        return JSValue::bool(a.as_number() == b.as_number());
+    }
+    // Same bits → always equal (handles null==null, undefined==undefined,
+    // identical pointers, identical SSO encodings, etc.)
     if a.bits() == b.bits() {
         return JSValue::bool(true);
     }
@@ -859,10 +886,6 @@ pub extern "C" fn js_loose_eq(a: JSValue, b: JSValue) -> JSValue {
     // null/undefined != anything else
     if a.is_null() || a.is_undefined() || b.is_null() || b.is_undefined() {
         return JSValue::bool(false);
-    }
-    // Both numbers
-    if a.is_number() && b.is_number() {
-        return JSValue::bool(a.as_number() == b.as_number());
     }
     // Both strings (heap STRING_TAG and/or inline SHORT_STRING_TAG):
     // content compare. The previous `is_string() && is_string()` test
@@ -1893,7 +1916,7 @@ fn format_table_cell(value: f64) -> String {
             } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
                 (n as i64).to_string()
             } else {
-                n.to_string()
+                format_finite_number_js(n)
             }
         }
     }

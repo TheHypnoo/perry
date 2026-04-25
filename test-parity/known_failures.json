@@ -59,10 +59,6 @@
     "status": "ci-env",
     "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Same SDK gap as test_gap_buffer_ops; exercises the #92 Buffer numeric-read intrinsic."
   },
-  "test_stress_nanbox": {
-    "status": "bug",
-    "reason": "NaN-boxing edge cases: typeof undefined inside specific stress patterns differs (run-to-run noise possible)"
-  },
   "test_stress_promises": {
     "status": "bug",
     "reason": "Promise resolve order under heavy concurrency — perry returns array values where Node returns scalar 42"

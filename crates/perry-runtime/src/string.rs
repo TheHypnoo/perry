@@ -792,8 +792,17 @@ pub extern "C" fn js_number_to_string(value: f64) -> *mut StringHeader {
         // Integer-like, format without decimal
         format!("{}", value as i64)
     } else {
-        // Float, format with appropriate precision
-        format!("{}", value)
+        // ECMAScript NumberToString: switch to scientific notation when
+        // |n| >= 10^21 or |n| < 10^-6 (otherwise Rust's `{}` produces
+        // 300-digit decimals for `Number.MAX_VALUE` and 16-digit
+        // 0.000…0002… decimals for `Number.EPSILON`, neither of which
+        // matches Node's output).
+        let abs = value.abs();
+        if abs >= 1e21 || abs < 1e-6 {
+            fix_exponent_format(&format!("{:e}", value))
+        } else {
+            format!("{}", value)
+        }
     };
 
     let bytes = s.as_bytes();
@@ -865,7 +874,7 @@ pub extern "C" fn js_number_to_exponential(value: f64, decimals: f64) -> *mut St
 }
 
 /// Convert Rust's `{:e}` exponential format to JS's: "1.23e4" -> "1.23e+4", "1.23e-4" stays.
-fn fix_exponent_format(s: &str) -> String {
+pub(crate) fn fix_exponent_format(s: &str) -> String {
     if let Some(e_pos) = s.find('e') {
         let (mantissa, exp_part) = s.split_at(e_pos);
         let exp_str = &exp_part[1..]; // skip 'e'
@@ -891,7 +900,13 @@ fn format_number_for_js(value: f64) -> String {
     if value.fract() == 0.0 && value.abs() < 1e15 {
         format!("{}", value as i64)
     } else {
-        format!("{}", value)
+        // ECMAScript NumberToString — see js_number_to_string for rationale.
+        let abs = value.abs();
+        if abs >= 1e21 || abs < 1e-6 {
+            fix_exponent_format(&format!("{:e}", value))
+        } else {
+            format!("{}", value)
+        }
     }
 }
 
