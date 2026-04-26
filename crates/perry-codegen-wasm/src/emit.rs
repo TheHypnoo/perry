@@ -339,6 +339,20 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
         // that cache (color, width) and re-emit `el.style.border`.
         "widgetSetBorderColor" => "perry_ui_widget_set_border_color",
         "widgetSetBorderWidth" => "perry_ui_widget_set_border_width",
+        // Issue #185 Phase B closure 11 — Web aliases that bring the
+        // matrix Web column to full wired-on-non-Stub parity. Each
+        // routes to an existing JS function (most simply reusing the
+        // generic widget setters that already do the same DOM work).
+        "widgetSetBackgroundGradient" => "perry_ui_widget_set_background_gradient",
+        "textSetSelectable" => "perry_ui_text_set_selectable",
+        // textfield-specific setters reuse the generic ones — DOM
+        // <input> takes the same `el.style.*` props as a generic
+        // element.
+        "textfieldSetBackgroundColor" => "perry_ui_set_background",
+        "textfieldSetTextColor" => "perry_ui_set_foreground",
+        "textfieldSetFontSize" => "perry_ui_set_font_size",
+        "textfieldSetBorderless" => "perry_ui_textfield_set_borderless",
+        "stackSetAlignment" => "perry_ui_stack_set_alignment",
         // Text decoration (issue #185 Phase B). 0=none, 1=underline,
         // 2=strikethrough on the canonical FFI; CSS-side translates.
         "textSetDecoration" | "text_set_decoration" => "perry_ui_text_set_decoration",

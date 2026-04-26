@@ -2788,6 +2788,32 @@ function perry_ui_text_set_decoration(h, decoration) {
     : "none";
   el.style.textDecoration = css;
 }
+// Issue #185 Phase B closure 11 — TextField borderless. Drops the
+// rendered border so the input visually matches a non-bordered
+// borderless setter on the Apple side.
+function perry_ui_textfield_set_borderless(h, borderless) {
+  const el = uiGet(h);
+  if (!el) return;
+  el.style.border = borderless ? "none" : "";
+  // Also strip the default browser focus outline so "borderless"
+  // really feels borderless. User can override with explicit
+  // border / outline rules afterwards.
+  el.style.outline = borderless ? "none" : "";
+}
+// Issue #185 Phase B closure 11 — Stack alignment via CSS flex.
+// Numeric enum: 0=fill, 1=center, 2=leading, 3=trailing, 4=baseline.
+// Maps to CSS `align-items` (cross-axis on flex containers).
+function perry_ui_stack_set_alignment(h, alignment) {
+  const el = uiGet(h);
+  if (!el) return;
+  const value = alignment === 0 ? "stretch"
+    : alignment === 1 ? "center"
+    : alignment === 2 ? "flex-start"
+    : alignment === 3 ? "flex-end"
+    : alignment === 4 ? "baseline"
+    : "stretch";
+  el.style.alignItems = value;
+}
 // Drop shadow (issue #185 Phase B closure 2). Same arg shape as the
 // Apple CALayer twin — `(r,g,b,a)` is shadow color, `blur` is shadow
 // radius, `(offsetX, offsetY)` is shadow offset (positive y = downward,
@@ -3183,6 +3209,7 @@ const __perryUiDispatch = {
   perry_ui_widget_set_shadow,
   perry_ui_widget_set_border_color, perry_ui_widget_set_border_width,
   perry_ui_text_set_decoration,
+  perry_ui_textfield_set_borderless, perry_ui_stack_set_alignment,
   perry_ui_widget_set_width, perry_ui_widget_set_height, perry_ui_widget_set_hugging,
   perry_ui_widget_match_parent_width, perry_ui_widget_match_parent_height,
   perry_ui_widget_set_edge_insets, perry_ui_stack_set_detaches_hidden, perry_ui_stack_set_distribution,
