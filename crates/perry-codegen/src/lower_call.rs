@@ -2489,6 +2489,20 @@ pub(crate) fn lower_native_method_call(
                 let _ = lower_expr(ctx, children_expr)?;
             }
         }
+
+        // Issue #185 Phase C step 5: optional inline `style: { ... }`
+        // arg AFTER the children array. Position depends on whether
+        // spacing was passed first:
+        //   VStack(children, style?)              children_idx=0, style at args[1]
+        //   VStack(spacing, children, style?)     children_idx=1, style at args[2]
+        // `apply_inline_style` no-ops on non-object trailing args, so
+        // the call is safe even when it's accidentally something else.
+        let style_idx = children_idx + 1;
+        if let Some(style_arg) = args.get(style_idx).cloned() {
+            let parent_handle_str = ctx.block().load(I64, &parent_slot);
+            apply_inline_style(ctx, &parent_handle_str, &style_arg)?;
+        }
+
         let blk = ctx.block();
         let parent_final = blk.load(I64, &parent_slot);
         return Ok(nanbox_pointer_inline(blk, &parent_final));
