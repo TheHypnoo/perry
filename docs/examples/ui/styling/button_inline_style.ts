@@ -14,6 +14,7 @@ import { App, VStack, Button } from "perry/ui"
 // (PerryColor object literal), padding (single number OR per-side
 // object), shadow ({color, blur, offsetX, offsetY}), textDecoration
 // (string-literal). String colors and gradient land in step 4.
+// ANCHOR: button-inline-full
 const card = Button("Save", () => {
     console.log("saved")
 }, {
@@ -32,6 +33,7 @@ const card = Button("Save", () => {
     tooltip: "Save the current document",
     enabled: true,
 })
+// ANCHOR_END: button-inline-full
 
 App({
     title: "Inline Style Demo",

@@ -10,6 +10,7 @@
 
 import { App, VStack, HStack, Text, Button } from "perry/ui"
 
+// ANCHOR: stack-inline-full
 // VStack with explicit spacing AND inline style — children + style.
 const card = VStack(8, [
     Text("Heading"),
@@ -35,6 +36,7 @@ const toolbar = HStack([
     padding: { top: 8, right: 16, bottom: 8, left: 16 },
     borderRadius: 6,
 })
+// ANCHOR_END: stack-inline-full
 
 App({
     title: "Stack inline style",
