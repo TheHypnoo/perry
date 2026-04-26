@@ -4367,6 +4367,13 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     // ---- Text extras ----
     UiSig { method: "textSetSelectable", runtime: "perry_ui_text_set_selectable",
             args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+    // Text decoration (issue #185 Phase B): 0=none, 1=underline,
+    // 2=strikethrough. Wired on every backend (Apple via
+    // NSAttributedString, Android via Paint flags, GTK4 via Pango
+    // attributes, Web via CSS `text-decoration`, watchOS via tree
+    // metadata + SwiftUI host modifier). Windows is stub-with-state.
+    UiSig { method: "textSetDecoration", runtime: "perry_ui_text_set_decoration",
+            args: &[UiArgKind::Widget, UiArgKind::I64Raw], ret: UiReturnKind::Void },
 
     // ---- Widget extras ----
     UiSig { method: "widgetAddChildAt", runtime: "perry_ui_widget_add_child_at",
@@ -4403,6 +4410,17 @@ const PERRY_UI_TABLE: &[UiSig] = &[
             ret: UiReturnKind::Void },
     UiSig { method: "widgetSetBorderWidth", runtime: "perry_ui_widget_set_border_width",
             args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+    // Drop shadow setter (issue #185 Phase B). Args: handle, r,g,b,a (color
+    // 0-1; alpha lands in shadowOpacity), blur, offset_x, offset_y. Wired
+    // on every Apple platform; Phase B closures will add Android (elevation),
+    // GTK4 (CSS box-shadow), Web (CSS), Windows (DirectComposition).
+    UiSig { method: "widgetSetShadow", runtime: "perry_ui_widget_set_shadow",
+            args: &[
+                UiArgKind::Widget,
+                UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64,
+                UiArgKind::F64, UiArgKind::F64, UiArgKind::F64,
+            ],
+            ret: UiReturnKind::Void },
     UiSig { method: "widgetSetContextMenu", runtime: "perry_ui_widget_set_context_menu",
             args: &[UiArgKind::Widget, UiArgKind::Widget], ret: UiReturnKind::Void },
     UiSig { method: "stackSetDetachesHidden", runtime: "perry_ui_stack_set_detaches_hidden",

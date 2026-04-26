@@ -689,6 +689,7 @@ function buildImports() {
           matchParentHeight: "perry_ui_widget_match_parent_height",
           setHidden: "perry_ui_set_widget_hidden",
           setEdgeInsets: "perry_ui_widget_set_edge_insets",
+          setShadow: "perry_ui_widget_set_shadow",
           // App
           run: "perry_ui_app_run", setBody: "perry_ui_app_set_body",
         };
@@ -1823,6 +1824,7 @@ const __memDispatch = {
       matchParentWidth: "perry_ui_widget_match_parent_width",
       matchParentHeight: "perry_ui_widget_match_parent_height",
       setHidden: "perry_ui_set_widget_hidden", setEdgeInsets: "perry_ui_widget_set_edge_insets",
+      setShadow: "perry_ui_widget_set_shadow",
       run: "perry_ui_app_run", setBody: "perry_ui_app_set_body",
     };
     const uiFnName = uiMethodMap[mname];
@@ -2748,6 +2750,53 @@ function perry_ui_set_corner_radius(h, radius) { const el = uiGet(h); if (el) el
 function perry_ui_set_border(h, width, r, g, b, a) {
   const el = uiGet(h); if (el) el.style.border = `${width}px solid rgba(${r*255|0},${g*255|0},${b*255|0},${a})`;
 }
+// Joint border state for the Apple-style split setters
+// (`widgetSetBorderColor` / `widgetSetBorderWidth`). CSS won't render a
+// border unless style + color + width are all set in the same rule, so
+// we cache (color, width) per handle and re-apply `el.style.border` on
+// every change. Defaults match CALayer-ish behavior: missing color =
+// black, missing width = 1px. Issue #185 Phase B closure.
+const __perryBorderState = new Map();
+function __perry_apply_border(h) {
+  const el = uiGet(h);
+  if (!el) return;
+  const s = __perryBorderState.get(h) || {};
+  const color = s.color || [0, 0, 0, 1];
+  const width = s.width != null ? s.width : 1;
+  const [r, g, b, a] = color;
+  el.style.border = `${width}px solid rgba(${r*255|0},${g*255|0},${b*255|0},${a})`;
+}
+function perry_ui_widget_set_border_color(h, r, g, b, a) {
+  const s = __perryBorderState.get(h) || {};
+  s.color = [r, g, b, a];
+  __perryBorderState.set(h, s);
+  __perry_apply_border(h);
+}
+function perry_ui_widget_set_border_width(h, width) {
+  const s = __perryBorderState.get(h) || {};
+  s.width = width;
+  __perryBorderState.set(h, s);
+  __perry_apply_border(h);
+}
+// Text decoration (issue #185 Phase B closure). 0=none, 1=underline,
+// 2=strikethrough. CSS `text-decoration` values map cleanly.
+function perry_ui_text_set_decoration(h, decoration) {
+  const el = uiGet(h);
+  if (!el) return;
+  const css = decoration === 1 ? "underline"
+    : decoration === 2 ? "line-through"
+    : "none";
+  el.style.textDecoration = css;
+}
+// Drop shadow (issue #185 Phase B closure 2). Same arg shape as the
+// Apple CALayer twin — `(r,g,b,a)` is shadow color, `blur` is shadow
+// radius, `(offsetX, offsetY)` is shadow offset (positive y = downward,
+// matching CALayer + native HTML semantics).
+function perry_ui_widget_set_shadow(h, r, g, b, a, blur, offsetX, offsetY) {
+  const el = uiGet(h);
+  if (!el) return;
+  el.style.boxShadow = `${offsetX}px ${offsetY}px ${blur}px rgba(${r*255|0},${g*255|0},${b*255|0},${a})`;
+}
 function perry_ui_set_opacity(h, opacity) { const el = uiGet(h); if (el) el.style.opacity = opacity; }
 function perry_ui_set_enabled(h, enabled) {
   const el = uiGet(h); if (el) { el.disabled = !enabled; el.style.pointerEvents = enabled ? "" : "none"; el.style.opacity = enabled ? "" : "0.5"; }
@@ -3131,6 +3180,9 @@ const __perryUiDispatch = {
   perry_ui_set_font_family, perry_ui_set_padding, perry_ui_set_frame, perry_ui_set_corner_radius,
   perry_ui_set_border, perry_ui_set_opacity, perry_ui_set_enabled, perry_ui_set_tooltip,
   perry_ui_set_control_size, perry_ui_set_widget_hidden, perry_ui_widget_set_background_gradient,
+  perry_ui_widget_set_shadow,
+  perry_ui_widget_set_border_color, perry_ui_widget_set_border_width,
+  perry_ui_text_set_decoration,
   perry_ui_widget_set_width, perry_ui_widget_set_height, perry_ui_widget_set_hugging,
   perry_ui_widget_match_parent_width, perry_ui_widget_match_parent_height,
   perry_ui_widget_set_edge_insets, perry_ui_stack_set_detaches_hidden, perry_ui_stack_set_distribution,
@@ -3236,6 +3288,7 @@ const __uiMethodMap = {
   matchParentHeight: "perry_ui_widget_match_parent_height",
   setHidden: "perry_ui_set_widget_hidden",
   setEdgeInsets: "perry_ui_widget_set_edge_insets",
+  setShadow: "perry_ui_widget_set_shadow",
   run: "perry_ui_app_run", setBody: "perry_ui_app_set_body",
   addOverlay: "perry_ui_widget_add_overlay",
 };

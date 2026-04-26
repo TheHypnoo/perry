@@ -334,7 +334,19 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
         "setFrame" | "set_frame" => "perry_ui_set_frame",
         "setCornerRadius" | "set_corner_radius" => "perry_ui_set_corner_radius",
         "setBorder" | "set_border" => "perry_ui_set_border",
-        "setOpacity" | "set_opacity" => "perry_ui_set_opacity",
+        // Apple-style split setters (issue #185 Phase B closure). Map
+        // both to the new joint-state JS functions in wasm_runtime.js
+        // that cache (color, width) and re-emit `el.style.border`.
+        "widgetSetBorderColor" => "perry_ui_widget_set_border_color",
+        "widgetSetBorderWidth" => "perry_ui_widget_set_border_width",
+        // Text decoration (issue #185 Phase B). 0=none, 1=underline,
+        // 2=strikethrough on the canonical FFI; CSS-side translates.
+        "textSetDecoration" | "text_set_decoration" => "perry_ui_text_set_decoration",
+        // Drop shadow (issue #185 Phase B closure 2). Mirrors the
+        // canonical Apple-side name so the matrix has a single FFI
+        // symbol per row. JS runtime maps to `el.style.boxShadow`.
+        "widgetSetShadow" | "set_shadow" => "perry_ui_widget_set_shadow",
+        "setOpacity" | "set_opacity" | "widgetSetOpacity" => "perry_ui_set_opacity",
         "setEnabled" | "set_enabled" => "perry_ui_set_enabled",
         "setTooltip" | "set_tooltip" => "perry_ui_set_tooltip",
         "setControlSize" | "set_control_size" => "perry_ui_set_control_size",

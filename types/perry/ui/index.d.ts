@@ -174,6 +174,13 @@ export function textSetFontWeight(widget: Widget, size: number, weight: number):
 export function textSetFontFamily(widget: Widget, family: string): void;
 export function textSetWraps(widget: Widget, maxWidth: number): void;
 export function textSetSelectable(widget: Widget, selectable: number): void;
+/**
+ * Set text decoration on a Text widget (issue #185 Phase B).
+ * `decoration`: 0 = none, 1 = underline, 2 = strikethrough.
+ * Wired on every backend except Windows, which stores the value but
+ * doesn't yet rebuild HFONTs to apply it visually.
+ */
+export function textSetDecoration(widget: Widget, decoration: number): void;
 
 // ---------------------------------------------------------------------------
 // Button setters
@@ -215,6 +222,20 @@ export function widgetSetControlSize(widget: Widget, size: number): void;
 export function widgetSetEdgeInsets(widget: Widget, top: number, left: number, bottom: number, right: number): void;
 export function widgetSetBorderColor(widget: Widget, r: number, g: number, b: number, a: number): void;
 export function widgetSetBorderWidth(widget: Widget, width: number): void;
+/**
+ * Set a drop shadow on a widget. (r, g, b, a) is the shadow color in 0–1
+ * — alpha rides on the layer's shadowOpacity so a non-1 alpha doesn't
+ * double-multiply via the color's alpha. `blur` is the shadow radius.
+ * `(offsetX, offsetY)` is the shadow offset, with positive y = downward
+ * (matches HTML `box-shadow: x y blur color`). Issue #185 Phase B —
+ * currently wired on macOS / iOS / tvOS / visionOS / watchOS; Android,
+ * GTK4, Windows, Web closures coming next.
+ */
+export function widgetSetShadow(
+    widget: Widget,
+    r: number, g: number, b: number, a: number,
+    blur: number, offsetX: number, offsetY: number
+): void;
 export function widgetSetContextMenu(widget: Widget, menu: Widget): void;
 export function widgetAddOverlay(widget: Widget, overlay: Widget): void;
 export function widgetSetOverlayFrame(widget: Widget, x: number, y: number, width: number, height: number): void;

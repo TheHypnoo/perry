@@ -171,6 +171,81 @@ pub fn set_enabled(handle: i64, enabled: bool) {
     }
 }
 
+/// Set opacity (issue #185 Phase B). GTK4 has a built-in
+/// `Widget::set_opacity(0.0..=1.0)` that handles compositing on the
+/// platform's behalf; no CSS provider needed.
+pub fn set_opacity(handle: i64, opacity: f64) {
+    if let Some(widget) = get_widget(handle) {
+        widget.set_opacity(opacity);
+    }
+}
+
+thread_local! {
+    /// Joint border state per widget handle: `(color, width)`. Both
+    /// setters update this and re-emit the CSS rule together, because
+    /// CSS requires `border-style: solid` + a non-zero width + a color
+    /// all in the same provider for a border to actually render.
+    /// Setting only one would otherwise be silently ignored.
+    static BORDER_STATE: RefCell<std::collections::HashMap<i64, (Option<(f64, f64, f64, f64)>, Option<f64>)>>
+        = RefCell::new(std::collections::HashMap::new());
+}
+
+/// Helper: regenerate the per-handle border CSS provider from current
+/// state. Called from both `set_border_color` and `set_border_width`.
+fn apply_border_css(handle: i64) {
+    let Some(widget) = get_widget(handle) else { return };
+    let (color, width) = BORDER_STATE.with(|s| {
+        s.borrow().get(&handle).copied().unwrap_or((None, None))
+    });
+    // Defaults match CALayer-ish behavior: width 1.0 if unset,
+    // color black if unset. The cross-platform shape lets users
+    // call either setter alone and still get a visible border.
+    let (r, g, b, a) = color.unwrap_or((0.0, 0.0, 0.0, 1.0));
+    let w = width.unwrap_or(1.0);
+    let class_name = format!("perry-bd-{}", handle);
+    widget.remove_css_class(&class_name);
+    let rgba = format!("rgba({},{},{},{})", (r * 255.0) as i32, (g * 255.0) as i32, (b * 255.0) as i32, a);
+    let decl = format!("border: {}px solid {};", w as i32, rgba);
+    let is_button = widget.downcast_ref::<gtk4::Button>().is_some();
+    if is_button {
+        widget.add_css_class(&class_name);
+        let css = format!(
+            "button.flat.{} {{ {} }}\nbutton.{} {{ {} }}",
+            class_name, decl, class_name, decl
+        );
+        let provider = gtk4::CssProvider::new();
+        provider.load_from_data(&css);
+        gtk4::style_context_add_provider_for_display(
+            &widget.display(),
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_USER,
+        );
+    } else {
+        let css = format!("* {{ {} }}", decl);
+        apply_css(&widget, &css);
+    }
+}
+
+/// Set border color (issue #185 Phase B). Joint state with `set_border_width`.
+pub fn set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    BORDER_STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        let entry = state.entry(handle).or_insert((None, None));
+        entry.0 = Some((r, g, b, a));
+    });
+    apply_border_css(handle);
+}
+
+/// Set border width (issue #185 Phase B). Joint state with `set_border_color`.
+pub fn set_border_width(handle: i64, width: f64) {
+    BORDER_STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        let entry = state.entry(handle).or_insert((None, None));
+        entry.1 = Some(width);
+    });
+    apply_border_css(handle);
+}
+
 /// Set tooltip text on a widget.
 pub fn set_tooltip(handle: i64, text_ptr: *const u8) {
     let text = crate::app::str_from_header(text_ptr);
@@ -218,6 +293,59 @@ pub fn set_corner_radius(handle: i64, radius: f64) {
             );
         } else {
             let css = format!("* {{ border-radius: {}px; }}", radius as i32);
+            apply_css(&widget, &css);
+        }
+    }
+}
+
+/// Set drop shadow on a widget via CSS `box-shadow` (issue #185 Phase B).
+/// `(r, g, b, a)` is shadow color in 0–1 (alpha rides on the rgba() in CSS,
+/// so a non-1 alpha produces the soft tint just like the Apple twin's
+/// shadowOpacity). `blur` is the blur radius (px). `(offset_x, offset_y)`
+/// is the offset (positive y = downward, matching CSS `box-shadow` and
+/// the Apple CALayer twin).
+///
+/// Pattern mirrors `set_corner_radius`: a per-handle CSS class like
+/// `perry-sh-{handle}` is added to the widget, and a fresh
+/// `CssProvider` emits the `box-shadow` rule scoped to that class.
+/// Display-level `STYLE_PROVIDER_PRIORITY_USER` for buttons (matches
+/// the corner-radius button special-case), widget-level for other
+/// widgets via the shared `apply_css` helper. The class is removed
+/// before re-adding so repeat calls don't pile up stale providers.
+pub fn set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    if let Some(widget) = get_widget(handle) {
+        let class_name = format!("perry-sh-{}", handle);
+        widget.remove_css_class(&class_name);
+        let r255 = (r * 255.0) as i32;
+        let g255 = (g * 255.0) as i32;
+        let b255 = (b * 255.0) as i32;
+        let rgba = format!("rgba({},{},{},{})", r255, g255, b255, a);
+        let shadow_decl = format!(
+            "box-shadow: {}px {}px {}px {};",
+            offset_x as i32, offset_y as i32, blur as i32, rgba
+        );
+        let is_button = widget.downcast_ref::<gtk4::Button>().is_some();
+        if is_button {
+            widget.add_css_class(&class_name);
+            let css = format!(
+                "button.flat.{} {{ {} }}\n\
+                 button.{} {{ {} }}",
+                class_name, shadow_decl,
+                class_name, shadow_decl
+            );
+            let provider = gtk4::CssProvider::new();
+            provider.load_from_data(&css);
+            gtk4::style_context_add_provider_for_display(
+                &widget.display(),
+                &provider,
+                gtk4::STYLE_PROVIDER_PRIORITY_USER,
+            );
+        } else {
+            let css = format!("* {{ {} }}", shadow_decl);
             apply_css(&widget, &css);
         }
     }

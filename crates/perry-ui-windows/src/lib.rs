@@ -453,6 +453,14 @@ pub extern "C" fn perry_ui_text_set_selectable(handle: i64, selectable: f64) {
     widgets::text::set_selectable(handle, selectable != 0.0);
 }
 
+/// Set text decoration (issue #185 Phase B closure). Currently
+/// stub-with-state on Windows; see `widgets::text::set_decoration`
+/// for rationale.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_decoration(handle: i64, decoration: i64) {
+    widgets::text::set_decoration(handle, decoration);
+}
+
 /// Set the font family.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_font_family(handle: i64, family_ptr: i64) {
@@ -555,6 +563,41 @@ pub extern "C" fn perry_ui_widget_set_background_gradient(handle: i64, r1: f64, 
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_corner_radius(handle: i64, radius: f64) {
     widgets::set_corner_radius(handle, radius);
+}
+
+/// Set drop shadow on a widget (issue #185 Phase B closure).
+///
+/// Currently a stub-with-state: params are stored in `SHADOW_PARAMS`
+/// but no paint pass consumes them yet. Real Windows shadows need
+/// either DirectComposition or a custom WM_PAINT pass — separate
+/// follow-up. The matrix marks Windows as `Stub` for this prop so
+/// users know the symbol resolves but rendering is deferred.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    widgets::set_shadow(handle, r, g, b, a, blur, offset_x, offset_y);
+}
+
+/// Set static opacity on a widget (issue #185 Phase B closure).
+/// Currently stub-with-state; see `widgets::set_opacity` for rationale.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_opacity(handle: i64, opacity: f64) {
+    widgets::set_opacity(handle, opacity);
+}
+
+/// Set border color (issue #185 Phase B closure). Stub-with-state.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::set_border_color(handle, r, g, b, a);
+}
+
+/// Set border width (issue #185 Phase B closure). Stub-with-state.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_border_width(handle: i64, width: f64) {
+    widgets::set_border_width(handle, width);
 }
 
 /// Set context menu on a widget.

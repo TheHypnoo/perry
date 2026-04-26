@@ -129,3 +129,44 @@ pub fn set_selectable(handle: i64, selectable: bool) {
         }
     }
 }
+
+/// Set text decoration on a Text widget via `NSAttributedString` (issue
+/// #185 Phase B). `decoration`: 0=none, 1=underline, 2=strikethrough.
+/// Reads the current `stringValue`, wraps it with the requested
+/// underline / strikethrough attribute (NSUnderlineStyleSingle = 1),
+/// and calls `setAttributedStringValue:`. Calling this with `decoration =
+/// 0` resets to the plain string. Pattern mirrors `button::set_text_color`.
+pub fn set_decoration(handle: i64, decoration: i64) {
+    use objc2::runtime::{AnyClass, AnyObject};
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+            let current: Retained<NSString> = objc2::msg_send![tf, stringValue];
+            if decoration == 0 {
+                tf.setStringValue(&current);
+                return;
+            }
+            let key = if decoration == 1 {
+                NSString::from_str("NSUnderline")
+            } else {
+                NSString::from_str("NSStrikethrough")
+            };
+            let num_cls = AnyClass::get(c"NSNumber").unwrap();
+            let one: Retained<AnyObject> = objc2::msg_send![num_cls, numberWithInt: 1i32];
+            let attrs: Retained<AnyObject> = objc2::msg_send![
+                AnyClass::get(c"NSDictionary").unwrap(),
+                dictionaryWithObject: &*one,
+                forKey: &*key
+            ];
+            let ns_str: *const AnyObject = Retained::as_ptr(&current) as *const AnyObject;
+            let cls = AnyClass::get(c"NSAttributedString").unwrap();
+            let alloc: *mut AnyObject = objc2::msg_send![cls, alloc];
+            let attr_str: *mut AnyObject = objc2::msg_send![
+                alloc,
+                initWithString: ns_str,
+                attributes: &*attrs
+            ];
+            let _: () = objc2::msg_send![tf, setAttributedStringValue: attr_str];
+        }
+    }
+}

@@ -431,6 +431,12 @@ pub extern "C" fn perry_ui_text_set_selectable(handle: i64, selectable: f64) {
     widgets::text::set_selectable(handle, selectable != 0.0);
 }
 
+/// Text decoration (issue #185 Phase B). 0=none, 1=underline, 2=strikethrough.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_decoration(handle: i64, decoration: i64) {
+    widgets::text::set_decoration(handle, decoration);
+}
+
 #[no_mangle]
 pub extern "C" fn perry_ui_button_set_bordered(handle: i64, bordered: f64) {
     widgets::button::set_bordered(handle, bordered != 0.0);
@@ -779,6 +785,18 @@ pub extern "C" fn perry_ui_widget_set_control_size(handle: i64, size: i64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_corner_radius(handle: i64, radius: f64) {
     widgets::set_corner_radius(handle, radius);
+}
+
+/// Set drop shadow via Material `setElevation` + (API 28+)
+/// `setOutlineSpotShadowColor` / `setOutlineAmbientShadowColor`. See
+/// `widgets::set_shadow` for the full mapping rationale (issue #185 Phase B).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    widgets::set_shadow(handle, r, g, b, a, blur, offset_x, offset_y);
 }
 
 #[no_mangle]

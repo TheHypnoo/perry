@@ -401,6 +401,13 @@ pub extern "C" fn perry_ui_text_set_wraps(handle: i64, max_width: f64) {
     widgets::text::set_wraps(handle, max_width);
 }
 
+/// Set text decoration on a Text widget (issue #185 Phase B).
+/// `decoration`: 0=none, 1=underline, 2=strikethrough.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_decoration(handle: i64, decoration: i64) {
+    widgets::text::set_decoration(handle, decoration);
+}
+
 /// Set whether a Text widget is selectable.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_selectable(handle: i64, selectable: f64) {
@@ -721,6 +728,19 @@ pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, 
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_border_width(handle: i64, width: f64) {
     widgets::set_border_width(handle, width);
+}
+
+/// Set drop shadow on any widget via its CALayer (issue #185 Phase B).
+/// (r,g,b,a) is shadow color; alpha lands in `shadowOpacity`. `blur` is
+/// `shadowRadius`; `(offset_x, offset_y)` is `shadowOffset` (positive y =
+/// downward, matching HTML `box-shadow`).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    widgets::set_shadow(handle, r, g, b, a, blur, offset_x, offset_y);
 }
 
 /// Set edge insets (padding) on an NSStackView widget. No-op for other widget types.

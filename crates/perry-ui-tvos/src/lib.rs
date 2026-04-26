@@ -341,6 +341,12 @@ pub extern "C" fn perry_ui_text_set_wraps(handle: i64, max_width: f64) {
     widgets::text::set_wraps(handle, max_width);
 }
 
+/// Text decoration (issue #185 Phase B). 0=none, 1=underline, 2=strikethrough.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_decoration(handle: i64, decoration: i64) {
+    widgets::text::set_decoration(handle, decoration);
+}
+
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_selectable(handle: i64, selectable: f64) {
     widgets::text::set_selectable(handle, selectable != 0.0);
@@ -1073,6 +1079,35 @@ pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, 
                 let _: () = objc2::msg_send![layer, setBorderColor: cg_color];
                 extern "C" { fn CGColorRelease(color: *mut std::ffi::c_void); }
                 CGColorRelease(cg_color);
+            }
+        }
+    }
+}
+
+/// Set drop shadow on any widget via its CALayer (issue #185 Phase B).
+/// Mirrors the iOS / visionOS / macOS twin so the user-facing API is
+/// identical across Apple targets: `(r,g,b,a)` shadow color (alpha →
+/// shadowOpacity), `blur` → shadowRadius, `(offset_x, offset_y)` →
+/// shadowOffset CGSize.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    if let Some(view) = widgets::get_widget(handle) {
+        unsafe {
+            let layer: *mut objc2::runtime::AnyObject = objc2::msg_send![&*view, layer];
+            if !layer.is_null() {
+                let cg_color = widgets::create_cg_color(r, g, b, 1.0);
+                let _: () = objc2::msg_send![layer, setShadowColor: cg_color];
+                extern "C" { fn CGColorRelease(color: *mut std::ffi::c_void); }
+                CGColorRelease(cg_color);
+                let _: () = objc2::msg_send![layer, setShadowOpacity: a as f32];
+                let _: () = objc2::msg_send![layer, setShadowRadius: blur];
+                let offset = objc2_core_foundation::CGSize::new(offset_x, offset_y);
+                let _: () = objc2::msg_send![layer, setShadowOffset: offset];
+                let _: () = objc2::msg_send![layer, setMasksToBounds: false];
             }
         }
     }

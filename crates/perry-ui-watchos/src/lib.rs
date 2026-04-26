@@ -320,6 +320,16 @@ pub extern "C" fn perry_ui_text_set_wraps(handle: i64, _max_width: f64) {
     });
 }
 
+/// Text decoration (issue #185 Phase B). 0=none, 1=underline, 2=strikethrough.
+/// Stored on `NodeData`; the SwiftUI host applies `.underline()` /
+/// `.strikethrough()` modifiers at render time.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_decoration(handle: i64, decoration: i64) {
+    tree::with_node_mut(handle, |node| {
+        node.text_decoration = decoration;
+    });
+}
+
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_selectable(_handle: i64, _selectable: f64) {}
 
@@ -422,6 +432,20 @@ pub extern "C" fn perry_ui_widget_set_enabled(handle: i64, enabled: i64) {
 pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     tree::with_node_mut(handle, |node| {
         node.border_color = Some((r, g, b, a));
+    });
+}
+
+/// Set drop shadow on a widget node (issue #185 Phase B).
+/// watchOS stores shadow in the introspection tree; the SwiftUI host
+/// applies `.shadow(color:radius:x:y:)` modifier when rendering.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    tree::with_node_mut(handle, |node| {
+        node.shadow = Some((r, g, b, a, blur, offset_x, offset_y));
     });
 }
 
