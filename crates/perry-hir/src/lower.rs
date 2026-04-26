@@ -9252,11 +9252,11 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
 
             // Check if this is Symbol.<well-known> — Symbol.toPrimitive,
             // Symbol.hasInstance, Symbol.toStringTag, Symbol.iterator,
-            // Symbol.asyncIterator. Lowered to `SymbolFor(String("@@__perry_wk_<name>"))`
-            // which the runtime's `js_symbol_for` sniffs via prefix and
-            // resolves from the well-known cache (not the registry). This
-            // gives each well-known symbol a stable pointer without needing
-            // a new HIR variant.
+            // Symbol.asyncIterator, Symbol.dispose, Symbol.asyncDispose.
+            // Lowered to `SymbolFor(String("@@__perry_wk_<name>"))` which the
+            // runtime's `js_symbol_for` sniffs via prefix and resolves from
+            // the well-known cache (not the registry). Gives each well-known
+            // symbol a stable pointer without needing a new HIR variant.
             if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
                 if obj_ident.sym.as_ref() == "Symbol" {
                     if let ast::MemberProp::Ident(prop_ident) = &member.prop {
@@ -9268,6 +9268,8 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 | "toStringTag"
                                 | "iterator"
                                 | "asyncIterator"
+                                | "dispose"
+                                | "asyncDispose"
                         ) {
                             return Ok(Expr::SymbolFor(Box::new(Expr::String(
                                 format!("@@__perry_wk_{}", prop_name),
