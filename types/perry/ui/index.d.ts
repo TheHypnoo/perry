@@ -521,7 +521,21 @@ export function pollOpenFile(): string;
 // Keyboard shortcuts
 // ---------------------------------------------------------------------------
 
-export function addKeyboardShortcut(key: string, callback: () => void): void;
+/**
+ * Register a keyboard shortcut that fires `callback` when pressed.
+ *
+ * `modifiers` is a bitfield: `1 = Cmd` (Ctrl on Linux/Windows), `2 = Shift`,
+ * `4 = Option/Alt`, `8 = Control`. Combine with bitwise OR — e.g. Cmd+Shift+S
+ * is `1 | 2` (= `3`). Pass `0` for an unmodified key.
+ *
+ * Must be called before `App({...})` — registrations are buffered and
+ * installed when the menu bar is created.
+ */
+export function addKeyboardShortcut(
+    key: string,
+    modifiers: number,
+    callback: () => void,
+): void;
 
 // ---------------------------------------------------------------------------
 // App lifecycle hooks

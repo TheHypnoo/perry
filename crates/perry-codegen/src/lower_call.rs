@@ -5146,8 +5146,9 @@ const PERRY_UI_TABLE: &[UiSig] = &[
             args: &[], ret: UiReturnKind::F64 },
 
     // ---- Keyboard shortcuts ----
+    // `modifiers` is a bitfield: 1=Cmd, 2=Shift, 4=Option, 8=Control.
     UiSig { method: "addKeyboardShortcut", runtime: "perry_ui_add_keyboard_shortcut",
-            args: &[UiArgKind::Str, UiArgKind::Closure], ret: UiReturnKind::Void },
+            args: &[UiArgKind::Str, UiArgKind::F64, UiArgKind::Closure], ret: UiReturnKind::Void },
 
     // ---- App lifecycle hooks ----
     UiSig { method: "onTerminate", runtime: "perry_ui_app_on_terminate",
