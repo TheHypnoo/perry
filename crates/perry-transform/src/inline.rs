@@ -601,6 +601,24 @@ fn find_max_local_id(stmts: &[Stmt]) -> LocalId {
             Expr::JsonStringify(inner) | Expr::JsonParse(inner) => {
                 check_expr(inner, max_id);
             }
+            // Issue #169 latent: missing arms here would let fresh-id
+            // allocation collide with a LocalGet nested inside a
+            // Uint8Array index expression in a larger module.
+            Expr::Uint8ArrayGet { array, index } => {
+                check_expr(array, max_id);
+                check_expr(index, max_id);
+            }
+            Expr::Uint8ArraySet { array, index, value } => {
+                check_expr(array, max_id);
+                check_expr(index, max_id);
+                check_expr(value, max_id);
+            }
+            Expr::Uint8ArrayLength(arr) => {
+                check_expr(arr, max_id);
+            }
+            Expr::Uint8ArrayNew(Some(arg)) => {
+                check_expr(arg, max_id);
+            }
             _ => {}
         }
     }
@@ -949,6 +967,23 @@ fn inline_calls_in_expr(
             for arg in args {
                 hoisted.extend(inline_calls_in_expr(arg, func_candidates, method_candidates, local_types, next_local_id));
             }
+        }
+        // Issue #169: a Call nested inside a Uint8Array index/set/length
+        // (e.g. `buf[clamp(i)]`) wouldn't be inlined without these arms.
+        Expr::Uint8ArrayGet { array, index } => {
+            hoisted.extend(inline_calls_in_expr(array, func_candidates, method_candidates, local_types, next_local_id));
+            hoisted.extend(inline_calls_in_expr(index, func_candidates, method_candidates, local_types, next_local_id));
+        }
+        Expr::Uint8ArraySet { array, index, value } => {
+            hoisted.extend(inline_calls_in_expr(array, func_candidates, method_candidates, local_types, next_local_id));
+            hoisted.extend(inline_calls_in_expr(index, func_candidates, method_candidates, local_types, next_local_id));
+            hoisted.extend(inline_calls_in_expr(value, func_candidates, method_candidates, local_types, next_local_id));
+        }
+        Expr::Uint8ArrayLength(arr) => {
+            hoisted.extend(inline_calls_in_expr(arr, func_candidates, method_candidates, local_types, next_local_id));
+        }
+        Expr::Uint8ArrayNew(Some(arg)) => {
+            hoisted.extend(inline_calls_in_expr(arg, func_candidates, method_candidates, local_types, next_local_id));
         }
         _ => {}
     }
@@ -1758,6 +1793,26 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
             substitute_locals(buffer, param_map, next_local_id);
             substitute_locals(index, param_map, next_local_id);
             substitute_locals(value, param_map, next_local_id);
+        }
+        // Issue #169: without these, inlining a function that takes a
+        // Uint8Array param leaves stale LocalGet(param_id) in the body.
+        // The codegen's soft fallback boxes the unknown id as
+        // TAG_UNDEFINED, the slow-path bounds check then evaluates
+        // @llvm.assume(i1 false), and the program traps.
+        Expr::Uint8ArrayGet { array, index } => {
+            substitute_locals(array, param_map, next_local_id);
+            substitute_locals(index, param_map, next_local_id);
+        }
+        Expr::Uint8ArraySet { array, index, value } => {
+            substitute_locals(array, param_map, next_local_id);
+            substitute_locals(index, param_map, next_local_id);
+            substitute_locals(value, param_map, next_local_id);
+        }
+        Expr::Uint8ArrayLength(arr) => {
+            substitute_locals(arr, param_map, next_local_id);
+        }
+        Expr::Uint8ArrayNew(Some(arg)) => {
+            substitute_locals(arg, param_map, next_local_id);
         }
         Expr::BufferCopy { source, target, target_start, source_start, source_end } => {
             substitute_locals(source, param_map, next_local_id);
