@@ -215,7 +215,7 @@ for test_file in "$TEST_DIR"/*.ts; do
     echo "$node_output" > "$node_output_file"
 
     # Compile with Perry
-    compile_output=$(cargo run --quiet -- $BACKEND_FLAG "$test_file" -o "$perry_binary" 2>&1)
+    compile_output=$(cargo run --quiet --bin perry -- $BACKEND_FLAG "$test_file" -o "$perry_binary" 2>&1)
     compile_exit=$?
 
     if [[ $compile_exit -ne 0 ]]; then
