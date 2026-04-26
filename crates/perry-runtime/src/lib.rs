@@ -24,6 +24,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 pub mod value;
 pub mod gc;
 pub mod arena;
+pub mod color_parse;
 pub mod object;
 pub mod array;
 pub mod map;

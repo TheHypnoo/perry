@@ -3216,51 +3216,47 @@ fn apply_inline_style(
             // through to the catch-all and is silently skipped — step 4
             // will add runtime parseColor + dynamic-value paths.
             "backgroundColor" => {
-                if let Some((r, g, b, a)) = extract_perry_color(ctx, val)? {
-                    ctx.pending_declares.push((
-                        "perry_ui_widget_set_background_color".to_string(),
-                        DOUBLE,
-                        vec![I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE],
-                    ));
-                    ctx.block().call(
-                        DOUBLE,
-                        "perry_ui_widget_set_background_color",
-                        &[(I64, handle), (DOUBLE, &r), (DOUBLE, &g), (DOUBLE, &b), (DOUBLE, &a)],
-                    );
-                }
+                let (r, g, b, a) = lower_color_with_runtime_fallback(ctx, val)?;
+                ctx.pending_declares.push((
+                    "perry_ui_widget_set_background_color".to_string(),
+                    DOUBLE,
+                    vec![I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE],
+                ));
+                ctx.block().call(
+                    DOUBLE,
+                    "perry_ui_widget_set_background_color",
+                    &[(I64, handle), (DOUBLE, &r), (DOUBLE, &g), (DOUBLE, &b), (DOUBLE, &a)],
+                );
             }
             "color" => {
                 // For most widgets `text_set_color` is the right setter;
                 // Button has its own button_set_text_color. Default to
                 // the generic textSet path — works on Text and is a no-op
-                // on widgets that ignore it. Step 4 may dispatch by
-                // widget kind for sharper semantics.
-                if let Some((r, g, b, a)) = extract_perry_color(ctx, val)? {
-                    ctx.pending_declares.push((
-                        "perry_ui_text_set_color".to_string(),
-                        DOUBLE,
-                        vec![I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE],
-                    ));
-                    ctx.block().call(
-                        DOUBLE,
-                        "perry_ui_text_set_color",
-                        &[(I64, handle), (DOUBLE, &r), (DOUBLE, &g), (DOUBLE, &b), (DOUBLE, &a)],
-                    );
-                }
+                // on widgets that ignore it.
+                let (r, g, b, a) = lower_color_with_runtime_fallback(ctx, val)?;
+                ctx.pending_declares.push((
+                    "perry_ui_text_set_color".to_string(),
+                    DOUBLE,
+                    vec![I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE],
+                ));
+                ctx.block().call(
+                    DOUBLE,
+                    "perry_ui_text_set_color",
+                    &[(I64, handle), (DOUBLE, &r), (DOUBLE, &g), (DOUBLE, &b), (DOUBLE, &a)],
+                );
             }
             "borderColor" => {
-                if let Some((r, g, b, a)) = extract_perry_color(ctx, val)? {
-                    ctx.pending_declares.push((
-                        "perry_ui_widget_set_border_color".to_string(),
-                        DOUBLE,
-                        vec![I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE],
-                    ));
-                    ctx.block().call(
-                        DOUBLE,
-                        "perry_ui_widget_set_border_color",
-                        &[(I64, handle), (DOUBLE, &r), (DOUBLE, &g), (DOUBLE, &b), (DOUBLE, &a)],
-                    );
-                }
+                let (r, g, b, a) = lower_color_with_runtime_fallback(ctx, val)?;
+                ctx.pending_declares.push((
+                    "perry_ui_widget_set_border_color".to_string(),
+                    DOUBLE,
+                    vec![I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE],
+                ));
+                ctx.block().call(
+                    DOUBLE,
+                    "perry_ui_widget_set_border_color",
+                    &[(I64, handle), (DOUBLE, &r), (DOUBLE, &g), (DOUBLE, &b), (DOUBLE, &a)],
+                );
             }
             "padding" => {
                 let (top, right, bottom, left) = match val {
@@ -3477,6 +3473,54 @@ fn fmt_float(x: f64) -> String {
     } else {
         format!("{}", x)
     }
+}
+
+/// Lower a color expression to 4 channel values, with a runtime
+/// fallback for non-literal inputs (issue #185 Phase C step 7).
+///
+/// Tries `extract_perry_color` first — that handles compile-time hex
+/// strings, named colors, and `{r, g, b, a}` object literals. If that
+/// returns `None`, the value is a runtime expression (e.g.,
+/// `backgroundColor: someStringVar`); we lower the value once, then
+/// emit 4 `js_color_parse_channel` calls (one per channel) against
+/// it. The runtime parses the string per call (slight redundancy)
+/// but keeps the LLVM IR trivial — single function call per channel,
+/// no stack-alloca-of-array machinery needed.
+fn lower_color_with_runtime_fallback(
+    ctx: &mut FnCtx<'_>,
+    val: &Expr,
+) -> Result<(String, String, String, String)> {
+    if let Some(rgba) = extract_perry_color(ctx, val)? {
+        return Ok(rgba);
+    }
+    // Runtime fallback: lower expression once, then 4 channel calls.
+    let value = lower_expr(ctx, val)?;
+    ctx.pending_declares.push((
+        "js_color_parse_channel".to_string(),
+        DOUBLE,
+        vec![DOUBLE, I64],
+    ));
+    let r = ctx.block().call(
+        DOUBLE,
+        "js_color_parse_channel",
+        &[(DOUBLE, &value), (I64, "0")],
+    );
+    let g = ctx.block().call(
+        DOUBLE,
+        "js_color_parse_channel",
+        &[(DOUBLE, &value), (I64, "1")],
+    );
+    let b = ctx.block().call(
+        DOUBLE,
+        "js_color_parse_channel",
+        &[(DOUBLE, &value), (I64, "2")],
+    );
+    let a = ctx.block().call(
+        DOUBLE,
+        "js_color_parse_channel",
+        &[(DOUBLE, &value), (I64, "3")],
+    );
+    Ok((r, g, b, a))
 }
 
 /// Extract a per-side padding object `{top?, right?, bottom?, left?}`
