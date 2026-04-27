@@ -207,6 +207,14 @@ pub struct LoweringContext {
     /// `Type::Named(class_name)`. Mirrors `func_return_types` but for the
     /// method-dispatch path.
     pub(crate) class_method_return_types: Vec<(String, String, Type)>,
+    /// Issue #212: classes nested inside a function whose method bodies
+    /// reference enclosing-scope locals. `lower_class_decl` adds hidden
+    /// `__perry_cap_<id>` fields, prepends `let id = this.__perry_cap_<id>`
+    /// to each capturing instance method, extends the constructor with one
+    /// synthesized param per captured id, and registers the captured ids
+    /// here so the `Expr::New { class_name }` lowering can append
+    /// `LocalGet(id)` for each captured id at every construction site.
+    pub(crate) class_captures: Vec<(String, Vec<LocalId>)>,
 }
 
 impl LoweringContext {
@@ -279,6 +287,7 @@ impl LoweringContext {
             anon_shape_classes: HashMap::new(),
             next_anon_shape_id: 0,
             class_method_return_types: Vec::new(),
+            class_captures: Vec::new(),
         }
     }
 
@@ -496,6 +505,24 @@ impl LoweringContext {
     /// Look up the list of instance field names declared on a class (NOT including inherited).
     pub(crate) fn lookup_class_field_names(&self, class_name: &str) -> Option<&[String]> {
         self.class_field_names.iter().find(|(n, _)| n == class_name).map(|(_, f)| f.as_slice())
+    }
+
+    /// Issue #212: register the outer-scope LocalIds that a nested class
+    /// captures. `lower_class_decl` calls this after extending the
+    /// constructor; `Expr::New { class_name }` lowering looks it up and
+    /// appends `LocalGet(id)` per captured id at every construction site.
+    pub(crate) fn register_class_captures(&mut self, class_name: String, captures: Vec<LocalId>) {
+        if let Some(entry) = self.class_captures.iter_mut().find(|(n, _)| *n == class_name) {
+            entry.1 = captures;
+        } else {
+            self.class_captures.push((class_name, captures));
+        }
+    }
+
+    /// Look up the captured outer-scope LocalIds for a class. Returns `None`
+    /// for plain (non-capturing) classes.
+    pub(crate) fn lookup_class_captures(&self, class_name: &str) -> Option<&[LocalId]> {
+        self.class_captures.iter().find(|(n, _)| n == class_name).map(|(_, c)| c.as_slice())
     }
 
     pub(crate) fn register_class_statics(&mut self, class_name: String, static_fields: Vec<String>, static_methods: Vec<String>) {
@@ -5827,11 +5854,21 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     if let ast::Expr::Member(member) = expr.as_ref() {
                         if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
                             let obj_name = obj_ident.sym.to_string();
-                            if ctx.lookup_class(&obj_name).is_some() {
+                            // Treat uppercase imported identifiers as candidate classes —
+                            // we don't have cross-module class metadata at HIR-lower
+                            // time, so without this `import { MongoClient } from
+                            // 'pkg'; MongoClient.connect(...)` falls through to the
+                            // dynamic-dispatch path and reads garbage from the static
+                            // ClosureHeader.  See compile.rs::imported_classes for the
+                            // backing dispatch table that resolves these calls at
+                            // codegen time.
+                            let is_imported_upper = ctx.lookup_imported_func(&obj_name).is_some()
+                                && obj_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+                            if ctx.lookup_class(&obj_name).is_some() || is_imported_upper {
                                 match &member.prop {
                                     ast::MemberProp::Ident(method_ident) => {
                                         let method_name = method_ident.sym.to_string();
-                                        if ctx.has_static_method(&obj_name, &method_name) {
+                                        if ctx.has_static_method(&obj_name, &method_name) || is_imported_upper {
                                             return Ok(Expr::StaticMethodCall {
                                                 class_name: obj_name,
                                                 method_name,
@@ -10747,7 +10784,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         }
                     }
 
-                    let args = new_expr.args.as_ref()
+                    let mut args = new_expr.args.as_ref()
                         .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
                         .transpose()?
                         .unwrap_or_default();
@@ -10757,6 +10794,17 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             .map(|t| extract_ts_type_with_ctx(t, Some(ctx)))
                             .collect())
                         .unwrap_or_default();
+                    // Issue #212: classes nested in a function may capture
+                    // enclosing-scope locals. `lower_class_decl` extended the
+                    // constructor with one synthesized param per captured id;
+                    // pass each as `LocalGet(id)` here so the outer scope's
+                    // current value is snapshotted onto the new instance.
+                    let class_captures: Vec<LocalId> = ctx.lookup_class_captures(&class_name)
+                        .map(|c| c.to_vec())
+                        .unwrap_or_default();
+                    for cid in class_captures {
+                        args.push(Expr::LocalGet(cid));
+                    }
                     Ok(Expr::New { class_name, args, type_args })
                 }
                 // Non-identifier callee (e.g., new (condition ? A : B)() or new someVar())

@@ -741,25 +741,16 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                     }
                     ast::MethodKind::Method => {
                         let mut func = lower_class_method(ctx, method)?;
-                        // [Symbol.dispose] / [Symbol.asyncDispose]: drop the
-                        // method silently when the class is nested inside a
-                        // function (`scope_depth > 0`) AND the body references
-                        // an enclosing-function local — class-method-captures-
-                        // enclosing-fn-local has a pre-existing codegen gap
-                        // (separate, broader issue), and pretending the
-                        // dispose hook doesn't exist preserves the pre-fix
-                        // "test compiles, produces no disposed output"
-                        // baseline. Module-level classes (the canonical case)
-                        // can still capture module-level locals — codegen
-                        // resolves those fine — so dispose works for the
-                        // documented use case.
-                        if (prop_name == "__perry_dispose__"
-                            || prop_name == "__perry_async_dispose__")
-                            && ctx.scope_depth > 0
-                            && method_body_captures_outer(&func, ctx)
-                        {
-                            continue;
-                        }
+                        // Issue #212 fixed the broader class-method-captures-
+                        // outer-fn-local codegen gap, so the dispose family no
+                        // longer needs a silent-drop fallback — the same
+                        // hidden-field rewrite that lets `log() { captured.push(...) }`
+                        // work also lets `[Symbol.dispose]() { disposed.push(...) }`
+                        // work. The pre-fix gate at this site (`scope_depth > 0
+                        // && method_body_captures_outer(...)` → `continue`) was
+                        // removed in v0.5.319. See the v0.5.317 entry for the
+                        // history and `test_issue_154_using_dispose.ts` for the
+                        // regression test.
                         // `*[Symbol.iterator]()` — lift to a top-level
                         // generator function with `this` as an explicit
                         // first parameter. The generator transform
@@ -1004,6 +995,272 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
 
     // Restore previous current_class
     ctx.current_class = old_class;
+
+    // Issue #212: classes nested inside a function may have method bodies
+    // that reference enclosing-fn locals. Walk every instance member
+    // (methods, getters, setters, constructor) and union the captured
+    // outer-scope LocalIds. Then:
+    //   1. Add a hidden `__perry_cap_<outer_id>` instance field per
+    //      captured outer id. The field name is keyed off the outer id so
+    //      every method/ctor agrees on which field reads which capture,
+    //      independent of the per-method fresh ids below.
+    //   2. For each method/getter/setter, allocate a FRESH method-local
+    //      LocalId per captured outer id, rewrite the body's
+    //      `LocalGet(outer_id)` / `LocalSet(outer_id, _)` / nested-closure
+    //      `captures: [outer_id]` to use the fresh id, and prepend
+    //      `Stmt::Let { id: fresh_id, init: PropertyGet(This,
+    //      "__perry_cap_<outer_id>") }`. Per-method fresh ids are
+    //      essential — the boxed-vars analysis at codegen time runs
+    //      module-wide on a single global LocalId space; a `Stmt::Let
+    //      { id: outer_id }` inside a method that has a closure mutating
+    //      the captured value would mark `outer_id` as boxed *globally*,
+    //      which then makes the outer fn's plain (non-boxed) read of
+    //      `outer_id` segfault on a `js_box_get` of a non-box pointer.
+    //   3. Extend (or synthesize) the constructor: append a param with a
+    //      FRESH ctor-local LocalId per captured outer id, prepend
+    //      `this.__perry_cap_<outer_id> = LocalGet(fresh_ctor_id)`, and
+    //      rewrite the user-written ctor body's `LocalGet(outer_id)` to
+    //      use the fresh ctor id (same boxed-vars-isolation reason as
+    //      methods). For derived classes, the assignment is placed after
+    //      the first `super()` call so `this` is initialized first.
+    //   4. Register the class in `ctx.class_captures` keyed by
+    //      `outer_id`; `Expr::New { class_name }` looks this up and
+    //      appends `LocalGet(outer_id)` per captured outer id at every
+    //      construction site (the outer scope's actual id, since we're
+    //      lowering inside it).
+    //
+    // Static methods aren't included because they have no `this` to read
+    // captures from — if a static method body references an outer local,
+    // the original codegen error fires (out of scope for #212).
+    //
+    // Mutation note: `LocalSet(outer_id, ...)` inside a method writes
+    // only to the method-local fresh-id slot, not back to the outer
+    // scope. This diverges from JS for primitive captures with
+    // reassignment. The common case — closure over a reference type
+    // (`array.push`, `obj.x = ...`) — works because both the
+    // method-local copy and the outer binding hold the same reference.
+    let module_level_ids = ctx.module_level_ids.clone();
+    let outer_scope_ids: std::collections::HashSet<LocalId> = ctx.locals.iter()
+        .map(|(_, id, _)| *id)
+        .collect();
+    let mut union_captures: std::collections::BTreeSet<LocalId> = std::collections::BTreeSet::new();
+    for m in &methods {
+        for id in collect_method_captures(m, &outer_scope_ids, &module_level_ids) {
+            union_captures.insert(id);
+        }
+    }
+    for (_, g) in &getters {
+        for id in collect_method_captures(g, &outer_scope_ids, &module_level_ids) {
+            union_captures.insert(id);
+        }
+    }
+    for (_, s) in &setters {
+        for id in collect_method_captures(s, &outer_scope_ids, &module_level_ids) {
+            union_captures.insert(id);
+        }
+    }
+    if let Some(ref ctor) = constructor {
+        for id in collect_method_captures(ctor, &outer_scope_ids, &module_level_ids) {
+            union_captures.insert(id);
+        }
+    }
+    // Inherited captures: if this class extends a parent that registered
+    // captures, the parent's instance methods read from
+    // `this.__perry_cap_<inherited_id>` fields the parent ctor would have
+    // initialized. With our synthesized constructor on this child class,
+    // the parent ctor is no longer called automatically (lower_new only
+    // walks parents when the child has *no* own constructor). Union the
+    // parent's captures into our captures_vec so the child's synthesized
+    // ctor takes the inherited capture as a param too — and the
+    // `Expr::New { class_name: <child> }` site appends `LocalGet(id)`
+    // for every captured id (own + inherited). The fields themselves are
+    // still deduplicated below — the child only declares the OWN-not-
+    // inherited subset, so a single keys-array entry exists per capture.
+    if let Some(ref pname) = extends_name {
+        if let Some(parent_caps) = ctx.lookup_class_captures(pname) {
+            for id in parent_caps {
+                union_captures.insert(*id);
+            }
+        }
+    }
+    let captures_vec: Vec<LocalId> = union_captures.into_iter().collect();
+
+    if !captures_vec.is_empty() {
+        // Walk the parent chain to find which `__perry_cap_<id>` fields
+        // are already declared by an ancestor. Inherited fields share the
+        // same instance slot via the runtime's by-name lookup; declaring
+        // them again here would leave two same-named entries in the keys
+        // array at different offsets and the parent's method body would
+        // read the parent's index while the child's ctor wrote to the
+        // child's index — the inherited-class-with-shared-capture case.
+        // Parent classes also synthesize a constructor that takes the
+        // capture as a param, so the child's constructor needs to
+        // forward inherited capture args to `super(...)` rather than
+        // store them itself.
+        let mut inherited_cap_field_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(ref pname) = extends_name {
+            if let Some(parent_fields) = ctx.lookup_class_field_names(pname) {
+                for f in parent_fields {
+                    if f.starts_with("__perry_cap_") {
+                        inherited_cap_field_names.insert(f.clone());
+                    }
+                }
+            }
+        }
+        let inherited_cap_ids: std::collections::HashSet<LocalId> = captures_vec.iter()
+            .copied()
+            .filter(|cid| inherited_cap_field_names.contains(&format!("__perry_cap_{}", cid)))
+            .collect();
+
+        // 1. Hidden fields keyed by outer id, skipping inherited.
+        for &cid in &captures_vec {
+            if inherited_cap_ids.contains(&cid) {
+                continue;
+            }
+            fields.push(ClassField {
+                name: format!("__perry_cap_{}", cid),
+                ty: Type::Any,
+                init: None,
+                is_private: false,
+                is_readonly: false,
+            });
+        }
+        if let Some(existing) = ctx.lookup_class_field_names(&name) {
+            let mut updated: Vec<String> = existing.to_vec();
+            for &cid in &captures_vec {
+                let field_name = format!("__perry_cap_{}", cid);
+                if !updated.contains(&field_name) {
+                    updated.push(field_name);
+                }
+            }
+            ctx.register_class_field_names(name.clone(), updated);
+        }
+
+        // Look up the outer-scope type for each captured id so the
+        // rebind let can preserve typed-array fast paths (`out.length`,
+        // `out[i]`, etc.). Without this the rebind defaults to
+        // `Type::Any`, the codegen `local_types` map records the rebind
+        // as Any, and `out.length` on a `string[]` capture falls off the
+        // typed-array fast path into generic object-field-by-name dispatch
+        // — which on an array silently returns undefined or crashes.
+        let captured_outer_types: std::collections::HashMap<LocalId, Type> = captures_vec.iter()
+            .map(|&cid| {
+                let ty = ctx.locals.iter()
+                    .rev()
+                    .find(|(_, id, _)| *id == cid)
+                    .map(|(_, _, t)| t.clone())
+                    .unwrap_or(Type::Any);
+                (cid, ty)
+            })
+            .collect();
+
+        // Field-propagation map keyed by OUTER ids. Every `LocalSet(outer_id, v)`
+        // and `Expr::Update { id: outer_id, .. }` at a top-level expression
+        // position inside a method body is rewritten to also propagate the
+        // new value to `this.__perry_cap_<id>`. Without this, a setter
+        // writing to a captured primitive (`set value(v) { stored = v; }`)
+        // would only update the method-local rebind slot, and the next
+        // getter call would re-read the field's stale snapshot. The
+        // propagation only fires at top-level positions (statement-level
+        // expression, return value, condition); nested captured writes
+        // like `(stored = v).toString()` only update the local — rare
+        // enough to defer to a follow-up.
+        let field_propagation: std::collections::HashMap<LocalId, String> = captures_vec.iter()
+            .map(|&cid| (cid, format!("__perry_cap_{}", cid)))
+            .collect();
+
+        // Helper closure: build a fresh-id map for one function's body,
+        // rewrite the body refs (with field-write propagation), and
+        // prepend the rebinding lets.
+        let rewrite_method_body = |ctx: &mut LoweringContext,
+                                   body: &mut Vec<Stmt>| {
+            let mut id_map: std::collections::HashMap<LocalId, LocalId> = std::collections::HashMap::new();
+            let mut prologue: Vec<Stmt> = Vec::new();
+            for &outer_id in &captures_vec {
+                let new_id = ctx.fresh_local();
+                id_map.insert(outer_id, new_id);
+                let ty = captured_outer_types.get(&outer_id).cloned().unwrap_or(Type::Any);
+                prologue.push(Stmt::Let {
+                    id: new_id,
+                    name: format!("__perry_cap_{}", outer_id),
+                    ty,
+                    mutable: true,
+                    init: Some(Expr::PropertyGet {
+                        object: Box::new(Expr::This),
+                        property: format!("__perry_cap_{}", outer_id),
+                    }),
+                });
+            }
+            // Rewrite first (so closure captures lists pick up the new ids
+            // at the same time as the body's refs), then prepend the let.
+            crate::analysis::remap_local_ids_in_stmts_with_field_propagation(
+                body, &id_map, &field_propagation,
+            );
+            prologue.append(body);
+            *body = prologue;
+        };
+
+        // 2. Methods / getters / setters.
+        for m in methods.iter_mut() {
+            rewrite_method_body(ctx, &mut m.body);
+        }
+        for (_, g) in getters.iter_mut() {
+            rewrite_method_body(ctx, &mut g.body);
+        }
+        for (_, s) in setters.iter_mut() {
+            rewrite_method_body(ctx, &mut s.body);
+        }
+
+        // 3. Constructor.
+        let mut ctor = constructor.unwrap_or_else(|| Function {
+            id: ctx.fresh_func(),
+            name: format!("{}::constructor", name),
+            type_params: Vec::new(),
+            params: Vec::new(),
+            return_type: Type::Void,
+            body: Vec::new(),
+            is_async: false,
+            is_generator: false,
+            is_exported: false,
+            captures: Vec::new(),
+            decorators: Vec::new(),
+        });
+        let mut ctor_id_map: std::collections::HashMap<LocalId, LocalId> = std::collections::HashMap::new();
+        let mut assignment_stmts: Vec<Stmt> = Vec::with_capacity(captures_vec.len());
+        for &outer_id in &captures_vec {
+            let fresh_param_id = ctx.fresh_local();
+            ctor_id_map.insert(outer_id, fresh_param_id);
+            let ty = captured_outer_types.get(&outer_id).cloned().unwrap_or(Type::Any);
+            ctor.params.push(Param {
+                id: fresh_param_id,
+                name: format!("__perry_cap_{}", outer_id),
+                ty,
+                default: None,
+                is_rest: false,
+            });
+            assignment_stmts.push(Stmt::Expr(Expr::PropertySet {
+                object: Box::new(Expr::This),
+                property: format!("__perry_cap_{}", outer_id),
+                value: Box::new(Expr::LocalGet(fresh_param_id)),
+            }));
+        }
+        // Rewrite user-written ctor body BEFORE inserting the assignment
+        // stmts (which already reference the fresh ids directly).
+        crate::analysis::remap_local_ids_in_stmts(&mut ctor.body, &ctor_id_map);
+        let super_pos = ctor.body.iter().position(|s| {
+            matches!(s, Stmt::Expr(Expr::SuperCall(_)))
+        });
+        let insert_at = super_pos.map(|p| p + 1).unwrap_or(0);
+        for (i, stmt) in assignment_stmts.into_iter().enumerate() {
+            ctor.body.insert(insert_at + i, stmt);
+        }
+        constructor = Some(ctor);
+
+        // 4. Register so `Expr::New { class_name }` appends
+        //    `LocalGet(outer_id)` per captured outer id at every
+        //    construction site.
+        ctx.register_class_captures(name.clone(), captures_vec);
+    }
 
     // Phase 4.1: register each method's and getter's return type so
     // call-site inference (`infer_call_return_type`'s Member arm) can
@@ -1628,6 +1885,74 @@ pub(crate) fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, cto
     })
 }
 
+/// Issue #212: list outer-scope LocalIds referenced by a method/getter/
+/// setter/constructor body. An id is "captured" when it's referenced inside
+/// the body (or any nested closure inside the body — `collect_local_refs_*`
+/// descends), but isn't one of the function's own params, isn't `this`, and
+/// wasn't declared inside the body itself. Module-level ids are excluded
+/// because codegen reads those directly from globals — they don't need
+/// per-instance snapshotting.
+///
+/// `outer_scope_ids` is the snapshot of `ctx.locals` at the post-class
+/// point (when this analysis runs). Refs that aren't in this set must
+/// belong to inner closures' params/locals — `collect_local_refs_*`
+/// descends into closure bodies indiscriminately, and without this filter
+/// we'd wrongly capture inner closures' own arg ids.
+fn collect_method_captures(
+    func: &Function,
+    outer_scope_ids: &std::collections::HashSet<LocalId>,
+    module_level_ids: &std::collections::HashSet<LocalId>,
+) -> Vec<LocalId> {
+    let mut own_locals: std::collections::HashSet<LocalId> =
+        func.params.iter().map(|p| p.id).collect();
+    fn collect_let_ids(stmts: &[Stmt], out: &mut std::collections::HashSet<LocalId>) {
+        for s in stmts {
+            match s {
+                Stmt::Let { id, .. } => { out.insert(*id); }
+                Stmt::If { then_branch, else_branch, .. } => {
+                    collect_let_ids(then_branch, out);
+                    if let Some(e) = else_branch { collect_let_ids(e, out); }
+                }
+                Stmt::While { body, .. }
+                | Stmt::DoWhile { body, .. } => collect_let_ids(body, out),
+                Stmt::For { init, body, .. } => {
+                    if let Some(init_stmt) = init {
+                        if let Stmt::Let { id, .. } = init_stmt.as_ref() { out.insert(*id); }
+                    }
+                    collect_let_ids(body, out);
+                }
+                Stmt::Try { body, catch, finally } => {
+                    collect_let_ids(body, out);
+                    if let Some(c) = catch { collect_let_ids(&c.body, out); }
+                    if let Some(f) = finally { collect_let_ids(f, out); }
+                }
+                Stmt::Switch { cases, .. } => {
+                    for case in cases { collect_let_ids(&case.body, out); }
+                }
+                Stmt::Labeled { body, .. } => collect_let_ids(std::slice::from_ref(body.as_ref()), out),
+                _ => {}
+            }
+        }
+    }
+    collect_let_ids(&func.body, &mut own_locals);
+
+    let mut refs = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    for stmt in &func.body {
+        crate::analysis::collect_local_refs_stmt(stmt, &mut refs, &mut visited);
+    }
+    let mut captures: Vec<LocalId> = refs.into_iter()
+        .filter(|id| {
+            outer_scope_ids.contains(id)
+                && !own_locals.contains(id)
+                && !module_level_ids.contains(id)
+        })
+        .collect();
+    captures.sort();
+    captures.dedup();
+    captures
+}
+
 /// Conservative outer-capture check used to gate `[Symbol.dispose]` /
 /// `[Symbol.asyncDispose]` lowering: returns true when the method body
 /// references any LocalId that isn't `this` or one of the method's own
@@ -1635,6 +1960,7 @@ pub(crate) fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, cto
 /// gap; for the dispose family we silently drop the method when this is true,
 /// so test programs that previously compiled (with empty disposed output)
 /// keep compiling.
+#[allow(dead_code)]
 fn method_body_captures_outer(func: &Function, ctx: &LoweringContext) -> bool {
     let mut own_locals: std::collections::HashSet<LocalId> =
         func.params.iter().map(|p| p.id).collect();
