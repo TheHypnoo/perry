@@ -754,6 +754,13 @@ pub fn set_shadow(
                 // already provides this layout-compatible struct.
                 let offset = objc2_core_foundation::CGSize::new(offset_x, offset_y);
                 let _: () = objc2::msg_send![layer, setShadowOffset: offset];
+                // CALayer shadows are clipped by `masksToBounds`. iOS
+                // sets this in its mirror impl; the macOS version was
+                // missing it — the bug visible in
+                // `docs/examples/ui/styling/visual_test.ts` section 4
+                // before this fix landed (FFI args correct per the IR
+                // dump but no visible shadow).
+                let _: () = objc2::msg_send![layer, setMasksToBounds: false];
             }
         }
     }
