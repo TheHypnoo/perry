@@ -2576,9 +2576,10 @@ function perry_ui_toggle_create(label, callback) {
   });
   return uiAlloc(wrap);
 }
-function perry_ui_slider_create(min, max, initial, callback) {
+function perry_ui_slider_create(min, max, callback) {
+  // Codegen emits 3-arg Slider(min, max, onChange); default initial=min
   const el = document.createElement("input"); el.type = "range";
-  el.min = min || 0; el.max = max || 100; el.value = initial || 0; el.step = "any";
+  el.min = min || 0; el.max = max || 100; el.value = el.min; el.step = "any";
   el._perryCallback = callback;
   el.addEventListener("input", () => {
     if (el._perryCallback !== undefined) callWasmClosure(el._perryCallback, parseFloat(el.value));

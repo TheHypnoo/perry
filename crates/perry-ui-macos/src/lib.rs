@@ -230,11 +230,15 @@ pub extern "C" fn perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64 
     widgets::toggle::create(label_ptr as *const u8, on_change)
 }
 
-/// Create a Slider. min/max/initial are f64, on_change = NaN-boxed closure.
-/// Returns widget handle.
+/// Create a Slider. min/max are f64, on_change = NaN-boxed closure.
+/// Returns widget handle. Initial value defaults to `min` (the TS
+/// surface `Slider(min, max, onChange)` doesn't expose `initial`, and
+/// codegen emits a 3-arg call — the prior 4-arg FFI relied on
+/// undefined register state for the missing arg, silently NaN on
+/// some calling conventions).
 #[no_mangle]
-pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
-    widgets::slider::create(min, max, initial, on_change)
+pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, on_change: f64) -> i64 {
+    widgets::slider::create(min, max, min, on_change)
 }
 
 // =============================================================================

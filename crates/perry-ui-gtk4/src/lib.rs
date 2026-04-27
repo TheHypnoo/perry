@@ -247,8 +247,11 @@ pub extern "C" fn perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64 
 
 /// Create a Slider.
 #[no_mangle]
-pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
-    widgets::slider::create(min, max, initial, on_change)
+pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, on_change: f64) -> i64 {
+    // Codegen emits 3-arg `Slider(min, max, onChange)` per the TS surface.
+    // Default initial value to `min` so users get a valid widget without
+    // a 4th NaN-from-uninitialized-register arg corrupting GtkAdjustment.
+    widgets::slider::create(min, max, min, on_change)
 }
 
 /// Create a ScrollView.
