@@ -508,8 +508,14 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
         "keychainGet" | "keychain_get" => "perry_system_keychain_get",
         "keychainDelete" | "keychain_delete" => "perry_system_keychain_delete",
         "notificationSend" | "notification_send" => "perry_system_notification_send",
-        // Fallback: prefix with perry_ui_
-        _ => return "perry_ui_unknown",
+        // Default — try the centralised perry-dispatch tables first
+        // (Tier 1.3, v0.5.332). New perry/ui or perry/system methods
+        // added to PERRY_UI_TABLE / PERRY_SYSTEM_TABLE resolve on
+        // `--target wasm` without a parallel edit here. The static arms
+        // above stay for legacy snake_case aliases that aren't in those
+        // tables.
+        _ => return perry_dispatch::ui_method_to_runtime(method)
+            .unwrap_or("perry_ui_unknown"),
     }
 }
 

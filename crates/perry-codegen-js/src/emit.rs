@@ -3225,20 +3225,34 @@ impl JsEmitter {
             "menuBarCreate" | "menubar_create" => "perry_ui_menubar_create",
             "menuBarAddMenu" | "menubar_add_menu" => "perry_ui_menubar_add_menu",
             "menuBarAttach" | "menubar_attach" => "perry_ui_menubar_attach",
-            // Default
+            // Default — try the centralised perry-dispatch tables first
+            // (Tier 1.3, v0.5.332). PERRY_UI_TABLE / PERRY_UI_INSTANCE_TABLE
+            // / PERRY_SYSTEM_TABLE are the canonical source of truth, so
+            // any new perry/ui or perry/system method added there resolves
+            // on `--target web` without a parallel edit here. The static
+            // arms above are kept for legacy snake_case aliases (`app_create`,
+            // `vstack_create`, …) that aren't in PERRY_UI_TABLE because
+            // the LLVM backend only expects the canonical camelCase names.
             _ => {
-                // Fallback: try to emit as __perry function
-                let _ = write!(self.output, "__perry.perry_ui_{}(", method);
-                if let Some(obj) = object {
-                    self.emit_expr(obj);
-                    if !args.is_empty() { self.output.push_str(", "); }
+                if let Some(rt) = perry_dispatch::ui_method_to_runtime(method) {
+                    rt
+                } else {
+                    // Last-resort fallback: emit as __perry.perry_ui_<method>(...).
+                    // The browser-side runtime will throw "function not found"
+                    // at call time if the symbol doesn't exist — this preserves
+                    // the pre-1.3 best-effort behavior for unknown methods.
+                    let _ = write!(self.output, "__perry.perry_ui_{}(", method);
+                    if let Some(obj) = object {
+                        self.emit_expr(obj);
+                        if !args.is_empty() { self.output.push_str(", "); }
+                    }
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 { self.output.push_str(", "); }
+                        self.emit_expr(arg);
+                    }
+                    self.output.push(')');
+                    return;
                 }
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 { self.output.push_str(", "); }
-                    self.emit_expr(arg);
-                }
-                self.output.push(')');
-                return;
             }
         };
 

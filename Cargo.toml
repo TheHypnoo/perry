@@ -7,6 +7,7 @@ members = [
     "crates/perry-hir",
     "crates/perry-transform",
     "crates/perry-codegen",
+    "crates/perry-dispatch",
     "crates/perry-runtime",
     "crates/perry-jsruntime",
     "crates/perry-stdlib",
@@ -40,6 +41,7 @@ default-members = [
     "crates/perry-hir",
     "crates/perry-transform",
     "crates/perry-codegen",
+    "crates/perry-dispatch",
     "crates/perry-runtime",
     "crates/perry-jsruntime",
     "crates/perry-stdlib",
@@ -109,7 +111,7 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.5.331"
+version = "0.5.332"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/PerryTS/perry"
@@ -174,6 +176,7 @@ perry-types = { path = "crates/perry-types" }
 perry-hir = { path = "crates/perry-hir" }
 perry-transform = { path = "crates/perry-transform" }
 perry-codegen = { path = "crates/perry-codegen" }
+perry-dispatch = { path = "crates/perry-dispatch" }
 perry-runtime = { path = "crates/perry-runtime" }
 perry-stdlib = { path = "crates/perry-stdlib" }
 perry-diagnostics = { path = "crates/perry-diagnostics" }
