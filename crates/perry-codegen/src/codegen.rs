@@ -151,7 +151,12 @@ pub struct CompileOptions {
     /// resolve `Expr::I18nString` to the right translation — without
     /// it, the lowering would have to either pick locale 0 blindly or
     /// fall back to the verbatim key.
-    pub i18n_table: Option<(Vec<String>, usize, usize, Vec<String>, usize)>,
+    /// Tier 4.6 (v0.5.336): wrapped in `Arc` so the per-module clone
+    /// in the `compile_module` rayon worker is a cheap reference bump
+    /// instead of duplicating the (potentially large) `Vec<String>` of
+    /// every translated string. The tuple shape is unchanged for the
+    /// downstream destructure at `compile_module` line 597.
+    pub i18n_table: Option<std::sync::Arc<(Vec<String>, usize, usize, Vec<String>, usize)>>,
 }
 
 /// A class imported from another native module.
@@ -594,15 +599,20 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         // `Expr::I18nString` lowering pulls the right translation row at
         // compile time using `default_locale_idx` and emits the resolved
         // string (with runtime interpolation for `{name}` placeholders).
-        i18n: opts.i18n_table.as_ref().map(
-            |(translations, key_count, _locale_count, _locale_codes, default_locale_idx)| {
-                crate::expr::I18nLowerCtx {
-                    translations: translations.clone(),
-                    key_count: *key_count,
-                    default_locale_idx: *default_locale_idx,
-                }
-            },
-        ),
+        i18n: opts.i18n_table.as_ref().map(|arc| {
+            // Tier 4.6: deref the `Arc<Tuple>` to access the inner
+            // tuple fields. The `translations.clone()` here is still a
+            // per-module Vec clone — wrapping the I18nLowerCtx field
+            // in Arc too would eliminate it, but is a wider refactor
+            // tracked as a follow-up.
+            let (translations, key_count, _locale_count, _locale_codes, default_locale_idx) =
+                arc.as_ref();
+            crate::expr::I18nLowerCtx {
+                translations: translations.clone(),
+                key_count: *key_count,
+                default_locale_idx: *default_locale_idx,
+            }
+        }),
         imported_vars: opts.imported_vars,
         needs_stdlib: opts.needs_stdlib,
         compile_time_constants,

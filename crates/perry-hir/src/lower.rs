@@ -1740,23 +1740,29 @@ pub fn lower_module_with_class_id_and_types(ast_module: &ast::Module, name: &str
 /// captured binding and any one of them mutates it, all of them treat it as
 /// boxed so reads and writes observe the same storage slot.
 fn widen_mutable_captures_stmts(stmts: &mut [Stmt]) {
-    let mut scope_mutable: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
-    for stmt in stmts.iter() {
-        collect_closure_assigned_stmt(stmt, &mut scope_mutable);
-    }
-    // Also detect variables that are captured by closures AND assigned at the
-    // scope level (not inside a closure). This handles the pattern:
+    // Tier 4.3 (v0.5.336): three independent read passes fused into a
+    // single iteration over `stmts`. Pre-fix this was three separate
+    // `for stmt in stmts.iter()` loops back-to-back, each populating
+    // its own HashSet. The collectors don't depend on each other's
+    // outputs (they read disjoint Expr/Stmt fields), so calling all
+    // three per stmt is equivalent and saves 2 full slice traversals
+    // per scope. The mutating pass below still runs separately because
+    // it depends on the union of all three sets.
+    //
+    // Also detects variables that are captured by closures AND assigned
+    // at the scope level (not inside a closure). This handles the pattern:
     //   let x = 0;
     //   fns.push(() => x);
     //   x = 10;               // assignment at scope level
     //   fns.push(() => x);
     // All closures should see the final value of x (capture-by-reference).
+    let mut scope_mutable: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
     let mut scope_captured: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+    let mut scope_assigned_at_level: std::collections::HashSet<LocalId> =
+        std::collections::HashSet::new();
     for stmt in stmts.iter() {
+        collect_closure_assigned_stmt(stmt, &mut scope_mutable);
         collect_closure_captures_stmt(stmt, &mut scope_captured);
-    }
-    let mut scope_assigned_at_level: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
-    for stmt in stmts.iter() {
         collect_scope_level_assigns_stmt(stmt, &mut scope_assigned_at_level);
     }
     for id in &scope_captured {

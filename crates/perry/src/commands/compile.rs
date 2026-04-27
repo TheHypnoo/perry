@@ -536,9 +536,9 @@ fn compute_object_cache_key(
     // i18n snapshot — tuple of ordered Vecs + counts, no map involved.
     // Only the entry module embeds this, but hash it unconditionally so
     // a mis-flagged non-entry module can't collide with an entry one.
-    if let Some((translations, key_count, locale_count, locale_codes, default_idx)) =
-        &opts.i18n_table
-    {
+    if let Some(arc) = &opts.i18n_table {
+        // Tier 4.6: deref the Arc<Tuple> to read the inner fields.
+        let (translations, key_count, locale_count, locale_codes, default_idx) = arc.as_ref();
         h.field("i18n_kc", &key_count.to_string());
         h.field("i18n_lc", &locale_count.to_string());
         h.field("i18n_def", &default_idx.to_string());
@@ -4342,15 +4342,21 @@ pub fn run_with_parse_cache(
     // `Expr::I18nString` against the right translation row at compile time
     // — without it the lowering would either fall back to the verbatim key
     // or guess locale 0.
-    let i18n_snapshot: Option<(Vec<String>, usize, usize, Vec<String>, usize)> =
+    //
+    // Tier 4.6 (v0.5.336): wrapped in `Arc` so the per-module clone in
+    // the par_iter() worker below is a cheap reference bump instead of
+    // duplicating the (potentially large) `Vec<String>` of every
+    // translated string. Pre-fix, a project with N modules cloned the
+    // full translations Vec N times during codegen.
+    let i18n_snapshot: Option<std::sync::Arc<(Vec<String>, usize, usize, Vec<String>, usize)>> =
         i18n_table.as_ref().map(|table| {
-            (
+            std::sync::Arc::new((
                 table.translations.clone(),
                 table.keys.len(),
                 table.locale_count,
                 table.locale_codes.clone(),
                 table.default_locale_idx,
-            )
+            ))
         });
 
     // Phase J: detect bitcode-link mode. The actual .bc paths aren't known
@@ -4817,34 +4823,62 @@ pub fn run_with_parse_cache(
         })
         .collect();
 
-    // Write object files and collect results (sequential — I/O + error reporting)
+    // Tier 4.4 (v0.5.336): partition compile results, then write object
+    // files in parallel via rayon. The OS handles concurrent writes to
+    // distinct paths, and codegen typically finishes producing bytes
+    // faster than a single thread can drain them to disk for projects
+    // with many modules. Pre-fix this was a single sequential
+    // `for ... fs::write(...)`. Errors from compilation print in source
+    // order (preserved); successful writes' "Wrote ..." messages print
+    // after all writes complete.
     let mut failed_modules: Vec<String> = Vec::new();
+    let mut to_write: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     for result in compile_results {
         match result {
-            Ok((obj_path, object_code)) => {
-                fs::write(&obj_path, &object_code)?;
-                match format {
-                    OutputFormat::Text => {
-                        let label = if obj_path.extension().and_then(|e| e.to_str()) == Some("ll") {
-                            "Wrote LLVM IR"
-                        } else {
-                            "Wrote object file"
-                        };
-                        println!("{}: {}", label, obj_path.display());
-                    }
-                    OutputFormat::Json => {}
-                }
-                obj_paths.push(obj_path);
-            }
+            Ok(pair) => to_write.push(pair),
             Err(msg) => {
                 eprintln!("{}", msg);
-                // Extract module name from error message for failed_modules.
-                // The error format is `Error compiling module '<name>' (<path>) ...`.
+                // Extract module name from error message for
+                // failed_modules. Error format is
+                // `Error compiling module '<name>' (<path>) ...`.
                 if let Some(name) = msg.split('\'').nth(1) {
                     failed_modules.push(name.to_string());
                 }
             }
         }
+    }
+
+    // Parallel write phase. Returns one Result per write so we can
+    // bail on the first I/O error after the par_iter finishes.
+    use rayon::prelude::*;
+    let write_results: Vec<Result<(), std::io::Error>> = to_write
+        .par_iter()
+        .map(|(obj_path, object_code)| fs::write(obj_path, object_code))
+        .collect();
+
+    // Bail on first write failure (I/O errors are usually disk-full /
+    // permission, not per-file recoverable).
+    for r in write_results {
+        if let Err(e) = r {
+            return Err(e.into());
+        }
+    }
+
+    // Sequential print + obj_paths collection (output grouped, source
+    // order preserved).
+    for (obj_path, _) in to_write {
+        match format {
+            OutputFormat::Text => {
+                let label = if obj_path.extension().and_then(|e| e.to_str()) == Some("ll") {
+                    "Wrote LLVM IR"
+                } else {
+                    "Wrote object file"
+                };
+                println!("{}: {}", label, obj_path.display());
+            }
+            OutputFormat::Json => {}
+        }
+        obj_paths.push(obj_path);
     }
 
     // Verbose codegen-cache stats. We print here (rather than in dev.rs
