@@ -2652,8 +2652,10 @@ fn resolve_exports(exports: &serde_json::Value, subpath: &str) -> Option<String>
             }
 
             // Try common conditions (for both main entry and subpath entries)
-            // This handles the case where we've matched a subpath and now need to resolve the conditions
-            for condition in ["import", "module", "default", "require", "node"] {
+            // This handles the case where we've matched a subpath and now need to resolve the conditions.
+            // "perry" is checked first so packages can ship a TypeScript source entry
+            // intended for Perry compilation alongside a pre-built JS entry for Node/Bun.
+            for condition in ["perry", "import", "module", "default", "require", "node"] {
                 if let Some(entry) = map.get(condition) {
                     return resolve_exports(entry, subpath);
                 }
@@ -5409,6 +5411,7 @@ pub fn run_with_parse_cache(
                                         source_prefix: origin_prefix.clone(),
                                         constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
                                         method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                                        static_method_names: class.static_methods.iter().map(|m| m.name.clone()).collect(),
                                         getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
                                         setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                                         parent_name: class.extends_name.clone(),
@@ -5470,6 +5473,7 @@ pub fn run_with_parse_cache(
                             source_prefix: effective_prefix.clone(),
                             constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
                             method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            static_method_names: class.static_methods.iter().map(|m| m.name.clone()).collect(),
                             getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
                             setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                             parent_name: class.extends_name.clone(),
@@ -5571,6 +5575,7 @@ pub fn run_with_parse_cache(
                             source_prefix: class_prefix,
                             constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
                             method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            static_method_names: class.static_methods.iter().map(|m| m.name.clone()).collect(),
                             getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
                             setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                             parent_name: class.extends_name.clone(),
@@ -5626,6 +5631,7 @@ pub fn run_with_parse_cache(
                             source_prefix: class_prefix,
                             constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
                             method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            static_method_names: class.static_methods.iter().map(|m| m.name.clone()).collect(),
                             getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
                             setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                             parent_name: class.extends_name.clone(),
@@ -8976,6 +8982,7 @@ mod object_cache_tests {
             source_prefix: "src".into(),
             constructor_param_count: 1,
             method_names: vec!["bar".into()],
+            static_method_names: vec![],
             getter_names: vec![],
             setter_names: vec![],
             parent_name: None,
@@ -8989,6 +8996,7 @@ mod object_cache_tests {
             source_prefix: "src".into(),
             constructor_param_count: 2, // different arity
             method_names: vec!["bar".into()],
+            static_method_names: vec![],
             getter_names: vec![],
             setter_names: vec![],
             parent_name: None,

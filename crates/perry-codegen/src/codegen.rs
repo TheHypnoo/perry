@@ -167,6 +167,11 @@ pub struct ImportedClass {
     pub constructor_param_count: usize,
     /// Method names defined on this class.
     pub method_names: Vec<String>,
+    /// Static method names defined on this class. Without this, calls like
+    /// `MyClass.staticMethod(...)` on an imported class are treated as a
+    /// missing method and fall through to `0.0` — turning every
+    /// `await Foo.connect(...)` into a no-op that resolves with the number 0.
+    pub static_method_names: Vec<String>,
     /// Getter property names. Without these, cross-module `obj.prop` for a
     /// getter property silently falls through to `undefined` because the
     /// dispatch site at `expr.rs::PropertyGet` looks up `(class, "__get_prop")`
@@ -1009,6 +1014,27 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             ctor_params.push(DOUBLE);
         }
         llmod.declare_function(&ctor_fn, VOID, &ctor_params);
+
+        // Cross-module static methods. Source module emits these as
+        // `perry_static_<source_prefix>__<class>__<method>` (no `this`
+        // receiver). Register them in `method_names` under the same
+        // (class, method) key the StaticMethodCall lowering looks up.
+        for sm in &ic.static_method_names {
+            let llvm_fn = format!(
+                "perry_static_{}__{}__{}",
+                sanitize(src),
+                sanitize(&ic.name),
+                sanitize(sm),
+            );
+            method_names
+                .entry((effective_name.to_string(), sm.clone()))
+                .or_insert_with(|| llvm_fn.clone());
+            // Declare conservatively with 6 double params; LLVM's direct-call
+            // resolution doesn't require an exact arity match for declarations.
+            let param_types: Vec<crate::types::LlvmType> =
+                std::iter::repeat(DOUBLE).take(6).collect();
+            llmod.declare_function(&llvm_fn, DOUBLE, &param_types);
+        }
     }
 
     // Resolve user function names up-front so body lowering can emit
@@ -1381,14 +1407,56 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     {
         use std::collections::HashSet;
         let mut emitted_wrappers: HashSet<String> = HashSet::new();
+        // Build a quick lookup of imported class names (and their local aliases).
+        // Classes have no `perry_fn_<src>__<Class>` symbol — method/constructor/
+        // static dispatch happens via separate tables. For these we still need
+        // the `__perry_extern_closure_*` global (other code may load it as a
+        // value), but the wrapper body must NOT call a missing function: emit
+        // a no-op that returns `undefined` so any indirect call through the
+        // closure header fails closed instead of failing at link time.
+        let mut imported_class_names: HashSet<String> = HashSet::new();
+        for ic in &opts.imported_classes {
+            imported_class_names.insert(ic.name.clone());
+            if let Some(alias) = &ic.local_alias {
+                imported_class_names.insert(alias.clone());
+            }
+        }
         // Stable iteration order for deterministic IR output.
         let mut imports: Vec<(&String, &String)> =
             opts.import_function_prefixes.iter().collect();
         imports.sort_by(|a, b| a.0.cmp(b.0));
         for (name, source_prefix) in imports {
+            let is_class = imported_class_names.contains(name);
             let wrapper_name =
                 format!("__perry_wrap_extern_{}__{}", source_prefix, name);
             if !emitted_wrappers.insert(wrapper_name.clone()) {
+                continue;
+            }
+            if is_class {
+                // No-op wrapper + a closure header that points at it. The
+                // wrapper returns NaN-tagged `undefined` so any indirect call
+                // (`MyClass.somethingThatIsActuallyAFn()`) returns undefined.
+                // Match the regular wrapper's calling convention — `%this_closure`
+                // followed by 6 double params — so direct calls in the IR don't
+                // tear off into garbage stack slots.
+                let mut wrap_params: Vec<(LlvmType, String)> = Vec::with_capacity(7);
+                wrap_params.push((I64, "%this_closure".to_string()));
+                for i in 0..6 {
+                    wrap_params.push((DOUBLE, format!("%a{}", i)));
+                }
+                let wf = llmod.define_function(&wrapper_name, DOUBLE, wrap_params);
+                wf.linkage = "internal".to_string();
+                let _ = wf.create_block("entry");
+                let blk = wf.block_mut(0).unwrap();
+                let undef = crate::nanbox::double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED));
+                blk.ret(DOUBLE, &undef);
+                let global_name =
+                    format!("__perry_extern_closure_{}__{}", source_prefix, name);
+                let init = format!(
+                    "{{ ptr @{}, i32 0, i32 1129074515 }}",
+                    wrapper_name
+                );
+                llmod.add_internal_constant(&global_name, "{ ptr, i32, i32 }", &init);
                 continue;
             }
             let target_name = format!("perry_fn_{}__{}", source_prefix, name);

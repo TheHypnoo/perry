@@ -7121,14 +7121,41 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 // to the class method, not runtime js_array_push. Map/Set/Promise are
                                 // handled by explicit checks within the array block below.
                                 let builtin_generic_bases = ["Map", "Set", "WeakMap", "WeakSet", "Promise"];
+                                // Imported classes don't show up in `lookup_class`; treat any
+                                // uppercase imported identifier as a candidate class so the
+                                // array fast-path doesn't swallow `coll.find(filter)` etc.
+                                let is_imported_class_name = |n: &str| -> bool {
+                                    if let Some(c) = n.chars().next() {
+                                        if c.is_uppercase() && ctx.lookup_imported_func(n).is_some() {
+                                            return true;
+                                        }
+                                    }
+                                    false
+                                };
                                 let is_user_class_instance = match type_info {
-                                    Some(Type::Named(name)) => ctx.lookup_class(name).is_some(),
+                                    Some(Type::Named(name)) => {
+                                        ctx.lookup_class(name).is_some() || is_imported_class_name(name)
+                                    }
                                     Some(Type::Generic { base, .. }) => {
                                         !builtin_generic_bases.contains(&base.as_str())
-                                            && ctx.lookup_class(base).is_some()
+                                            && (ctx.lookup_class(base).is_some()
+                                                || is_imported_class_name(base))
                                     }
                                     _ => false,
                                 };
+                                // When the receiver type is Any and the method name is one
+                                // commonly defined on user classes too (e.g. mongo's
+                                // `Collection.find(filter)`), skip the array fast-path so the
+                                // dispatch falls through to class-method resolution. Without this
+                                // guard, the lowering blindly emits `Expr::ArrayFind` and the
+                                // call resolves to `js_array_find` at codegen time, returning 0.
+                                let is_class_overlapping_method = matches!(method_name,
+                                    "find" | "findIndex" | "findLast" | "findLastIndex"
+                                    | "map" | "filter" | "some" | "every"
+                                    | "forEach" | "reduce" | "reduceRight"
+                                    | "join"
+                                );
+                                let is_unknown_recv = matches!(type_info, None | Some(Type::Any) | Some(Type::Unknown));
                                 let is_known_not_string = type_info
                                     .map(|ty| !matches!(ty, Type::String | Type::Any | Type::Unknown))
                                     .unwrap_or(false)
@@ -7164,6 +7191,8 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     true   // definitely not a string, enter array block
                                 } else if is_ambiguous_method {
                                     false  // type unknown + ambiguous method, skip array block (fall through to general dispatch)
+                                } else if is_unknown_recv && is_class_overlapping_method {
+                                    false  // type unknown + method commonly defined on user classes — fall through
                                 } else {
                                     true   // type unknown + array-only method (push, pop, etc.), enter array block
                                 };
@@ -7288,96 +7317,45 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 });
                                             }
                                         }
-                                        "map" => {
-                                            // Only use ArrayMap if receiver is not a class instance
-                                            let is_class_instance = ctx.lookup_local_type(&arr_name)
-                                                .map(|ty| matches!(ty, Type::Named(_) | Type::Generic { .. }) && !matches!(ty, Type::Array(_)))
+                                        "map" | "filter" | "find" | "findIndex"
+                                        | "findLast" | "findLastIndex" | "some"
+                                        | "every" | "at" => {
+                                            // Skip the array-method fast path when the receiver
+                                            // is a known class instance (e.g. mongo `Collection.find`).
+                                            // Without this guard, `coll.find(filter)` lowers to
+                                            // `Expr::ArrayFind` and dispatches to `js_array_find`,
+                                            // which silently returns 0 on a class receiver.
+                                            let recv_ty = ctx.lookup_local_type(&arr_name);
+                                            let is_class_instance = recv_ty
+                                                .as_ref()
+                                                .map(|ty| matches!(ty, Type::Named(_) | Type::Generic { .. })
+                                                    && !matches!(ty, Type::Array(_)))
                                                 .unwrap_or(false);
-                                            if !is_class_instance && args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayMap {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "filter" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayFilter {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "find" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayFind {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "findIndex" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayFindIndex {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "findLast" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayFindLast {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "findLastIndex" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayFindLastIndex {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "at" => {
-                                            if args.len() >= 1 {
-                                                return Ok(Expr::ArrayAt {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    index: Box::new(args.into_iter().next().unwrap()),
-                                                });
-                                            }
-                                        }
-                                        "some" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArraySome {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "every" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayEvery {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
+                                            if !is_class_instance {
+                                                if method_name == "at" {
+                                                    if args.len() >= 1 {
+                                                        return Ok(Expr::ArrayAt {
+                                                            array: Box::new(Expr::LocalGet(array_id)),
+                                                            index: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                } else if args.len() >= 1 {
+                                                    let cb = args.into_iter().next().unwrap();
+                                                    let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
+                                                    let array = Box::new(Expr::LocalGet(array_id));
+                                                    let callback = Box::new(cb);
+                                                    return Ok(match method_name {
+                                                        "map" => Expr::ArrayMap { array, callback },
+                                                        "filter" => Expr::ArrayFilter { array, callback },
+                                                        "find" => Expr::ArrayFind { array, callback },
+                                                        "findIndex" => Expr::ArrayFindIndex { array, callback },
+                                                        "findLast" => Expr::ArrayFindLast { array, callback },
+                                                        "findLastIndex" => Expr::ArrayFindLastIndex { array, callback },
+                                                        "some" => Expr::ArraySome { array, callback },
+                                                        "every" => Expr::ArrayEvery { array, callback },
+                                                        _ => unreachable!(),
+                                                    });
+                                                }
                                             }
                                         }
                                         "flatMap" => {
@@ -8224,8 +8202,33 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         if let ast::Expr::Member(member) = expr.as_ref() {
                             if let ast::MemberProp::Ident(method_ident) = &member.prop {
                                 let method_name = method_ident.sym.as_ref();
+                                // Helper: skip array-method dispatch when the receiver is a
+                                // known class instance (e.g. mongo `Collection.find`,
+                                // `Stack<T>.map`). Without this guard the lowering blindly
+                                // emits `Expr::Array<Method>` and the compiled binary calls
+                                // `js_array_<method>` on a class handle.
+                                let recv_is_class = match member.obj.as_ref() {
+                                    ast::Expr::Ident(ident) => {
+                                        let n = ident.sym.to_string();
+                                        let ty = ctx.lookup_local_type(&n);
+                                        let class_typed = ty
+                                            .as_ref()
+                                            .map(|t| matches!(t, Type::Named(_) | Type::Generic { .. })
+                                                && !matches!(t, Type::Array(_)))
+                                            .unwrap_or(false);
+                                        let unknown_recv = matches!(ty, None | Some(Type::Any) | Some(Type::Unknown));
+                                        let is_overlapping = matches!(method_name,
+                                            "find" | "findIndex" | "findLast" | "findLastIndex"
+                                            | "map" | "filter" | "some" | "every"
+                                            | "forEach" | "reduce" | "reduceRight" | "join"
+                                        );
+                                        class_typed || (unknown_recv && is_overlapping)
+                                    }
+                                    ast::Expr::New(_) => true,
+                                    _ => false,
+                                };
                                 match method_name {
-                                    "reduce" if args.len() >= 1 => {
+                                    "reduce" if args.len() >= 1 && !recv_is_class => {
                                         let array_expr = lower_expr(ctx, &member.obj)?;
                                         let mut args_iter = args.into_iter();
                                         let callback = args_iter.next().unwrap();
@@ -8236,32 +8239,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             initial,
                                         });
                                     }
-                                    "map" if args.len() >= 1 => {
-                                        // Skip if receiver is a known class instance (e.g., Box.map())
-                                        // Check both local variables with class types AND new expressions
-                                        let is_class_instance = match member.obj.as_ref() {
-                                            ast::Expr::Ident(ident) => {
-                                                ctx.lookup_local_type(&ident.sym.to_string())
-                                                    .map(|ty| matches!(ty, Type::Named(_) | Type::Generic { .. }) && !matches!(ty, Type::Array(_)))
-                                                    .unwrap_or(false)
-                                            }
-                                            ast::Expr::New(_) => {
-                                                // new ClassName(...).map() - always a class instance, not an array
-                                                true
-                                            }
-                                            _ => false,
-                                        };
-                                        if !is_class_instance {
-                                            let cb = args.into_iter().next().unwrap();
-                                            let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                            let array_expr = lower_expr(ctx, &member.obj)?;
-                                            return Ok(Expr::ArrayMap {
-                                                array: Box::new(array_expr),
-                                                callback: Box::new(cb),
-                                            });
-                                        }
+                                    "map" if args.len() >= 1 && !recv_is_class => {
+                                        let cb = args.into_iter().next().unwrap();
+                                        let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        return Ok(Expr::ArrayMap {
+                                            array: Box::new(array_expr),
+                                            callback: Box::new(cb),
+                                        });
                                     }
-                                    "filter" if args.len() >= 1 => {
+                                    "filter" if args.len() >= 1 && !recv_is_class => {
                                         let cb = args.into_iter().next().unwrap();
                                         let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                         let array_expr = lower_expr(ctx, &member.obj)?;
@@ -8270,7 +8257,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             callback: Box::new(cb),
                                         });
                                     }
-                                    "forEach" if args.len() >= 1 => {
+                                    "forEach" if args.len() >= 1 && !recv_is_class => {
                                         // Check if the receiver is a Map or Set - if so, don't use ArrayForEach
                                         let is_map_or_set = if let ast::Expr::Ident(ident) = member.obj.as_ref() {
                                             ctx.lookup_local_type(&ident.sym.to_string())
@@ -8289,7 +8276,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             });
                                         }
                                     }
-                                    "find" if args.len() >= 1 => {
+                                    "find" if args.len() >= 1 && !recv_is_class => {
                                         let cb = args.into_iter().next().unwrap();
                                         let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                         let array_expr = lower_expr(ctx, &member.obj)?;
@@ -8298,7 +8285,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             callback: Box::new(cb),
                                         });
                                     }
-                                    "findIndex" if args.len() >= 1 => {
+                                    "findIndex" if args.len() >= 1 && !recv_is_class => {
                                         let cb = args.into_iter().next().unwrap();
                                         let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                         let array_expr = lower_expr(ctx, &member.obj)?;

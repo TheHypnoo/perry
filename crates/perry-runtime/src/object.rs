@@ -2863,10 +2863,16 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
     const CLASS_ID_SET: u32 = 0xFFFF0023;
     if class_id == CLASS_ID_DATE {
         // A Perry Date is a raw f64 timestamp (no NaN-box tag, real f64).
-        // Accept any finite number that's not NaN. This is approximate
-        // but matches the only way Date values flow through Perry.
+        // Distinguishing it from a regular number requires a side-channel:
+        // `js_date_new(...)` registers the f64 bits in DATE_REGISTRY, and
+        // here we consult that registry. Without the registry, every finite
+        // number would match (the prior "approximate" rule), which made
+        // `100 instanceof Date` true and broke the BSON encoder's typed
+        // dispatch (`if (value instanceof Date) … else if (typeof v === 'number') …`).
         if !value.is_nan() && value.is_finite() {
-            return true_val;
+            if crate::date::is_registered_date_bits(value.to_bits()) {
+                return true_val;
+            }
         }
         return false_val;
     }
