@@ -818,6 +818,78 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// Parse `llvm-nm --defined-only --format=just-symbols` output into a
+/// per-member symbol map.
+///
+/// Output shape:
+/// ```text
+/// member1.o:
+/// SYM_A
+/// SYM_B
+///
+/// member2.o:
+/// SYM_C
+/// ```
+/// Lines ending in `:` start a member; subsequent non-empty lines are
+/// symbol names. Some llvm-nm versions wrap the header as
+/// `archive.a(member.o):` — we strip the parens so the map is keyed off
+/// the bare member name, matching `ar t` output.
+fn parse_nm_archive_output(
+    nm_stdout: &str,
+) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    let mut map: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    let mut current: Option<String> = None;
+    for line in nm_stdout.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.ends_with(':') {
+            let raw = &trimmed[..trimmed.len() - 1];
+            let member = if let (Some(open), Some(close)) = (raw.rfind('('), raw.rfind(')')) {
+                if open < close { raw[open + 1..close].to_string() } else { raw.to_string() }
+            } else {
+                raw.to_string()
+            };
+            current = Some(member);
+        } else if let Some(ref m) = current {
+            map.entry(m.clone()).or_default().insert(trimmed.to_string());
+        }
+    }
+    map
+}
+
+/// Run `llvm-nm --defined-only --format=just-symbols` on an archive and
+/// parse the output into a per-member symbol map. Returns `None` if the
+/// nm invocation fails so callers can fall back to the legacy
+/// name-pattern path.
+fn collect_archive_symbols_by_member(
+    llvm_nm: &Path,
+    archive: &Path,
+) -> Option<std::collections::HashMap<String, std::collections::HashSet<String>>> {
+    let out = Command::new(llvm_nm)
+        .arg("--defined-only")
+        .arg("--format=just-symbols")
+        .arg(archive)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(parse_nm_archive_output(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Flat union of every symbol defined anywhere in the archive.
+fn collect_archive_symbols_flat(
+    llvm_nm: &Path,
+    archive: &Path,
+) -> std::collections::HashSet<String> {
+    collect_archive_symbols_by_member(llvm_nm, archive)
+        .map(|by_member| by_member.into_values().flatten().collect())
+        .unwrap_or_default()
+}
+
 /// On Windows, build a trimmed UI lib using the rlib (not staticlib).
 ///
 /// perry-ui-windows builds as both rlib and staticlib. The staticlib bundles
@@ -828,6 +900,17 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
 /// The rlib contains only the UI crate's own code (1 object). We extract it
 /// and combine with UI-only deps (windows, serde, regex...) from the staticlib.
 /// All shared deps come from perry-stdlib. No /FORCE:MULTIPLE needed.
+///
+/// **Dedup decision** (Tier 3.1, v0.5.331): when `llvm-nm` is available, drop a
+/// staticlib member only if **every** defined symbol it carries is also
+/// defined in (a) the rlib (when present) or (b) one of the standalone
+/// `libperry_stdlib.a` / `libperry_runtime.a` archives. Members with any
+/// unique symbol — typical for crate-specific generic monomorphizations
+/// like `hashbrown::raw::RawTable<HashMap<i64, gtk4::Widget>>::reserve_rehash`
+/// — are kept. The previous name-pattern approach (e.g. `m.contains(
+/// "perry_runtime-")`) was evidence-free and over-pruned on Linux when the
+/// bundling staticlib carried unique CGUs (#181 part B). Falls back to the
+/// legacy name-pattern when `llvm-nm` isn't installed.
 fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
     let lib_name = lib_path.file_name().and_then(|f| f.to_str()).unwrap_or("?");
     eprintln!("[strip-dedup] Processing: {}", lib_path.display());
@@ -961,48 +1044,121 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         .unwrap_or("");
 
     // Filter: keep only objects unique to this lib.
-    // With the rlib available, we extract the crate's own CGU objects from it
-    // (skipping alloc shims), and keep only deps from the staticlib that
-    // aren't already in perry-stdlib or perry-runtime.
-    let mut excluded_by_set = 0usize;
+    //
+    // **Symbol-set comparison** (Tier 3.1): when `llvm-nm` is available,
+    // build the union of symbols provided by (a) the rlib (which we
+    // extract anyway), (b) the standalone `libperry_stdlib.a`, and (c)
+    // the standalone `libperry_runtime.a`. Drop a staticlib member only
+    // if **every** symbol it defines is also in that union — meaning the
+    // linker can resolve every reference to those symbols from one of
+    // the other inputs. Members with even one unique symbol (typical
+    // for crate-specific generic monomorphizations) are kept.
+    //
+    // The previous code dropped by name-pattern (`perry_runtime-` /
+    // `perry_stdlib-` member name prefix), which silently stripped
+    // unique CGUs and broke Linux builds (#181 part B, v0.5.320). The
+    // fragile UI-crate-prefix dedup that compared the staticlib member
+    // name to the first rlib object's name prefix is also gone — the
+    // rlib's symbols are now part of the provided set, so any member
+    // whose contents are fully duplicated by the rlib gets dropped on
+    // evidence rather than naming convention.
+    //
+    // Falls back to the legacy `.dll` / `compiler_builtins` short-circuits
+    // plus the rlib name-prefix check when llvm-nm isn't available.
+    let llvm_nm = find_llvm_tool("llvm-nm");
+    let nm_works = llvm_nm.as_ref().is_some_and(|nm| {
+        // Probe with a trivial call; if it can't even run, skip the
+        // symbol-set path entirely.
+        Command::new(nm).arg("--version").output().is_ok_and(|o| o.status.success())
+    });
+
+    // Build provided-symbols union when nm is available.
+    let provided_symbols: std::collections::HashSet<String> = if nm_works {
+        let nm = llvm_nm.as_ref().expect("nm_works ⇒ Some");
+        let mut syms: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if has_rlib {
+            let abs_rlib = std::fs::canonicalize(&rlib_path).unwrap_or_else(|_| rlib_path.clone());
+            let n = syms.len();
+            syms.extend(collect_archive_symbols_flat(nm, &abs_rlib));
+            eprintln!("[strip-dedup] rlib symbols loaded: {}", syms.len() - n);
+        }
+        if let Some(ref sp) = stdlib_path {
+            let abs = std::fs::canonicalize(sp).unwrap_or_else(|_| sp.clone());
+            let n = syms.len();
+            syms.extend(collect_archive_symbols_flat(nm, &abs));
+            eprintln!("[strip-dedup] {stdlib_name} symbols loaded: {}", syms.len() - n);
+        }
+        if let Some(ref rp) = runtime_path {
+            let abs = std::fs::canonicalize(rp).unwrap_or_else(|_| rp.clone());
+            let n = syms.len();
+            syms.extend(collect_archive_symbols_flat(nm, &abs));
+            eprintln!("[strip-dedup] {runtime_name} symbols loaded: {}", syms.len() - n);
+        }
+        syms
+    } else {
+        eprintln!("[strip-dedup] llvm-nm unavailable — falling back to name-pattern dedup");
+        std::collections::HashSet::new()
+    };
+
+    // Per-member symbols of the bundling staticlib (lazy-init to skip the
+    // whole nm parse if nm isn't usable).
+    let staticlib_member_symbols = if nm_works {
+        let nm = llvm_nm.as_ref().expect("nm_works ⇒ Some");
+        collect_archive_symbols_by_member(nm, &abs_staticlib).unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let mut excluded_by_subset = 0usize;
     let mut excluded_by_pattern = 0usize;
     let ui_only_deps: Vec<&String> = staticlib_members.iter().filter(|m| {
         if m.ends_with(".dll") { return false; }
         if m.contains("compiler_builtins") { excluded_by_pattern += 1; return false; }
-        // Don't exclude by name-match against runtime/stdlib member lists —
-        // same-named objects (alloc, core, std, windows crate, AND
-        // perry_runtime / perry_stdlib themselves) can contain different
-        // generic monomorphizations needed by the UI code. The
-        // perry-ui-gtk4 staticlib bundles perry_runtime CGUs that include
-        // hashbrown::raw::RawTable<T,A>::reserve_rehash monomorphized for
-        // GTK4-specific types (e.g. HashMap<i64, gtk4::Widget>) — those
-        // monomorphizations don't exist in the standalone libperry_runtime.a
-        // because the standalone build never sees those type
-        // instantiations. Pre-fix, a name-pattern drop on `perry_runtime-`
-        // / `perry_stdlib-` was added to placate lld-link's
-        // duplicate-symbol rejection on Windows cross-compile (commit
-        // 7a2e27ca), but this strip-dedup pass now skips Windows entirely
-        // (see is_windows guard at the call site). The pattern drop is
-        // dead-weight on Linux/macOS: --allow-multiple-definition (ELF) /
-        // ld64 first-wins (Mach-O) handle the actual duplicates safely,
-        // and dropping by pattern silently strips unique
-        // monomorphizations, causing
-        // `undefined reference to hashbrown::raw::RawTable::reserve_rehash`
-        // and similar (#181 Arch Linux comment).
-        if exclude_members.contains(m.as_str()) { excluded_by_set += 1; }
+
+        // Symbol-set path: drop only if every defined symbol is also
+        // provided elsewhere. Members with no defined symbols (e.g.
+        // marker TUs, inline-only headers) are kept defensively.
+        if nm_works {
+            if let Some(member_syms) = staticlib_member_symbols.get(m.as_str()) {
+                if !member_syms.is_empty()
+                    && member_syms.iter().all(|s| provided_symbols.contains(s))
+                {
+                    excluded_by_subset += 1;
+                    return false;
+                }
+            }
+            // Member not found in nm output → keep (defensive — could be
+            // a Mach-O archive nm version skew).
+            return true;
+        }
+
+        // Fallback: legacy name-pattern when nm is unavailable. The
+        // `exclude_members` set is from `ar t` member names (recorded
+        // for diagnostics). We don't actually drop on this in the new
+        // logic because name collisions between archives don't imply
+        // symbol overlap (#181 Arch Linux), but on the no-nm fallback
+        // we restore the rlib-prefix shortcut so the UI crate's own
+        // CGUs aren't double-included.
+        if exclude_members.contains(m.as_str()) {
+            // Counted only — not excluded. Same reasoning as #181.
+        }
         if has_rlib {
-            if let Some(prefix) = rlib_objects.first()
+            if let Some(prefix) = rlib_objects
+                .first()
                 .and_then(|o| o.split('.').next())
                 .and_then(|s| s.split('-').next())
             {
-                if m.starts_with(&format!("{}-", prefix)) { excluded_by_pattern += 1; return false; }
+                if m.starts_with(&format!("{}-", prefix)) {
+                    excluded_by_pattern += 1;
+                    return false;
+                }
             }
         }
         true
     }).collect();
 
-    eprintln!("[strip-dedup] {lib_name}: keeping {} of {} members (excluded: {} by .lib set, {} by name pattern)",
-        ui_only_deps.len(), staticlib_members.len(), excluded_by_set, excluded_by_pattern);
+    eprintln!("[strip-dedup] {lib_name}: keeping {} of {} members (excluded: {} by symbol-subset, {} by name pattern)",
+        ui_only_deps.len(), staticlib_members.len(), excluded_by_subset, excluded_by_pattern);
 
     // Write trimmed lib to a temp directory — the source lib may be on a read-only mount (e.g. Docker)
     let tmp_base = std::env::temp_dir().join(format!("perry_strip_{}", std::process::id()));
@@ -8706,6 +8862,93 @@ pub fn run_with_parse_cache(
         is_dylib,
         codegen_cache_stats,
     })
+}
+
+#[cfg(test)]
+mod strip_dedup_tests {
+    use super::parse_nm_archive_output;
+
+    #[test]
+    fn parser_handles_bare_member_headers() {
+        let nm_out = "\
+member_one.o:
+_sym_a
+_sym_b
+
+member_two.o:
+_sym_c
+";
+        let map = parse_nm_archive_output(nm_out);
+        assert_eq!(map.len(), 2);
+        assert!(map["member_one.o"].contains("_sym_a"));
+        assert!(map["member_one.o"].contains("_sym_b"));
+        assert_eq!(map["member_one.o"].len(), 2);
+        assert_eq!(map["member_two.o"].len(), 1);
+        assert!(map["member_two.o"].contains("_sym_c"));
+    }
+
+    #[test]
+    fn parser_strips_archive_wrapper_from_header() {
+        // Some llvm-nm versions wrap each member as
+        // `archive.a(member.o):` — we want the bare member name so the
+        // map keys match `ar t` output.
+        let nm_out = "\
+/path/to/lib.a(perry_runtime-abc.cgu.0.rcgu.o):
+_SYM
+";
+        let map = parse_nm_archive_output(nm_out);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("perry_runtime-abc.cgu.0.rcgu.o"));
+    }
+
+    #[test]
+    fn parser_skips_empty_members() {
+        let nm_out = "\
+empty.o:
+
+next.o:
+_sym
+";
+        let map = parse_nm_archive_output(nm_out);
+        // Empty.o produces no entry — `member_syms.is_empty()` is the
+        // call-site guard that keeps zero-symbol members anyway.
+        assert!(!map.contains_key("empty.o"));
+        assert_eq!(map["next.o"].len(), 1);
+    }
+
+    #[test]
+    fn subset_check_prunes_only_full_overlap() {
+        // The actual filter logic: keep a member iff at least one of its
+        // symbols is unique (i.e. not in the provided set). This pins
+        // down the v0.5.320 #181 invariant — a member with a unique
+        // generic monomorphization (not in standalone runtime/stdlib)
+        // must be KEPT even if its name happens to match the pattern.
+        let nm_out = "\
+fully_dup.o:
+_a
+_b
+
+unique_mono.o:
+_a
+_specific_to_this_lib
+
+empty_marker.o:
+";
+        let by_member = parse_nm_archive_output(nm_out);
+        let provided: std::collections::HashSet<String> =
+            ["_a".to_string(), "_b".to_string(), "_z".to_string()].into_iter().collect();
+
+        // fully_dup.o → all symbols provided → drop
+        let m1 = &by_member["fully_dup.o"];
+        assert!(!m1.is_empty() && m1.iter().all(|s| provided.contains(s)));
+
+        // unique_mono.o → has _specific_to_this_lib not in provided → keep
+        let m2 = &by_member["unique_mono.o"];
+        assert!(!m2.is_empty() && !m2.iter().all(|s| provided.contains(s)));
+
+        // empty_marker.o → no entry; call site keeps it defensively.
+        assert!(!by_member.contains_key("empty_marker.o"));
+    }
 }
 
 #[cfg(test)]
