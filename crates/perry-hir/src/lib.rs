@@ -8,6 +8,7 @@ pub mod ir;
 pub mod js_transform;
 pub mod lower;
 pub mod monomorph;
+pub mod walker;
 pub(crate) mod analysis;
 pub(crate) mod enums;
 pub(crate) mod jsx;

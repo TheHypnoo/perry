@@ -4,6 +4,7 @@
 //! call overhead and enable further optimizations.
 
 use perry_hir::{BinaryOp, Expr, Function, Module, Stmt};
+use perry_hir::walker::{walk_expr_children, walk_expr_children_mut};
 use perry_types::{FuncId, LocalId, Type};
 use std::collections::{HashMap, HashSet};
 
@@ -487,6 +488,12 @@ fn has_simple_control_flow(stmts: &[Stmt]) -> bool {
 fn find_max_local_id(stmts: &[Stmt]) -> LocalId {
     let mut max_id: LocalId = 0;
 
+    // Track every LocalId encountered. Per-variant handling for the LocalId
+    // fields owned directly by an Expr; descent into sub-expressions is
+    // delegated to `walk_expr_children` (single source of truth — see
+    // `perry_hir::walker` for why). Pre-refactor this fn carried its own
+    // ad-hoc walker with a `_ => {}` catch-all, which silently undercounted
+    // any new LocalId-bearing variant (issues #167, #169, #214).
     fn check_expr(expr: &Expr, max_id: &mut LocalId) {
         match expr {
             Expr::LocalGet(id) | Expr::LocalSet(id, _) => {
@@ -495,80 +502,30 @@ fn find_max_local_id(stmts: &[Stmt]) -> LocalId {
             Expr::Update { id, .. } => {
                 *max_id = (*max_id).max(*id);
             }
-            Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } |
-            Expr::Compare { left, right, .. } => {
-                check_expr(left, max_id);
-                check_expr(right, max_id);
+            Expr::ArrayPush { array_id, .. }
+            | Expr::ArrayPushSpread { array_id, .. }
+            | Expr::ArrayUnshift { array_id, .. }
+            | Expr::ArraySplice { array_id, .. }
+            | Expr::ArrayCopyWithin { array_id, .. } => {
+                *max_id = (*max_id).max(*array_id);
             }
-            Expr::Unary { operand, .. } => {
-                check_expr(operand, max_id);
+            Expr::ArrayPop(id) | Expr::ArrayShift(id) => {
+                *max_id = (*max_id).max(*id);
             }
-            Expr::Conditional { condition, then_expr, else_expr } => {
-                check_expr(condition, max_id);
-                check_expr(then_expr, max_id);
-                check_expr(else_expr, max_id);
+            Expr::SetAdd { set_id, .. } => {
+                *max_id = (*max_id).max(*set_id);
             }
-            Expr::Call { callee, args, .. } => {
-                check_expr(callee, max_id);
-                for arg in args {
-                    check_expr(arg, max_id);
-                }
-            }
-            Expr::CallSpread { callee, args, .. } => {
-                check_expr(callee, max_id);
-                for arg in args {
-                    match arg {
-                        perry_hir::CallArg::Expr(e) | perry_hir::CallArg::Spread(e) => {
-                            check_expr(e, max_id);
-                        }
-                    }
-                }
-            }
-            Expr::Array(elements) => {
-                for elem in elements {
-                    check_expr(elem, max_id);
-                }
-            }
-            Expr::ArraySpread(elements) => {
-                for elem in elements {
-                    match elem {
-                        perry_hir::ArrayElement::Expr(e) | perry_hir::ArrayElement::Spread(e) => {
-                            check_expr(e, max_id);
-                        }
-                    }
-                }
-            }
-            Expr::Object(fields) => {
-                for (_, v) in fields {
-                    check_expr(v, max_id);
-                }
-            }
-            Expr::ObjectSpread { parts } => {
-                for (_, v) in parts {
-                    check_expr(v, max_id);
-                }
-            }
-            Expr::IndexGet { object, index } | Expr::IndexSet { object, index, .. } => {
-                check_expr(object, max_id);
-                check_expr(index, max_id);
-            }
-            Expr::PropertyGet { object, .. } | Expr::PropertySet { object, .. } => {
-                check_expr(object, max_id);
-            }
-            Expr::NativeMethodCall { object, args, .. } => {
-                if let Some(obj) = object {
-                    check_expr(obj, max_id);
-                }
-                for arg in args {
-                    check_expr(arg, max_id);
-                }
-            }
-            // Closure parameters and body contribute to the global LocalId space.
-            // Without recursing here, find_max_local_id undercounts and the inliner
-            // can allocate colliding IDs for newly inserted Lets.
             Expr::Closure { params, body, captures, mutable_captures, .. } => {
+                // Closure has THREE LocalId sources: params, captures,
+                // mutable_captures. The body's nested LocalGets contribute via
+                // check_stmt. Param defaults need check_expr too. Short-circuit
+                // (`return`) so the walker below doesn't double-descend into
+                // Param defaults.
                 for param in params {
                     *max_id = (*max_id).max(param.id);
+                    if let Some(d) = &param.default {
+                        check_expr(d, max_id);
+                    }
                 }
                 for id in captures {
                     *max_id = (*max_id).max(*id);
@@ -579,48 +536,14 @@ fn find_max_local_id(stmts: &[Stmt]) -> LocalId {
                 for stmt in body {
                     check_stmt(stmt, max_id);
                 }
-            }
-            // New/NewDynamic carry argument expressions
-            Expr::New { args, .. } => {
-                for arg in args {
-                    check_expr(arg, max_id);
-                }
-            }
-            Expr::NewDynamic { callee, args } => {
-                check_expr(callee, max_id);
-                for arg in args {
-                    check_expr(arg, max_id);
-                }
-            }
-            // Await/type coercions wrap an inner expression
-            Expr::Await(inner) | Expr::TypeOf(inner) | Expr::Void(inner) |
-            Expr::BigIntCoerce(inner) | Expr::NumberCoerce(inner) |
-            Expr::BooleanCoerce(inner) | Expr::StringCoerce(inner) |
-            Expr::ParseFloat(inner) |
-            Expr::StringFromCharCode(inner) |
-            Expr::JsonStringify(inner) | Expr::JsonParse(inner) => {
-                check_expr(inner, max_id);
-            }
-            // Issue #169 latent: missing arms here would let fresh-id
-            // allocation collide with a LocalGet nested inside a
-            // Uint8Array index expression in a larger module.
-            Expr::Uint8ArrayGet { array, index } => {
-                check_expr(array, max_id);
-                check_expr(index, max_id);
-            }
-            Expr::Uint8ArraySet { array, index, value } => {
-                check_expr(array, max_id);
-                check_expr(index, max_id);
-                check_expr(value, max_id);
-            }
-            Expr::Uint8ArrayLength(arr) => {
-                check_expr(arr, max_id);
-            }
-            Expr::Uint8ArrayNew(Some(arg)) => {
-                check_expr(arg, max_id);
+                return;
             }
             _ => {}
         }
+        // Descend into all immediate sub-expressions. Exhaustive on Expr —
+        // a new variant added to ir.rs without updating walker.rs is a
+        // compile error.
+        walk_expr_children(expr, &mut |child| check_expr(child, max_id));
     }
 
     fn check_stmt(stmt: &Stmt, max_id: &mut LocalId) {
@@ -1299,332 +1222,76 @@ fn is_trivial_expr(expr: &Expr) -> bool {
 }
 
 /// Substitute local variable references in an expression
+/// Replace inlined parameters' LocalGets with the actual call-site argument
+/// expressions, and remap LocalIds carried by other variants when the param
+/// map says so.
+///
+/// Per-variant work focuses on the LocalId-bearing variants (LocalGet itself
+/// is the substitution target; LocalSet / Update / Array*.array_id / SetAdd /
+/// Closure.captures need id-only remapping). Descent into all other
+/// sub-expressions is delegated to `walk_expr_children_mut` — the central
+/// exhaustive walker in `perry_hir::walker`. Pre-refactor this fn carried its
+/// own ad-hoc walker with a `_ => {}` catch-all that silently dropped any new
+/// variant added to `Expr` (issues #169, #214).
 fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_local_id: &mut LocalId) {
     match expr {
         Expr::LocalGet(id) => {
             if let Some(replacement) = param_map.get(id) {
                 *expr = replacement.clone();
             }
+            return;
         }
         Expr::LocalSet(id, value) => {
             substitute_locals(value, param_map, next_local_id);
-            if let Some(replacement) = param_map.get(id) {
-                if let Expr::LocalGet(new_id) = replacement {
-                    *id = *new_id;
-                }
+            if let Some(Expr::LocalGet(new_id)) = param_map.get(id) {
+                *id = *new_id;
             }
+            return;
         }
         Expr::Update { id, .. } => {
             if let Some(Expr::LocalGet(new_id)) = param_map.get(id) {
                 *id = *new_id;
             }
+            return;
         }
-        Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } |
-        Expr::Compare { left, right, .. } => {
-            substitute_locals(left, param_map, next_local_id);
-            substitute_locals(right, param_map, next_local_id);
-        }
-        Expr::Unary { operand, .. } => {
-            substitute_locals(operand, param_map, next_local_id);
-        }
-        Expr::Conditional { condition, then_expr, else_expr } => {
-            substitute_locals(condition, param_map, next_local_id);
-            substitute_locals(then_expr, param_map, next_local_id);
-            substitute_locals(else_expr, param_map, next_local_id);
-        }
-        Expr::Call { callee, args, .. } => {
-            substitute_locals(callee, param_map, next_local_id);
-            for arg in args {
-                substitute_locals(arg, param_map, next_local_id);
-            }
-        }
-        Expr::Array(elements) => {
-            for elem in elements {
-                substitute_locals(elem, param_map, next_local_id);
-            }
-        }
-        Expr::ArraySpread(elements) => {
-            for elem in elements {
-                match elem {
-                    perry_hir::ArrayElement::Expr(e) | perry_hir::ArrayElement::Spread(e) => {
-                        substitute_locals(e, param_map, next_local_id);
-                    }
-                }
-            }
-        }
-        Expr::CallSpread { callee, args, .. } => {
-            substitute_locals(callee, param_map, next_local_id);
-            for arg in args {
-                match arg {
-                    perry_hir::CallArg::Expr(e) | perry_hir::CallArg::Spread(e) => {
-                        substitute_locals(e, param_map, next_local_id);
-                    }
-                }
-            }
-        }
-        Expr::IndexGet { object, index } => {
-            substitute_locals(object, param_map, next_local_id);
-            substitute_locals(index, param_map, next_local_id);
-        }
-        Expr::IndexSet { object, index, value } => {
-            substitute_locals(object, param_map, next_local_id);
-            substitute_locals(index, param_map, next_local_id);
-            substitute_locals(value, param_map, next_local_id);
-        }
-        Expr::PropertyGet { object, .. } => {
-            substitute_locals(object, param_map, next_local_id);
-        }
-        Expr::PropertySet { object, value, .. } => {
-            substitute_locals(object, param_map, next_local_id);
-            substitute_locals(value, param_map, next_local_id);
-        }
-        Expr::TypeOf(inner)
-        | Expr::Void(inner)
-        | Expr::Await(inner)
-        | Expr::Delete(inner)
-        | Expr::StringCoerce(inner)
-        | Expr::BooleanCoerce(inner)
-        | Expr::NumberCoerce(inner)
-        | Expr::IsFinite(inner)
-        | Expr::IsNaN(inner)
-        | Expr::NumberIsNaN(inner)
-        | Expr::NumberIsFinite(inner)
-        | Expr::NumberIsInteger(inner)
-        | Expr::IsUndefinedOrBareNan(inner)
-        | Expr::ParseFloat(inner)
-        | Expr::WeakRefNew(inner)
-        | Expr::WeakRefDeref(inner)
-        | Expr::FinalizationRegistryNew(inner)
-        | Expr::ObjectKeys(inner)
-        | Expr::ObjectValues(inner)
-        | Expr::ObjectEntries(inner)
-        | Expr::ObjectFromEntries(inner)
-        | Expr::ObjectIsFrozen(inner)
-        | Expr::ObjectIsSealed(inner)
-        | Expr::ObjectIsExtensible(inner)
-        | Expr::ObjectCreate(inner)
-        | Expr::ArrayFrom(inner)
-        | Expr::Uint8ArrayFrom(inner)
-        | Expr::IteratorToArray(inner)
-        | Expr::StructuredClone(inner)
-        | Expr::QueueMicrotask(inner)
-        | Expr::ProcessNextTick(inner)
-        | Expr::JsonParse(inner)
-        | Expr::JsonStringify(inner)
-        | Expr::ArrayIsArray(inner)
-        | Expr::MathSqrt(inner)
-        | Expr::MathFloor(inner)
-        | Expr::MathCeil(inner)
-        | Expr::MathRound(inner)
-        | Expr::MathAbs(inner)
-        | Expr::MathLog(inner)
-        | Expr::MathLog2(inner)
-        | Expr::MathLog10(inner)
-        | Expr::MathLog1p(inner)
-        | Expr::MathClz32(inner)
-        | Expr::MathMinSpread(inner)
-        | Expr::MathMaxSpread(inner) => {
-            substitute_locals(inner, param_map, next_local_id);
-        }
-        Expr::Yield { value, .. } => {
-            if let Some(v) = value { substitute_locals(v, param_map, next_local_id); }
-        }
-        // Set operations
-        Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
-            substitute_locals(set, param_map, next_local_id);
-            substitute_locals(value, param_map, next_local_id);
-        }
-        Expr::SetAdd { value, .. } => {
-            substitute_locals(value, param_map, next_local_id);
-        }
-        Expr::SetSize(set) | Expr::SetClear(set) | Expr::SetValues(set) => {
-            substitute_locals(set, param_map, next_local_id);
-        }
-        // Map operations
-        Expr::MapHas { map, key } | Expr::MapGet { map, key } | Expr::MapDelete { map, key } => {
-            substitute_locals(map, param_map, next_local_id);
-            substitute_locals(key, param_map, next_local_id);
-        }
-        Expr::MapSet { map, key, value } => {
-            substitute_locals(map, param_map, next_local_id);
-            substitute_locals(key, param_map, next_local_id);
-            substitute_locals(value, param_map, next_local_id);
-        }
-        Expr::MapSize(map) | Expr::MapClear(map) => {
-            substitute_locals(map, param_map, next_local_id);
-        }
-        // Array operations
         Expr::ArrayPop(array_id) | Expr::ArrayShift(array_id) => {
-            if let Some(replacement) = param_map.get(array_id) {
-                if let Expr::LocalGet(new_id) = replacement {
-                    *array_id = *new_id;
+            if let Some(Expr::LocalGet(new_id)) = param_map.get(array_id) {
+                *array_id = *new_id;
+            }
+            return;
+        }
+        Expr::ArrayPush { array_id, .. }
+        | Expr::ArrayPushSpread { array_id, .. }
+        | Expr::ArrayUnshift { array_id, .. }
+        | Expr::ArraySplice { array_id, .. }
+        | Expr::ArrayCopyWithin { array_id, .. } => {
+            if let Some(Expr::LocalGet(new_id)) = param_map.get(array_id) {
+                *array_id = *new_id;
+            }
+            // Children (`value`, `start`, `delete_count`, `items`, `target`,
+            // `end`, …) are descended into below via the walker.
+        }
+        Expr::SetAdd { set_id, .. } => {
+            if let Some(Expr::LocalGet(new_id)) = param_map.get(set_id) {
+                *set_id = *new_id;
+            }
+            // `value` descended via walker.
+        }
+        // Closure: substitute in body AND remap captures lists. Without
+        // remapping captures, an inlined function whose body contains a
+        // closure ends up with the closure's captures list referencing the
+        // OLD local IDs while the closure body uses the NEW (remapped) IDs.
+        // Codegen then can't resolve the captures in the inlined-into FnCtx
+        // and falls back to `double_literal(0.0)`, producing null box
+        // pointers at runtime (closure-null family). Param defaults also get
+        // substituted explicitly here so the walker doesn't double-process
+        // them.
+        Expr::Closure { body, captures, mutable_captures, params, .. } => {
+            for p in params.iter_mut() {
+                if let Some(d) = &mut p.default {
+                    substitute_locals(d, param_map, next_local_id);
                 }
             }
-        }
-        Expr::ArrayPush { array_id, value } | Expr::ArrayUnshift { array_id, value } => {
-            if let Some(replacement) = param_map.get(array_id) {
-                if let Expr::LocalGet(new_id) = replacement {
-                    *array_id = *new_id;
-                }
-            }
-            substitute_locals(value, param_map, next_local_id);
-        }
-        Expr::ArrayPushSpread { array_id, source: value } => {
-            if let Some(replacement) = param_map.get(array_id) {
-                if let Expr::LocalGet(new_id) = replacement {
-                    *array_id = *new_id;
-                }
-            }
-            substitute_locals(value, param_map, next_local_id);
-        }
-        Expr::ArrayIndexOf { array, value } | Expr::ArrayIncludes { array, value } => {
-            substitute_locals(array, param_map, next_local_id);
-            substitute_locals(value, param_map, next_local_id);
-        }
-        Expr::ArraySlice { array, start, end } => {
-            substitute_locals(array, param_map, next_local_id);
-            substitute_locals(start, param_map, next_local_id);
-            if let Some(e) = end {
-                substitute_locals(e, param_map, next_local_id);
-            }
-        }
-        Expr::ArraySplice { array_id, start, delete_count, items } => {
-            if let Some(replacement) = param_map.get(array_id) {
-                if let Expr::LocalGet(new_id) = replacement {
-                    *array_id = *new_id;
-                }
-            }
-            substitute_locals(start, param_map, next_local_id);
-            if let Some(dc) = delete_count {
-                substitute_locals(dc, param_map, next_local_id);
-            }
-            for item in items {
-                substitute_locals(item, param_map, next_local_id);
-            }
-        }
-        Expr::ArrayForEach { array, callback } |
-        Expr::ArrayMap { array, callback } |
-        Expr::ArrayFilter { array, callback } |
-        Expr::ArrayFind { array, callback } |
-        Expr::ArrayFindIndex { array, callback } => {
-            substitute_locals(array, param_map, next_local_id);
-            substitute_locals(callback, param_map, next_local_id);
-        }
-        Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
-            substitute_locals(array, param_map, next_local_id);
-            substitute_locals(callback, param_map, next_local_id);
-            if let Some(init) = initial {
-                substitute_locals(init, param_map, next_local_id);
-            }
-        }
-        Expr::ArrayJoin { array, separator } => {
-            substitute_locals(array, param_map, next_local_id);
-            if let Some(sep) = separator {
-                substitute_locals(sep, param_map, next_local_id);
-            }
-        }
-        Expr::ArrayFlat { array } | Expr::ArrayToReversed { array } => {
-            substitute_locals(array, param_map, next_local_id);
-        }
-        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
-            substitute_locals(array, param_map, next_local_id);
-        }
-        Expr::ArrayToSorted { array, comparator } => {
-            substitute_locals(array, param_map, next_local_id);
-            if let Some(cmp) = comparator { substitute_locals(cmp, param_map, next_local_id); }
-        }
-        Expr::ArrayToSpliced { array, start, delete_count, items } => {
-            substitute_locals(array, param_map, next_local_id);
-            substitute_locals(start, param_map, next_local_id);
-            substitute_locals(delete_count, param_map, next_local_id);
-            for item in items { substitute_locals(item, param_map, next_local_id); }
-        }
-        Expr::ArrayWith { array, index, value } => {
-            substitute_locals(array, param_map, next_local_id);
-            substitute_locals(index, param_map, next_local_id);
-            substitute_locals(value, param_map, next_local_id);
-        }
-        Expr::ArrayCopyWithin { array_id, target, start, end } => {
-            if let Some(replacement) = param_map.get(array_id) {
-                if let Expr::LocalGet(new_id) = replacement {
-                    *array_id = *new_id;
-                }
-            }
-            substitute_locals(target, param_map, next_local_id);
-            substitute_locals(start, param_map, next_local_id);
-            if let Some(e) = end { substitute_locals(e, param_map, next_local_id); }
-        }
-        // Object literal
-        Expr::Object(fields) => {
-            for (_, value) in fields {
-                substitute_locals(value, param_map, next_local_id);
-            }
-        }
-        Expr::ObjectSpread { parts } => {
-            for (_, value) in parts {
-                substitute_locals(value, param_map, next_local_id);
-            }
-        }
-        // JSON operations
-        Expr::JsonStringify(inner) | Expr::JsonParse(inner) => {
-            substitute_locals(inner, param_map, next_local_id);
-        }
-        // Path/URL operations
-        Expr::PathJoin(a, b) => {
-            substitute_locals(a, param_map, next_local_id);
-            substitute_locals(b, param_map, next_local_id);
-        }
-        Expr::PathDirname(p) | Expr::PathBasename(p) | Expr::PathExtname(p) |
-        Expr::PathResolve(p) | Expr::PathIsAbsolute(p) | Expr::FileURLToPath(p) => {
-            substitute_locals(p, param_map, next_local_id);
-        }
-        // Math operations
-        Expr::MathFloor(inner) | Expr::MathCeil(inner) | Expr::MathRound(inner) |
-        Expr::MathAbs(inner) | Expr::MathSqrt(inner) |
-        Expr::MathLog(inner) | Expr::MathLog2(inner) | Expr::MathLog10(inner) => {
-            substitute_locals(inner, param_map, next_local_id);
-        }
-        Expr::MathPow(base, exp) | Expr::MathImul(base, exp) => {
-            substitute_locals(base, param_map, next_local_id);
-            substitute_locals(exp, param_map, next_local_id);
-        }
-        Expr::MathMin(exprs) | Expr::MathMax(exprs) => {
-            for e in exprs {
-                substitute_locals(e, param_map, next_local_id);
-            }
-        }
-        // New expressions
-        Expr::New { args, .. } => {
-            for arg in args {
-                substitute_locals(arg, param_map, next_local_id);
-            }
-        }
-        Expr::NewDynamic { callee, args } => {
-            substitute_locals(callee, param_map, next_local_id);
-            for arg in args {
-                substitute_locals(arg, param_map, next_local_id);
-            }
-        }
-        Expr::JsNew { module_handle, args, .. } => {
-            substitute_locals(module_handle, param_map, next_local_id);
-            for arg in args {
-                substitute_locals(arg, param_map, next_local_id);
-            }
-        }
-        Expr::JsNewFromHandle { constructor, args } => {
-            substitute_locals(constructor, param_map, next_local_id);
-            for arg in args {
-                substitute_locals(arg, param_map, next_local_id);
-            }
-        }
-        // Closure expressions - substitute in body AND remap captures.
-        // Without remapping captures, an inlined function whose body
-        // contains a closure ends up with the closure's captures list
-        // referencing the OLD local IDs while the closure body uses the
-        // NEW (remapped) IDs. Codegen then can't resolve the captures in
-        // the inlined-into FnCtx and falls back to `double_literal(0.0)`,
-        // producing null box pointers at runtime (closure-null family).
-        Expr::Closure { body, captures, mutable_captures, .. } => {
             substitute_locals_in_stmts(body, param_map, next_local_id);
             captures.retain_mut(|id| match param_map.get(id) {
                 Some(Expr::LocalGet(new_id)) => { *id = *new_id; true }
@@ -1639,216 +1306,14 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
                 Some(_) => false,
                 None => true,
             });
-        }
-        // Native method calls
-        Expr::NativeMethodCall { object, args, .. } => {
-            if let Some(obj) = object {
-                substitute_locals(obj, param_map, next_local_id);
-            }
-            for arg in args {
-                substitute_locals(arg, param_map, next_local_id);
-            }
-        }
-        Expr::NativeModuleRef(_) => {}
-        // String operations
-        Expr::StringSplit(string, delimiter) => {
-            substitute_locals(string, param_map, next_local_id);
-            substitute_locals(delimiter, param_map, next_local_id);
-        }
-        Expr::StringFromCharCode(code) | Expr::StringCoerce(code) => {
-            substitute_locals(code, param_map, next_local_id);
-        }
-        // Type coercions and parsing
-        Expr::BigIntCoerce(inner) | Expr::NumberCoerce(inner) | Expr::ParseFloat(inner) => {
-            substitute_locals(inner, param_map, next_local_id);
-        }
-        Expr::ParseInt { string, radix } => {
-            substitute_locals(string, param_map, next_local_id);
-            if let Some(r) = radix {
-                substitute_locals(r, param_map, next_local_id);
-            }
-        }
-        // Global set
-        Expr::GlobalSet(_, value) => {
-            substitute_locals(value, param_map, next_local_id);
-        }
-        // Sequence
-        Expr::Sequence(exprs) => {
-            for e in exprs {
-                substitute_locals(e, param_map, next_local_id);
-            }
-        }
-        // InstanceOf / In
-        Expr::InstanceOf { expr, .. } => {
-            substitute_locals(expr, param_map, next_local_id);
-        }
-        Expr::In { property, object } => {
-            substitute_locals(property, param_map, next_local_id);
-            substitute_locals(object, param_map, next_local_id);
-        }
-        // Delete
-        Expr::Delete(inner) => {
-            substitute_locals(inner, param_map, next_local_id);
-        }
-        // ObjectRest
-        Expr::ObjectRest { object, .. } => {
-            substitute_locals(object, param_map, next_local_id);
-        }
-        // ArrayIsArray
-        Expr::ArrayIsArray(inner) => {
-            substitute_locals(inner, param_map, next_local_id);
-        }
-        // RegExp
-        Expr::RegExpTest { regex, string } => {
-            substitute_locals(regex, param_map, next_local_id);
-            substitute_locals(string, param_map, next_local_id);
-        }
-        Expr::StringMatch { string, regex } => {
-            substitute_locals(string, param_map, next_local_id);
-            substitute_locals(regex, param_map, next_local_id);
-        }
-        Expr::StringReplace { string, pattern, replacement } => {
-            substitute_locals(string, param_map, next_local_id);
-            substitute_locals(pattern, param_map, next_local_id);
-            substitute_locals(replacement, param_map, next_local_id);
-        }
-        // Error
-        Expr::ErrorNew(Some(inner)) | Expr::ErrorMessage(inner) => {
-            substitute_locals(inner, param_map, next_local_id);
-        }
-        Expr::ErrorNewWithCause { message, cause } => {
-            substitute_locals(message, param_map, next_local_id);
-            substitute_locals(cause, param_map, next_local_id);
-        }
-        Expr::TypeErrorNew(m) | Expr::RangeErrorNew(m) | Expr::ReferenceErrorNew(m) | Expr::SyntaxErrorNew(m) => {
-            substitute_locals(m, param_map, next_local_id);
-        }
-        Expr::AggregateErrorNew { errors, message } => {
-            substitute_locals(errors, param_map, next_local_id);
-            substitute_locals(message, param_map, next_local_id);
-        }
-        // Date operations
-        Expr::DateNew(Some(inner)) | Expr::DateGetTime(inner) |
-        Expr::DateToISOString(inner) | Expr::DateGetFullYear(inner) |
-        Expr::DateGetMonth(inner) | Expr::DateGetDate(inner) |
-        Expr::DateGetHours(inner) | Expr::DateGetMinutes(inner) |
-        Expr::DateGetSeconds(inner) | Expr::DateGetMilliseconds(inner) => {
-            substitute_locals(inner, param_map, next_local_id);
-        }
-        // FS operations
-        Expr::FsReadFileSync(inner) | Expr::FsExistsSync(inner) |
-        Expr::FsMkdirSync(inner) | Expr::FsUnlinkSync(inner) |
-        Expr::FsReadFileBinary(inner) | Expr::FsRmRecursive(inner) => {
-            substitute_locals(inner, param_map, next_local_id);
-        }
-        Expr::FsWriteFileSync(a, b) | Expr::FsAppendFileSync(a, b) => {
-            substitute_locals(a, param_map, next_local_id);
-            substitute_locals(b, param_map, next_local_id);
-        }
-        Expr::ChildProcessSpawnBackground { command, args, log_file, env_json } => {
-            substitute_locals(command, param_map, next_local_id);
-            if let Some(a) = args { substitute_locals(a, param_map, next_local_id); }
-            substitute_locals(log_file, param_map, next_local_id);
-            if let Some(e) = env_json { substitute_locals(e, param_map, next_local_id); }
-        }
-        Expr::ChildProcessGetProcessStatus(h) | Expr::ChildProcessKillProcess(h) => {
-            substitute_locals(h, param_map, next_local_id);
-        }
-        // Buffer operations
-        Expr::BufferFrom { data, encoding } => {
-            substitute_locals(data, param_map, next_local_id);
-            if let Some(enc) = encoding { substitute_locals(enc, param_map, next_local_id); }
-        }
-        Expr::BufferAlloc { size, fill } => {
-            substitute_locals(size, param_map, next_local_id);
-            if let Some(f) = fill { substitute_locals(f, param_map, next_local_id); }
-        }
-        Expr::BufferAllocUnsafe(inner) | Expr::BufferConcat(inner) |
-        Expr::BufferIsBuffer(inner) | Expr::BufferByteLength(inner) |
-        Expr::BufferLength(inner) => {
-            substitute_locals(inner, param_map, next_local_id);
-        }
-        Expr::BufferToString { buffer, encoding } => {
-            substitute_locals(buffer, param_map, next_local_id);
-            if let Some(enc) = encoding { substitute_locals(enc, param_map, next_local_id); }
-        }
-        Expr::BufferSlice { buffer, start, end } => {
-            substitute_locals(buffer, param_map, next_local_id);
-            if let Some(s) = start { substitute_locals(s, param_map, next_local_id); }
-            if let Some(e) = end { substitute_locals(e, param_map, next_local_id); }
-        }
-        Expr::BufferFill { buffer, value } => {
-            substitute_locals(buffer, param_map, next_local_id);
-            substitute_locals(value, param_map, next_local_id);
-        }
-        Expr::BufferEquals { buffer, other } => {
-            substitute_locals(buffer, param_map, next_local_id);
-            substitute_locals(other, param_map, next_local_id);
-        }
-        Expr::BufferIndexGet { buffer, index } => {
-            substitute_locals(buffer, param_map, next_local_id);
-            substitute_locals(index, param_map, next_local_id);
-        }
-        Expr::BufferIndexSet { buffer, index, value } => {
-            substitute_locals(buffer, param_map, next_local_id);
-            substitute_locals(index, param_map, next_local_id);
-            substitute_locals(value, param_map, next_local_id);
-        }
-        // Issue #169: without these, inlining a function that takes a
-        // Uint8Array param leaves stale LocalGet(param_id) in the body.
-        // The codegen's soft fallback boxes the unknown id as
-        // TAG_UNDEFINED, the slow-path bounds check then evaluates
-        // @llvm.assume(i1 false), and the program traps.
-        Expr::Uint8ArrayGet { array, index } => {
-            substitute_locals(array, param_map, next_local_id);
-            substitute_locals(index, param_map, next_local_id);
-        }
-        Expr::Uint8ArraySet { array, index, value } => {
-            substitute_locals(array, param_map, next_local_id);
-            substitute_locals(index, param_map, next_local_id);
-            substitute_locals(value, param_map, next_local_id);
-        }
-        Expr::Uint8ArrayLength(arr) => {
-            substitute_locals(arr, param_map, next_local_id);
-        }
-        Expr::Uint8ArrayNew(Some(arg)) => {
-            substitute_locals(arg, param_map, next_local_id);
-        }
-        Expr::BufferCopy { source, target, target_start, source_start, source_end } => {
-            substitute_locals(source, param_map, next_local_id);
-            substitute_locals(target, param_map, next_local_id);
-            if let Some(ts) = target_start { substitute_locals(ts, param_map, next_local_id); }
-            if let Some(ss) = source_start { substitute_locals(ss, param_map, next_local_id); }
-            if let Some(se) = source_end { substitute_locals(se, param_map, next_local_id); }
-        }
-        Expr::BufferWrite { buffer, string, offset, encoding } => {
-            substitute_locals(buffer, param_map, next_local_id);
-            substitute_locals(string, param_map, next_local_id);
-            if let Some(o) = offset { substitute_locals(o, param_map, next_local_id); }
-            if let Some(e) = encoding { substitute_locals(e, param_map, next_local_id); }
-        }
-        // JS interop
-        Expr::JsGetExport { module_handle, .. } | Expr::JsGetProperty { object: module_handle, .. } => {
-            substitute_locals(module_handle, param_map, next_local_id);
-        }
-        Expr::JsSetProperty { object, value, .. } => {
-            substitute_locals(object, param_map, next_local_id);
-            substitute_locals(value, param_map, next_local_id);
-        }
-        Expr::JsCallFunction { module_handle, args, .. } | Expr::JsCallMethod { object: module_handle, args, .. } => {
-            substitute_locals(module_handle, param_map, next_local_id);
-            for arg in args { substitute_locals(arg, param_map, next_local_id); }
-        }
-        Expr::JsCreateCallback { closure, .. } => {
-            substitute_locals(closure, param_map, next_local_id);
-        }
-        // Static/Super method calls
-        Expr::StaticMethodCall { args, .. } | Expr::SuperCall(args) |
-        Expr::SuperMethodCall { args, .. } => {
-            for arg in args { substitute_locals(arg, param_map, next_local_id); }
+            return;
         }
         _ => {}
     }
+    // Descend into all immediate sub-expressions for non-special variants.
+    // The walker is exhaustive on Expr — adding a new variant to ir.rs
+    // without updating walker.rs is a compile error.
+    walk_expr_children_mut(expr, &mut |child| substitute_locals(child, param_map, next_local_id));
 }
 
 /// Substitute Expr::This with a LocalGet reference

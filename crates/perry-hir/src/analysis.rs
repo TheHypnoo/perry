@@ -6,727 +6,78 @@
 use perry_types::LocalId;
 
 use crate::ir::*;
+use crate::walker::{walk_expr_children, walk_expr_children_mut};
 
+/// Collect every `LocalId` referenced by `expr` (and its sub-expressions).
+///
+/// Per-variant work focuses on the LocalId-bearing variants (LocalGet,
+/// LocalSet.id, Update.id, Array*.array_id, SetAdd.set_id, Closure body for
+/// transitive captures). Descent into all other sub-expressions is delegated
+/// to `walk_expr_children` — see `perry_hir::walker` for why a single source
+/// of truth was extracted from the four pre-existing ad-hoc walkers.
 pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &mut std::collections::HashSet<usize>) {
     match expr {
-        Expr::LocalGet(id) => refs.push(*id),
+        Expr::LocalGet(id) => {
+            refs.push(*id);
+            return;
+        }
         Expr::LocalSet(id, value) => {
             refs.push(*id);
             collect_local_refs_expr(value, refs, visited);
+            return;
         }
-        Expr::Binary { left, right, .. } => {
-            collect_local_refs_expr(left, refs, visited);
-            collect_local_refs_expr(right, refs, visited);
+        Expr::Update { id, .. } => {
+            refs.push(*id);
+            return;
         }
-        Expr::Unary { operand, .. } => {
-            collect_local_refs_expr(operand, refs, visited);
+        Expr::ArrayPush { array_id, .. }
+        | Expr::ArrayPushSpread { array_id, .. }
+        | Expr::ArrayUnshift { array_id, .. }
+        | Expr::ArraySplice { array_id, .. }
+        | Expr::ArrayCopyWithin { array_id, .. } => {
+            refs.push(*array_id);
+            // Children (`value`, `start`, `delete_count`, `items`, `target`,
+            // `end`) descended below via the walker.
         }
-        Expr::Call { callee, args, .. } => {
-            collect_local_refs_expr(callee, refs, visited);
-            for arg in args {
-                collect_local_refs_expr(arg, refs, visited);
-            }
+        Expr::ArrayPop(array_id) | Expr::ArrayShift(array_id) => {
+            refs.push(*array_id);
+            return;
         }
-        Expr::IndexGet { object, index } => {
-            collect_local_refs_expr(object, refs, visited);
-            collect_local_refs_expr(index, refs, visited);
+        Expr::SetAdd { set_id, .. } => {
+            refs.push(*set_id);
+            // `value` descended via walker.
         }
-        Expr::IndexSet { object, index, value } => {
-            collect_local_refs_expr(object, refs, visited);
-            collect_local_refs_expr(index, refs, visited);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::PropertyGet { object, .. } => {
-            collect_local_refs_expr(object, refs, visited);
-        }
-        Expr::PropertySet { object, value, .. } => {
-            collect_local_refs_expr(object, refs, visited);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::PropertyUpdate { object, .. } => {
-            collect_local_refs_expr(object, refs, visited);
-        }
-        Expr::IndexUpdate { object, index, .. } => {
-            collect_local_refs_expr(object, refs, visited);
-            collect_local_refs_expr(index, refs, visited);
-        }
-        Expr::New { args, .. } => {
-            for arg in args {
-                collect_local_refs_expr(arg, refs, visited);
-            }
-        }
-        Expr::Array(elements) => {
-            for elem in elements {
-                collect_local_refs_expr(elem, refs, visited);
-            }
-        }
-        Expr::ArraySpread(elements) => {
-            for elem in elements {
-                match elem {
-                    ArrayElement::Expr(e) => collect_local_refs_expr(e, refs, visited),
-                    ArrayElement::Spread(e) => collect_local_refs_expr(e, refs, visited),
+        Expr::Closure { body, params, .. } => {
+            // Descend into nested closures to find transitive captures.
+            // Use visited set to prevent infinite loops on recursive closure
+            // references. Param defaults are also part of the closure's
+            // observable references.
+            for p in params {
+                if let Some(d) = &p.default {
+                    collect_local_refs_expr(d, refs, visited);
                 }
             }
-        }
-        Expr::Conditional { condition, then_expr, else_expr } => {
-            collect_local_refs_expr(condition, refs, visited);
-            collect_local_refs_expr(then_expr, refs, visited);
-            collect_local_refs_expr(else_expr, refs, visited);
-        }
-        Expr::Closure { body, .. } => {
-            // Descend into nested closures to find transitive captures.
-            // If a nested closure uses a variable from the outer scope,
-            // the outer closure must also capture it to pass it down.
-            // Use visited set to prevent infinite loops on recursive closure references.
             let key = body as *const _ as usize;
             if !visited.insert(key) {
-                return; // Already visited this closure body
+                return;
             }
             for stmt in body {
                 collect_local_refs_stmt(stmt, refs, visited);
             }
-        }
-        Expr::Compare { left, right, .. } => {
-            collect_local_refs_expr(left, refs, visited);
-            collect_local_refs_expr(right, refs, visited);
-        }
-        Expr::Logical { left, right, .. } => {
-            collect_local_refs_expr(left, refs, visited);
-            collect_local_refs_expr(right, refs, visited);
+            return;
         }
         Expr::GlobalGet(_) => {
-            // Global variables are not captures
+            // Global variables aren't captures.
+            return;
         }
-        Expr::GlobalSet(_, value) => {
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::Object(fields) => {
-            for (_, value) in fields {
-                collect_local_refs_expr(value, refs, visited);
-            }
-        }
-        Expr::ObjectSpread { parts } => {
-            for (_, value) in parts {
-                collect_local_refs_expr(value, refs, visited);
-            }
-        }
-        Expr::TypeOf(inner) => {
-            collect_local_refs_expr(inner, refs, visited);
-        }
-        Expr::InstanceOf { expr, .. } => {
-            collect_local_refs_expr(expr, refs, visited);
-        }
-        Expr::In { property, object } => {
-            collect_local_refs_expr(property, refs, visited);
-            collect_local_refs_expr(object, refs, visited);
-        }
-        Expr::Await(inner) => {
-            collect_local_refs_expr(inner, refs, visited);
-        }
-        Expr::Sequence(exprs) => {
-            for e in exprs {
-                collect_local_refs_expr(e, refs, visited);
-            }
-        }
-        Expr::SuperCall(args) => {
-            for arg in args {
-                collect_local_refs_expr(arg, refs, visited);
-            }
-        }
-        Expr::SuperMethodCall { args, .. } => {
-            for arg in args {
-                collect_local_refs_expr(arg, refs, visited);
-            }
-        }
-        Expr::Update { id, .. } => {
-            // Update reads and writes the variable
-            refs.push(*id);
-        }
-        // File system operations
-        Expr::FsReadFileSync(path) => {
-            collect_local_refs_expr(path, refs, visited);
-        }
-        Expr::FsWriteFileSync(path, content) => {
-            collect_local_refs_expr(path, refs, visited);
-            collect_local_refs_expr(content, refs, visited);
-        }
-        Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path)
-        | Expr::FsReadFileBinary(path) | Expr::FsRmRecursive(path) => {
-            collect_local_refs_expr(path, refs, visited);
-        }
-        Expr::FsAppendFileSync(path, content) => {
-            collect_local_refs_expr(path, refs, visited);
-            collect_local_refs_expr(content, refs, visited);
-        }
-        Expr::ChildProcessSpawnBackground { command, args, log_file, env_json } => {
-            collect_local_refs_expr(command, refs, visited);
-            if let Some(a) = args { collect_local_refs_expr(a, refs, visited); }
-            collect_local_refs_expr(log_file, refs, visited);
-            if let Some(e) = env_json { collect_local_refs_expr(e, refs, visited); }
-        }
-        Expr::ChildProcessGetProcessStatus(h) | Expr::ChildProcessKillProcess(h) => {
-            collect_local_refs_expr(h, refs, visited);
-        }
-        // Path operations
-        Expr::PathJoin(a, b) => {
-            collect_local_refs_expr(a, refs, visited);
-            collect_local_refs_expr(b, refs, visited);
-        }
-        Expr::PathDirname(path) | Expr::PathBasename(path) | Expr::PathExtname(path) | Expr::PathResolve(path) | Expr::PathIsAbsolute(path) | Expr::FileURLToPath(path) => {
-            collect_local_refs_expr(path, refs, visited);
-        }
-        // Array methods
-        Expr::ArrayPush { array_id, value } | Expr::ArrayPushSpread { array_id, source: value } => {
-            refs.push(*array_id);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::ArrayPop(array_id) | Expr::ArrayShift(array_id) => {
-            refs.push(*array_id);
-        }
-        Expr::ArrayUnshift { array_id, value } => {
-            refs.push(*array_id);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::ArrayIndexOf { array, value } | Expr::ArrayIncludes { array, value } => {
-            collect_local_refs_expr(array, refs, visited);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::ArraySlice { array, start, end } => {
-            collect_local_refs_expr(array, refs, visited);
-            collect_local_refs_expr(start, refs, visited);
-            if let Some(e) = end {
-                collect_local_refs_expr(e, refs, visited);
-            }
-        }
-        Expr::ArraySplice { array_id, start, delete_count, items } => {
-            refs.push(*array_id);
-            collect_local_refs_expr(start, refs, visited);
-            if let Some(dc) = delete_count {
-                collect_local_refs_expr(dc, refs, visited);
-            }
-            for item in items {
-                collect_local_refs_expr(item, refs, visited);
-            }
-        }
-        Expr::ArrayForEach { array, callback } | Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } | Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } => {
-            collect_local_refs_expr(array, refs, visited);
-            collect_local_refs_expr(callback, refs, visited);
-        }
-        Expr::ArraySort { array, comparator } => {
-            collect_local_refs_expr(array, refs, visited);
-            collect_local_refs_expr(comparator, refs, visited);
-        }
-        Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
-            collect_local_refs_expr(array, refs, visited);
-            collect_local_refs_expr(callback, refs, visited);
-            if let Some(init) = initial {
-                collect_local_refs_expr(init, refs, visited);
-            }
-        }
-        Expr::ArrayToReversed { array } => {
-            collect_local_refs_expr(array, refs, visited);
-        }
-        Expr::ArrayToSorted { array, comparator } => {
-            collect_local_refs_expr(array, refs, visited);
-            if let Some(cmp) = comparator { collect_local_refs_expr(cmp, refs, visited); }
-        }
-        Expr::ArrayToSpliced { array, start, delete_count, items } => {
-            collect_local_refs_expr(array, refs, visited);
-            collect_local_refs_expr(start, refs, visited);
-            collect_local_refs_expr(delete_count, refs, visited);
-            for item in items { collect_local_refs_expr(item, refs, visited); }
-        }
-        Expr::ArrayWith { array, index, value } => {
-            collect_local_refs_expr(array, refs, visited);
-            collect_local_refs_expr(index, refs, visited);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::ArrayCopyWithin { array_id, target, start, end } => {
-            refs.push(*array_id);
-            collect_local_refs_expr(target, refs, visited);
-            collect_local_refs_expr(start, refs, visited);
-            if let Some(e) = end { collect_local_refs_expr(e, refs, visited); }
-        }
-        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
-            collect_local_refs_expr(array, refs, visited);
-        }
-        Expr::ArrayJoin { array, separator } => {
-            collect_local_refs_expr(array, refs, visited);
-            if let Some(sep) = separator {
-                collect_local_refs_expr(sep, refs, visited);
-            }
-        }
-        Expr::ArrayFlat { array } => {
-            collect_local_refs_expr(array, refs, visited);
-        }
-        // Native module calls
-        Expr::NativeMethodCall { object, args, .. } => {
-            if let Some(obj) = object {
-                collect_local_refs_expr(obj, refs, visited);
-            }
-            for arg in args {
-                collect_local_refs_expr(arg, refs, visited);
-            }
-        }
-        // Static member access
-        Expr::StaticFieldGet { .. } => {}
-        Expr::StaticFieldSet { value, .. } => {
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::StaticMethodCall { args, .. } => {
-            for arg in args {
-                collect_local_refs_expr(arg, refs, visited);
-            }
-        }
-        // String methods
-        Expr::StringSplit(string, delimiter) => {
-            collect_local_refs_expr(string, refs, visited);
-            collect_local_refs_expr(delimiter, refs, visited);
-        }
-        Expr::StringFromCharCode(code) => {
-            collect_local_refs_expr(code, refs, visited);
-        }
-        // Map operations
-        Expr::MapNew => {}
-        Expr::MapNewFromArray(expr) => { collect_local_refs_expr(expr, refs, visited); }
-        Expr::MapSet { map, key, value } => {
-            collect_local_refs_expr(map, refs, visited);
-            collect_local_refs_expr(key, refs, visited);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::MapGet { map, key } | Expr::MapHas { map, key } | Expr::MapDelete { map, key } => {
-            collect_local_refs_expr(map, refs, visited);
-            collect_local_refs_expr(key, refs, visited);
-        }
-        Expr::MapSize(map) | Expr::MapClear(map) |
-        Expr::MapEntries(map) | Expr::MapKeys(map) | Expr::MapValues(map) => {
-            collect_local_refs_expr(map, refs, visited);
-        }
-        // Set operations
-        Expr::SetNew => {}
-        Expr::SetNewFromArray(expr) => { collect_local_refs_expr(expr, refs, visited); }
-        Expr::SetAdd { set_id, value } => {
-            refs.push(*set_id);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
-            collect_local_refs_expr(set, refs, visited);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::SetSize(set) | Expr::SetClear(set) | Expr::SetValues(set) => {
-            collect_local_refs_expr(set, refs, visited);
-        }
-        // JSON operations
-        Expr::JsonParse(expr) | Expr::JsonStringify(expr) => {
-            collect_local_refs_expr(expr, refs, visited);
-        }
-        // Math operations
-        Expr::MathFloor(expr) | Expr::MathCeil(expr) | Expr::MathRound(expr) |
-        Expr::MathAbs(expr) | Expr::MathSqrt(expr) |
-        Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) => {
-            collect_local_refs_expr(expr, refs, visited);
-        }
-        Expr::MathPow(base, exp) | Expr::MathImul(base, exp) => {
-            collect_local_refs_expr(base, refs, visited);
-            collect_local_refs_expr(exp, refs, visited);
-        }
-        Expr::MathMin(args) | Expr::MathMax(args) => {
-            for arg in args {
-                collect_local_refs_expr(arg, refs, visited);
-            }
-        }
-        Expr::MathMinSpread(expr) | Expr::MathMaxSpread(expr) => {
-            collect_local_refs_expr(expr, refs, visited);
-        }
-        Expr::MathRandom => {}
-        // Crypto operations
-        Expr::CryptoRandomBytes(expr) | Expr::CryptoSha256(expr) | Expr::CryptoMd5(expr) => {
-            collect_local_refs_expr(expr, refs, visited);
-        }
-        Expr::CryptoRandomUUID => {}
-        // OS operations (no local refs)
-        Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsHomedir |
-        Expr::OsTmpdir | Expr::OsTotalmem | Expr::OsFreemem | Expr::OsUptime |
-        Expr::OsType | Expr::OsRelease | Expr::OsCpus | Expr::OsNetworkInterfaces |
-        Expr::OsUserInfo | Expr::OsEOL => {}
-        // Buffer operations
-        Expr::BufferFrom { data, encoding } => {
-            collect_local_refs_expr(data, refs, visited);
-            if let Some(enc) = encoding {
-                collect_local_refs_expr(enc, refs, visited);
-            }
-        }
-        Expr::BufferAlloc { size, fill } => {
-            collect_local_refs_expr(size, refs, visited);
-            if let Some(f) = fill {
-                collect_local_refs_expr(f, refs, visited);
-            }
-        }
-        Expr::BufferAllocUnsafe(expr) | Expr::BufferConcat(expr) |
-        Expr::BufferIsBuffer(expr) | Expr::BufferByteLength(expr) |
-        Expr::BufferLength(expr) => {
-            collect_local_refs_expr(expr, refs, visited);
-        }
-        Expr::BufferToString { buffer, encoding } => {
-            collect_local_refs_expr(buffer, refs, visited);
-            if let Some(enc) = encoding {
-                collect_local_refs_expr(enc, refs, visited);
-            }
-        }
-        Expr::BufferFill { buffer, value } => {
-            collect_local_refs_expr(buffer, refs, visited);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::BufferSlice { buffer, start, end } => {
-            collect_local_refs_expr(buffer, refs, visited);
-            if let Some(s) = start {
-                collect_local_refs_expr(s, refs, visited);
-            }
-            if let Some(e) = end {
-                collect_local_refs_expr(e, refs, visited);
-            }
-        }
-        Expr::BufferCopy { source, target, target_start, source_start, source_end } => {
-            collect_local_refs_expr(source, refs, visited);
-            collect_local_refs_expr(target, refs, visited);
-            if let Some(ts) = target_start {
-                collect_local_refs_expr(ts, refs, visited);
-            }
-            if let Some(ss) = source_start {
-                collect_local_refs_expr(ss, refs, visited);
-            }
-            if let Some(se) = source_end {
-                collect_local_refs_expr(se, refs, visited);
-            }
-        }
-        Expr::BufferWrite { buffer, string, offset, encoding } => {
-            collect_local_refs_expr(buffer, refs, visited);
-            collect_local_refs_expr(string, refs, visited);
-            if let Some(o) = offset {
-                collect_local_refs_expr(o, refs, visited);
-            }
-            if let Some(e) = encoding {
-                collect_local_refs_expr(e, refs, visited);
-            }
-        }
-        Expr::BufferEquals { buffer, other } => {
-            collect_local_refs_expr(buffer, refs, visited);
-            collect_local_refs_expr(other, refs, visited);
-        }
-        Expr::BufferIndexGet { buffer, index } => {
-            collect_local_refs_expr(buffer, refs, visited);
-            collect_local_refs_expr(index, refs, visited);
-        }
-        Expr::BufferIndexSet { buffer, index, value } => {
-            collect_local_refs_expr(buffer, refs, visited);
-            collect_local_refs_expr(index, refs, visited);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        // Child Process operations
-        Expr::ChildProcessExecSync { command, options } => {
-            collect_local_refs_expr(command, refs, visited);
-            if let Some(opts) = options {
-                collect_local_refs_expr(opts, refs, visited);
-            }
-        }
-        Expr::ChildProcessSpawnSync { command, args, options } |
-        Expr::ChildProcessSpawn { command, args, options } => {
-            collect_local_refs_expr(command, refs, visited);
-            if let Some(a) = args {
-                collect_local_refs_expr(a, refs, visited);
-            }
-            if let Some(opts) = options {
-                collect_local_refs_expr(opts, refs, visited);
-            }
-        }
-        Expr::ChildProcessExec { command, options, callback } => {
-            collect_local_refs_expr(command, refs, visited);
-            if let Some(opts) = options {
-                collect_local_refs_expr(opts, refs, visited);
-            }
-            if let Some(cb) = callback {
-                collect_local_refs_expr(cb, refs, visited);
-            }
-        }
-        // Net operations
-        Expr::NetCreateServer { options, connection_listener } => {
-            if let Some(opts) = options {
-                collect_local_refs_expr(opts, refs, visited);
-            }
-            if let Some(cl) = connection_listener {
-                collect_local_refs_expr(cl, refs, visited);
-            }
-        }
-        Expr::NetCreateConnection { port, host, connect_listener } |
-        Expr::NetConnect { port, host, connect_listener } => {
-            collect_local_refs_expr(port, refs, visited);
-            if let Some(h) = host {
-                collect_local_refs_expr(h, refs, visited);
-            }
-            if let Some(cl) = connect_listener {
-                collect_local_refs_expr(cl, refs, visited);
-            }
-        }
-        // Date operations
-        Expr::DateNow => {}
-        Expr::DateNew(timestamp) => {
-            if let Some(ts) = timestamp {
-                collect_local_refs_expr(ts, refs, visited);
-            }
-        }
-        Expr::DateGetTime(date) | Expr::DateToISOString(date) |
-        Expr::DateGetFullYear(date) | Expr::DateGetMonth(date) | Expr::DateGetDate(date) |
-        Expr::DateGetHours(date) | Expr::DateGetMinutes(date) | Expr::DateGetSeconds(date) |
-        Expr::DateGetMilliseconds(date) => {
-            collect_local_refs_expr(date, refs, visited);
-        }
-        // URL operations
-        Expr::UrlNew { url, base } => {
-            collect_local_refs_expr(url, refs, visited);
-            if let Some(base_expr) = base {
-                collect_local_refs_expr(base_expr, refs, visited);
-            }
-        }
-        Expr::UrlGetHref(url) | Expr::UrlGetPathname(url) | Expr::UrlGetProtocol(url) |
-        Expr::UrlGetHost(url) | Expr::UrlGetHostname(url) | Expr::UrlGetPort(url) |
-        Expr::UrlGetSearch(url) | Expr::UrlGetHash(url) | Expr::UrlGetOrigin(url) |
-        Expr::UrlGetSearchParams(url) => {
-            collect_local_refs_expr(url, refs, visited);
-        }
-        // URLSearchParams operations
-        Expr::UrlSearchParamsNew(init) => {
-            if let Some(init_expr) = init {
-                collect_local_refs_expr(init_expr, refs, visited);
-            }
-        }
-        Expr::UrlSearchParamsGet { params, name } |
-        Expr::UrlSearchParamsHas { params, name } |
-        Expr::UrlSearchParamsDelete { params, name } |
-        Expr::UrlSearchParamsGetAll { params, name } => {
-            collect_local_refs_expr(params, refs, visited);
-            collect_local_refs_expr(name, refs, visited);
-        }
-        Expr::UrlSearchParamsSet { params, name, value } |
-        Expr::UrlSearchParamsAppend { params, name, value } => {
-            collect_local_refs_expr(params, refs, visited);
-            collect_local_refs_expr(name, refs, visited);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::UrlSearchParamsToString(params) => {
-            collect_local_refs_expr(params, refs, visited);
-        }
-        // Terminal expressions that don't contain LocalGet
-        Expr::Number(_) | Expr::Integer(_) | Expr::String(_) | Expr::Bool(_) | Expr::Null |
-        Expr::Undefined | Expr::BigInt(_) | Expr::This | Expr::FuncRef(_) |
-        Expr::ClassRef(_) | Expr::ExternFuncRef { .. } | Expr::EnumMember { .. } |
-        Expr::EnvGet(_) | Expr::ProcessUptime | Expr::ProcessCwd | Expr::ProcessMemoryUsage | Expr::ProcessEnv | Expr::NativeModuleRef(_) |
-        Expr::RegExp { .. } => {}
-        Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
-            collect_local_refs_expr(obj, refs, visited);
-        }
-        Expr::ObjectGroupBy { items, key_fn } => {
-            collect_local_refs_expr(items, refs, visited);
-            collect_local_refs_expr(key_fn, refs, visited);
-        }
-        Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) => {
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::ArrayFromMapped { iterable, map_fn } => {
-            collect_local_refs_expr(iterable, refs, visited);
-            collect_local_refs_expr(map_fn, refs, visited);
-        }
-        Expr::RegExpTest { regex, string } => {
-            collect_local_refs_expr(regex, refs, visited);
-            collect_local_refs_expr(string, refs, visited);
-        }
-        Expr::StringMatch { string, regex } => {
-            collect_local_refs_expr(string, refs, visited);
-            collect_local_refs_expr(regex, refs, visited);
-        }
-        Expr::StringReplace { string, pattern, replacement } => {
-            collect_local_refs_expr(string, refs, visited);
-            collect_local_refs_expr(pattern, refs, visited);
-            collect_local_refs_expr(replacement, refs, visited);
-        }
-        Expr::ParseInt { string, radix } => {
-            collect_local_refs_expr(string, refs, visited);
-            if let Some(r) = radix {
-                collect_local_refs_expr(r, refs, visited);
-            }
-        }
-        Expr::ParseFloat(string) => {
-            collect_local_refs_expr(string, refs, visited);
-        }
-        Expr::NumberCoerce(value) => {
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::BigIntCoerce(value) => {
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::StringCoerce(value) => {
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::BooleanCoerce(value) => {
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::IsNaN(value) => {
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::IsUndefinedOrBareNan(value) => {
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::IsFinite(value) => {
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::StaticPluginResolve(value) => {
-            collect_local_refs_expr(value, refs, visited);
-        }
-        // JS runtime expressions
-        Expr::JsLoadModule { .. } => {}
-        Expr::JsGetExport { module_handle, .. } => {
-            collect_local_refs_expr(module_handle, refs, visited);
-        }
-        Expr::JsCallFunction { module_handle, args, .. } => {
-            collect_local_refs_expr(module_handle, refs, visited);
-            for arg in args {
-                collect_local_refs_expr(arg, refs, visited);
-            }
-        }
-        Expr::JsCallMethod { object, args, .. } => {
-            collect_local_refs_expr(object, refs, visited);
-            for arg in args {
-                collect_local_refs_expr(arg, refs, visited);
-            }
-        }
-        // OS module expressions (no local refs)
-        Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsType | Expr::OsRelease |
-        Expr::OsHomedir | Expr::OsTmpdir | Expr::OsTotalmem | Expr::OsFreemem | Expr::OsCpus => {}
-        // Delete operator
-        Expr::Delete(inner) => {
-            collect_local_refs_expr(inner, refs, visited);
-        }
-        // Error operations
-        Expr::ErrorNew(msg) => {
-            if let Some(m) = msg {
-                collect_local_refs_expr(m, refs, visited);
-            }
-        }
-        Expr::ErrorMessage(err) => {
-            collect_local_refs_expr(err, refs, visited);
-        }
-        Expr::ErrorNewWithCause { message, cause } => {
-            collect_local_refs_expr(message, refs, visited);
-            collect_local_refs_expr(cause, refs, visited);
-        }
-        Expr::TypeErrorNew(m) | Expr::RangeErrorNew(m) | Expr::ReferenceErrorNew(m) | Expr::SyntaxErrorNew(m) => {
-            collect_local_refs_expr(m, refs, visited);
-        }
-        Expr::AggregateErrorNew { errors, message } => {
-            collect_local_refs_expr(errors, refs, visited);
-            collect_local_refs_expr(message, refs, visited);
-        }
-        // Uint8Array operations
-        Expr::Uint8ArrayNew(size) => {
-            if let Some(s) = size {
-                collect_local_refs_expr(s, refs, visited);
-            }
-        }
-        Expr::Uint8ArrayFrom(data) | Expr::Uint8ArrayLength(data) => {
-            collect_local_refs_expr(data, refs, visited);
-        }
-        Expr::Uint8ArrayGet { array, index } => {
-            collect_local_refs_expr(array, refs, visited);
-            collect_local_refs_expr(index, refs, visited);
-        }
-        Expr::Uint8ArraySet { array, index, value } => {
-            collect_local_refs_expr(array, refs, visited);
-            collect_local_refs_expr(index, refs, visited);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::TypedArrayNew { arg, .. } => {
-            if let Some(a) = arg {
-                collect_local_refs_expr(a, refs, visited);
-            }
-        }
-        // Dynamic env access
-        Expr::EnvGetDynamic(key) => {
-            collect_local_refs_expr(key, refs, visited);
-        }
-        // JS runtime expressions with sub-expressions
-        Expr::JsGetProperty { object, .. } => {
-            collect_local_refs_expr(object, refs, visited);
-        }
-        Expr::JsSetProperty { object, value, .. } => {
-            collect_local_refs_expr(object, refs, visited);
-            collect_local_refs_expr(value, refs, visited);
-        }
-        Expr::JsNew { module_handle, args, .. } => {
-            collect_local_refs_expr(module_handle, refs, visited);
-            for arg in args {
-                collect_local_refs_expr(arg, refs, visited);
-            }
-        }
-        Expr::JsNewFromHandle { constructor, args } => {
-            collect_local_refs_expr(constructor, refs, visited);
-            for arg in args {
-                collect_local_refs_expr(arg, refs, visited);
-            }
-        }
-        Expr::JsCreateCallback { closure, .. } => {
-            collect_local_refs_expr(closure, refs, visited);
-        }
-        // Spread call expressions
-        Expr::CallSpread { callee, args, .. } => {
-            collect_local_refs_expr(callee, refs, visited);
-            for arg in args {
-                match arg {
-                    CallArg::Expr(e) | CallArg::Spread(e) => collect_local_refs_expr(e, refs, visited),
-                }
-            }
-        }
-        // Void operator
-        Expr::Void(inner) => {
-            collect_local_refs_expr(inner, refs, visited);
-        }
-        // Yield expression
-        Expr::Yield { value, .. } => {
-            if let Some(v) = value {
-                collect_local_refs_expr(v, refs, visited);
-            }
-        }
-        // Dynamic new expression
-        Expr::NewDynamic { callee, args } => {
-            collect_local_refs_expr(callee, refs, visited);
-            for arg in args {
-                collect_local_refs_expr(arg, refs, visited);
-            }
-        }
-        // Object rest destructuring
-        Expr::ObjectRest { object, .. } => {
-            collect_local_refs_expr(object, refs, visited);
-        }
-        // Fetch with options
-        Expr::FetchWithOptions { url, method, body, headers } => {
-            collect_local_refs_expr(url, refs, visited);
-            collect_local_refs_expr(method, refs, visited);
-            collect_local_refs_expr(body, refs, visited);
-            for (_, v) in headers {
-                collect_local_refs_expr(v, refs, visited);
-            }
-        }
-        Expr::FetchGetWithAuth { url, auth_header } => {
-            collect_local_refs_expr(url, refs, visited);
-            collect_local_refs_expr(auth_header, refs, visited);
-        }
-        Expr::FetchPostWithAuth { url, auth_header, body } => {
-            collect_local_refs_expr(url, refs, visited);
-            collect_local_refs_expr(auth_header, refs, visited);
-            collect_local_refs_expr(body, refs, visited);
-        }
-        // Catch-all for any other terminal expressions
         _ => {}
     }
+    // Descend into all immediate sub-expressions for non-special variants.
+    // Exhaustive on Expr — adding a new variant to ir.rs without updating
+    // walker.rs is a compile error.
+    walk_expr_children(expr, &mut |child| collect_local_refs_expr(child, refs, visited));
 }
+
 
 /// Collect all LocalGet references from a statement
 pub fn collect_local_refs_stmt(stmt: &Stmt, refs: &mut Vec<LocalId>, visited: &mut std::collections::HashSet<usize>) {
@@ -1905,8 +1256,16 @@ fn remap_local_ids_in_stmt(stmt: &mut Stmt, map: &std::collections::HashMap<Loca
     }
 }
 
+/// Apply `map` to every `LocalId` referenced by `expr` (and sub-expressions).
+///
+/// Per-variant work focuses on the LocalId-bearing variants (LocalGet,
+/// LocalSet.id, Update.id, Array*.array_id, SetAdd.set_id, Closure
+/// captures lists). Descent into all other sub-expressions is delegated to
+/// `walk_expr_children_mut` — the central exhaustive walker in
+/// `perry_hir::walker`. Pre-refactor this fn carried its own ad-hoc walker
+/// with a `_ => {}` catch-all that silently skipped any new variant added to
+/// `Expr` (issue #212 partial-fix lineage).
 fn remap_local_ids_in_expr(expr: &mut Expr, map: &std::collections::HashMap<LocalId, LocalId>) {
-    // Direct id-bearing variants first.
     match expr {
         Expr::LocalGet(id) => {
             if let Some(&new_id) = map.get(id) {
@@ -1927,13 +1286,35 @@ fn remap_local_ids_in_expr(expr: &mut Expr, map: &std::collections::HashMap<Loca
             }
             return;
         }
-        Expr::Closure { body, captures, mutable_captures, .. } => {
-            // Remap the closure's captures list AND descend into its body
-            // — the body's `LocalGet(old_id)` matches the captures list,
-            // and both must be remapped together so the creation site
-            // (which reads the captured value from the enclosing scope's
-            // remapped slot) and the closure body (which reads via the
-            // capture slot index) stay aligned.
+        Expr::ArrayPush { array_id, .. }
+        | Expr::ArrayPushSpread { array_id, .. }
+        | Expr::ArrayUnshift { array_id, .. }
+        | Expr::ArraySplice { array_id, .. }
+        | Expr::ArrayCopyWithin { array_id, .. } => {
+            if let Some(&new_id) = map.get(array_id) {
+                *array_id = new_id;
+            }
+            // Children descended below via the walker.
+        }
+        Expr::ArrayPop(array_id) | Expr::ArrayShift(array_id) => {
+            if let Some(&new_id) = map.get(array_id) {
+                *array_id = new_id;
+            }
+            return;
+        }
+        Expr::SetAdd { set_id, .. } => {
+            if let Some(&new_id) = map.get(set_id) {
+                *set_id = new_id;
+            }
+            // `value` descended via walker.
+        }
+        Expr::Closure { body, captures, mutable_captures, params, .. } => {
+            // Remap the closure's captures lists AND descend into its body.
+            // The body's `LocalGet(old_id)` matches the captures list, and
+            // both must be remapped together so the creation site (which
+            // reads the captured value from the enclosing scope's remapped
+            // slot) and the closure body (which reads via the capture slot
+            // index) stay aligned.
             for id in captures.iter_mut() {
                 if let Some(&new_id) = map.get(id) {
                     *id = new_id;
@@ -1944,508 +1325,18 @@ fn remap_local_ids_in_expr(expr: &mut Expr, map: &std::collections::HashMap<Loca
                     *id = new_id;
                 }
             }
+            for p in params.iter_mut() {
+                if let Some(d) = &mut p.default {
+                    remap_local_ids_in_expr(d, map);
+                }
+            }
             remap_local_ids_in_stmts(body, map);
             return;
         }
         _ => {}
     }
-    // Generic recursion for everything else. Mirrors the structure of
-    // `replace_this_in_expr`. Variants that don't carry sub-exprs fall
-    // through harmlessly via the catch-all.
-    match expr {
-        Expr::Binary { left, right, .. }
-        | Expr::Compare { left, right, .. }
-        | Expr::Logical { left, right, .. } => {
-            remap_local_ids_in_expr(left, map);
-            remap_local_ids_in_expr(right, map);
-        }
-        Expr::Unary { operand, .. } => remap_local_ids_in_expr(operand, map),
-        Expr::Call { callee, args, .. } => {
-            remap_local_ids_in_expr(callee, map);
-            for a in args {
-                remap_local_ids_in_expr(a, map);
-            }
-        }
-        Expr::CallSpread { callee, args, .. } => {
-            remap_local_ids_in_expr(callee, map);
-            for a in args {
-                match a {
-                    CallArg::Expr(e) | CallArg::Spread(e) => remap_local_ids_in_expr(e, map),
-                }
-            }
-        }
-        Expr::PropertyGet { object, .. } => remap_local_ids_in_expr(object, map),
-        Expr::PropertySet { object, value, .. } => {
-            remap_local_ids_in_expr(object, map);
-            remap_local_ids_in_expr(value, map);
-        }
-        Expr::PropertyUpdate { object, .. } => remap_local_ids_in_expr(object, map),
-        Expr::IndexGet { object, index } => {
-            remap_local_ids_in_expr(object, map);
-            remap_local_ids_in_expr(index, map);
-        }
-        Expr::IndexSet { object, index, value } => {
-            remap_local_ids_in_expr(object, map);
-            remap_local_ids_in_expr(index, map);
-            remap_local_ids_in_expr(value, map);
-        }
-        Expr::IndexUpdate { object, index, .. } => {
-            remap_local_ids_in_expr(object, map);
-            remap_local_ids_in_expr(index, map);
-        }
-        Expr::GlobalSet(_, value) => remap_local_ids_in_expr(value, map),
-        Expr::New { args, .. } => {
-            for a in args {
-                remap_local_ids_in_expr(a, map);
-            }
-        }
-        Expr::NewDynamic { callee, args } => {
-            remap_local_ids_in_expr(callee, map);
-            for a in args {
-                remap_local_ids_in_expr(a, map);
-            }
-        }
-        Expr::Array(elements) => {
-            for e in elements {
-                remap_local_ids_in_expr(e, map);
-            }
-        }
-        Expr::ArraySpread(elements) => {
-            for el in elements {
-                match el {
-                    ArrayElement::Expr(e) | ArrayElement::Spread(e) => remap_local_ids_in_expr(e, map),
-                }
-            }
-        }
-        Expr::Object(fields) => {
-            for (_, e) in fields {
-                remap_local_ids_in_expr(e, map);
-            }
-        }
-        Expr::ObjectSpread { parts } => {
-            for (_, e) in parts {
-                remap_local_ids_in_expr(e, map);
-            }
-        }
-        Expr::Conditional { condition, then_expr, else_expr } => {
-            remap_local_ids_in_expr(condition, map);
-            remap_local_ids_in_expr(then_expr, map);
-            remap_local_ids_in_expr(else_expr, map);
-        }
-        Expr::Await(inner) => remap_local_ids_in_expr(inner, map),
-        Expr::Yield { value, .. } => {
-            if let Some(v) = value {
-                remap_local_ids_in_expr(v, map);
-            }
-        }
-        Expr::TypeOf(o) | Expr::Void(o) | Expr::Delete(o) => remap_local_ids_in_expr(o, map),
-        Expr::InstanceOf { expr: inner, .. } => remap_local_ids_in_expr(inner, map),
-        Expr::In { property, object } => {
-            remap_local_ids_in_expr(property, map);
-            remap_local_ids_in_expr(object, map);
-        }
-        Expr::Sequence(exprs) => {
-            for e in exprs {
-                remap_local_ids_in_expr(e, map);
-            }
-        }
-        Expr::NativeMethodCall { object, args, .. } => {
-            if let Some(o) = object {
-                remap_local_ids_in_expr(o, map);
-            }
-            for a in args {
-                remap_local_ids_in_expr(a, map);
-            }
-        }
-        Expr::StaticMethodCall { args, .. } => {
-            for a in args {
-                remap_local_ids_in_expr(a, map);
-            }
-        }
-        Expr::SuperCall(args) | Expr::SuperMethodCall { args, .. } => {
-            for a in args {
-                remap_local_ids_in_expr(a, map);
-            }
-        }
-        Expr::StaticFieldSet { value, .. } => remap_local_ids_in_expr(value, map),
-        // Type-coercion / unary-expression family.
-        Expr::StringCoerce(inner)
-        | Expr::BooleanCoerce(inner)
-        | Expr::NumberCoerce(inner)
-        | Expr::BigIntCoerce(inner)
-        | Expr::IsFinite(inner)
-        | Expr::IsNaN(inner)
-        | Expr::NumberIsNaN(inner)
-        | Expr::NumberIsFinite(inner)
-        | Expr::NumberIsInteger(inner)
-        | Expr::IsUndefinedOrBareNan(inner)
-        | Expr::ParseFloat(inner)
-        | Expr::WeakRefNew(inner)
-        | Expr::WeakRefDeref(inner)
-        | Expr::FinalizationRegistryNew(inner)
-        | Expr::ObjectKeys(inner)
-        | Expr::ObjectValues(inner)
-        | Expr::ObjectEntries(inner)
-        | Expr::ObjectFromEntries(inner) => {
-            remap_local_ids_in_expr(inner, map);
-        }
-        Expr::ParseInt { string, radix } => {
-            remap_local_ids_in_expr(string, map);
-            if let Some(r) = radix {
-                remap_local_ids_in_expr(r, map);
-            }
-        }
-        Expr::StringSplit(s, d) => {
-            remap_local_ids_in_expr(s, map);
-            remap_local_ids_in_expr(d, map);
-        }
-        Expr::StringFromCharCode(s) | Expr::StringFromCodePoint(s) => {
-            remap_local_ids_in_expr(s, map);
-        }
-        // Array operations carrying a LocalId in `array_id`.
-        Expr::ArrayPush { array_id, value }
-        | Expr::ArrayUnshift { array_id, value }
-        | Expr::ArrayPushSpread { array_id, source: value } => {
-            if let Some(&new_id) = map.get(array_id) {
-                *array_id = new_id;
-            }
-            remap_local_ids_in_expr(value, map);
-        }
-        Expr::ArrayPop(array_id) | Expr::ArrayShift(array_id) => {
-            if let Some(&new_id) = map.get(array_id) {
-                *array_id = new_id;
-            }
-        }
-        Expr::ArraySplice { array_id, start, delete_count, items } => {
-            if let Some(&new_id) = map.get(array_id) {
-                *array_id = new_id;
-            }
-            remap_local_ids_in_expr(start, map);
-            if let Some(dc) = delete_count {
-                remap_local_ids_in_expr(dc, map);
-            }
-            for item in items {
-                remap_local_ids_in_expr(item, map);
-            }
-        }
-        Expr::ArrayCopyWithin { array_id, target, start, end } => {
-            if let Some(&new_id) = map.get(array_id) {
-                *array_id = new_id;
-            }
-            remap_local_ids_in_expr(target, map);
-            remap_local_ids_in_expr(start, map);
-            if let Some(e) = end { remap_local_ids_in_expr(e, map); }
-        }
-        // Array operations carrying a Box<Expr> array.
-        Expr::ArrayIndexOf { array, value } | Expr::ArrayIncludes { array, value } => {
-            remap_local_ids_in_expr(array, map);
-            remap_local_ids_in_expr(value, map);
-        }
-        Expr::ArraySlice { array, start, end } => {
-            remap_local_ids_in_expr(array, map);
-            remap_local_ids_in_expr(start, map);
-            if let Some(e) = end { remap_local_ids_in_expr(e, map); }
-        }
-        Expr::ArrayForEach { array, callback }
-        | Expr::ArrayMap { array, callback }
-        | Expr::ArrayFilter { array, callback }
-        | Expr::ArrayFind { array, callback }
-        | Expr::ArrayFindIndex { array, callback }
-        | Expr::ArraySort { array, comparator: callback } => {
-            remap_local_ids_in_expr(array, map);
-            remap_local_ids_in_expr(callback, map);
-        }
-        Expr::ArrayReduce { array, callback, initial }
-        | Expr::ArrayReduceRight { array, callback, initial } => {
-            remap_local_ids_in_expr(array, map);
-            remap_local_ids_in_expr(callback, map);
-            if let Some(init) = initial { remap_local_ids_in_expr(init, map); }
-        }
-        Expr::ArrayJoin { array, separator } => {
-            remap_local_ids_in_expr(array, map);
-            if let Some(sep) = separator { remap_local_ids_in_expr(sep, map); }
-        }
-        Expr::ArrayFlat { array } | Expr::ArrayToReversed { array } => {
-            remap_local_ids_in_expr(array, map);
-        }
-        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
-            remap_local_ids_in_expr(array, map);
-        }
-        Expr::ArrayToSorted { array, comparator } => {
-            remap_local_ids_in_expr(array, map);
-            if let Some(cmp) = comparator { remap_local_ids_in_expr(cmp, map); }
-        }
-        Expr::ArrayToSpliced { array, start, delete_count, items } => {
-            remap_local_ids_in_expr(array, map);
-            remap_local_ids_in_expr(start, map);
-            remap_local_ids_in_expr(delete_count, map);
-            for item in items { remap_local_ids_in_expr(item, map); }
-        }
-        Expr::ArrayWith { array, index, value } => {
-            remap_local_ids_in_expr(array, map);
-            remap_local_ids_in_expr(index, map);
-            remap_local_ids_in_expr(value, map);
-        }
-        Expr::ArrayFromMapped { iterable, map_fn } => {
-            remap_local_ids_in_expr(iterable, map);
-            remap_local_ids_in_expr(map_fn, map);
-        }
-        Expr::ArrayIsArray(inner) | Expr::ArrayFrom(inner) | Expr::Uint8ArrayFrom(inner) => {
-            remap_local_ids_in_expr(inner, map);
-        }
-        Expr::IteratorToArray(inner) => remap_local_ids_in_expr(inner, map),
-        // Set / Map operations.
-        Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
-            remap_local_ids_in_expr(set, map);
-            remap_local_ids_in_expr(value, map);
-        }
-        Expr::SetAdd { value, .. } => remap_local_ids_in_expr(value, map),
-        Expr::SetSize(set) | Expr::SetClear(set) | Expr::SetValues(set) => {
-            remap_local_ids_in_expr(set, map);
-        }
-        Expr::MapHas { map: m, key }
-        | Expr::MapGet { map: m, key }
-        | Expr::MapDelete { map: m, key } => {
-            remap_local_ids_in_expr(m, map);
-            remap_local_ids_in_expr(key, map);
-        }
-        Expr::MapSet { map: m, key, value } => {
-            remap_local_ids_in_expr(m, map);
-            remap_local_ids_in_expr(key, map);
-            remap_local_ids_in_expr(value, map);
-        }
-        Expr::MapSize(m) | Expr::MapClear(m) => remap_local_ids_in_expr(m, map),
-        // Math operations.
-        Expr::MathFloor(inner) | Expr::MathCeil(inner) | Expr::MathRound(inner)
-        | Expr::MathAbs(inner) | Expr::MathSqrt(inner)
-        | Expr::MathLog(inner) | Expr::MathLog2(inner) | Expr::MathLog10(inner)
-        | Expr::MathLog1p(inner) | Expr::MathClz32(inner)
-        | Expr::MathSin(inner) | Expr::MathCos(inner) | Expr::MathTan(inner)
-        | Expr::MathAsin(inner) | Expr::MathAcos(inner) | Expr::MathAtan(inner)
-        | Expr::MathCbrt(inner) | Expr::MathFround(inner)
-        | Expr::MathMinSpread(inner) | Expr::MathMaxSpread(inner)
-        | Expr::MathExpm1(inner)
-        | Expr::MathExp(inner) | Expr::MathSinh(inner) | Expr::MathCosh(inner)
-        | Expr::MathTanh(inner) | Expr::MathAsinh(inner) | Expr::MathAcosh(inner)
-        | Expr::MathAtanh(inner) => {
-            remap_local_ids_in_expr(inner, map);
-        }
-        Expr::MathPow(a, b) | Expr::MathImul(a, b) | Expr::MathAtan2(a, b) => {
-            remap_local_ids_in_expr(a, map);
-            remap_local_ids_in_expr(b, map);
-        }
-        Expr::MathMin(exprs) | Expr::MathMax(exprs) | Expr::MathHypot(exprs) => {
-            for e in exprs { remap_local_ids_in_expr(e, map); }
-        }
-        // Object operations.
-        Expr::ObjectDefineProperty(a, b, c) => {
-            remap_local_ids_in_expr(a, map);
-            remap_local_ids_in_expr(b, map);
-            remap_local_ids_in_expr(c, map);
-        }
-        Expr::ObjectGetOwnPropertyDescriptor(a, b) => {
-            remap_local_ids_in_expr(a, map);
-            remap_local_ids_in_expr(b, map);
-        }
-        Expr::ObjectGetOwnPropertyNames(inner)
-        | Expr::ObjectCreate(inner)
-        | Expr::ObjectFreeze(inner)
-        | Expr::ObjectSeal(inner)
-        | Expr::ObjectPreventExtensions(inner)
-        | Expr::ObjectIsFrozen(inner)
-        | Expr::ObjectIsSealed(inner)
-        | Expr::ObjectIsExtensible(inner)
-        | Expr::ObjectGetPrototypeOf(inner)
-        | Expr::ObjectGetOwnPropertySymbols(inner) => {
-            remap_local_ids_in_expr(inner, map);
-        }
-        Expr::ObjectRest { object, .. } => remap_local_ids_in_expr(object, map),
-        // JSON operations.
-        Expr::JsonParse(inner)
-        | Expr::JsonStringify(inner) => remap_local_ids_in_expr(inner, map),
-        Expr::JsonParseTyped { text, .. } => remap_local_ids_in_expr(text, map),
-        Expr::JsonParseReviver { text, reviver } => {
-            remap_local_ids_in_expr(text, map);
-            remap_local_ids_in_expr(reviver, map);
-        }
-        Expr::JsonParseWithReviver(a, b) => {
-            remap_local_ids_in_expr(a, map);
-            remap_local_ids_in_expr(b, map);
-        }
-        Expr::JsonStringifyPretty { value, replacer, space } => {
-            remap_local_ids_in_expr(value, map);
-            if let Some(r) = replacer { remap_local_ids_in_expr(r, map); }
-            remap_local_ids_in_expr(space, map);
-        }
-        Expr::JsonStringifyFull(a, b, c) => {
-            remap_local_ids_in_expr(a, map);
-            remap_local_ids_in_expr(b, map);
-            remap_local_ids_in_expr(c, map);
-        }
-        // Path / URL operations.
-        Expr::PathJoin(a, b) => {
-            remap_local_ids_in_expr(a, map);
-            remap_local_ids_in_expr(b, map);
-        }
-        Expr::PathDirname(inner)
-        | Expr::PathBasename(inner)
-        | Expr::PathExtname(inner)
-        | Expr::PathResolve(inner)
-        | Expr::PathIsAbsolute(inner)
-        | Expr::FileURLToPath(inner) => remap_local_ids_in_expr(inner, map),
-        // RegExp / String operations.
-        Expr::RegExpExec { regex, string }
-        | Expr::RegExpTest { regex, string }
-        | Expr::StringMatch { string, regex } => {
-            remap_local_ids_in_expr(regex, map);
-            remap_local_ids_in_expr(string, map);
-        }
-        Expr::RegExpSource(inner)
-        | Expr::RegExpFlags(inner)
-        | Expr::RegExpLastIndex(inner) => remap_local_ids_in_expr(inner, map),
-        Expr::RegExpSetLastIndex { regex, value } => {
-            remap_local_ids_in_expr(regex, map);
-            remap_local_ids_in_expr(value, map);
-        }
-        Expr::RegExpReplaceFn { string, regex, callback } => {
-            remap_local_ids_in_expr(string, map);
-            remap_local_ids_in_expr(regex, map);
-            remap_local_ids_in_expr(callback, map);
-        }
-        Expr::StringReplace { string, pattern, replacement } => {
-            remap_local_ids_in_expr(string, map);
-            remap_local_ids_in_expr(pattern, map);
-            remap_local_ids_in_expr(replacement, map);
-        }
-        // Error / Date.
-        Expr::ErrorNew(Some(inner)) | Expr::ErrorMessage(inner) => {
-            remap_local_ids_in_expr(inner, map);
-        }
-        Expr::ErrorNewWithCause { message, cause } => {
-            remap_local_ids_in_expr(message, map);
-            remap_local_ids_in_expr(cause, map);
-        }
-        Expr::TypeErrorNew(m)
-        | Expr::RangeErrorNew(m)
-        | Expr::ReferenceErrorNew(m)
-        | Expr::SyntaxErrorNew(m) => remap_local_ids_in_expr(m, map),
-        Expr::AggregateErrorNew { errors, message } => {
-            remap_local_ids_in_expr(errors, map);
-            remap_local_ids_in_expr(message, map);
-        }
-        Expr::DateNew(Some(inner))
-        | Expr::DateGetTime(inner)
-        | Expr::DateToISOString(inner)
-        | Expr::DateGetFullYear(inner)
-        | Expr::DateGetMonth(inner)
-        | Expr::DateGetDate(inner)
-        | Expr::DateGetHours(inner)
-        | Expr::DateGetMinutes(inner)
-        | Expr::DateGetSeconds(inner)
-        | Expr::DateGetMilliseconds(inner) => remap_local_ids_in_expr(inner, map),
-        // FS operations.
-        Expr::FsReadFileSync(inner)
-        | Expr::FsExistsSync(inner)
-        | Expr::FsMkdirSync(inner)
-        | Expr::FsUnlinkSync(inner)
-        | Expr::FsReadFileBinary(inner)
-        | Expr::FsRmRecursive(inner) => remap_local_ids_in_expr(inner, map),
-        Expr::FsWriteFileSync(a, b) | Expr::FsAppendFileSync(a, b) => {
-            remap_local_ids_in_expr(a, map);
-            remap_local_ids_in_expr(b, map);
-        }
-        // Process operations.
-        Expr::ProcessNextTick(inner) | Expr::ProcessChdir(inner) => {
-            remap_local_ids_in_expr(inner, map);
-        }
-        Expr::ProcessOn { event, handler } => {
-            remap_local_ids_in_expr(event, map);
-            remap_local_ids_in_expr(handler, map);
-        }
-        Expr::ProcessKill { pid, signal } => {
-            remap_local_ids_in_expr(pid, map);
-            if let Some(s) = signal { remap_local_ids_in_expr(s, map); }
-        }
-        Expr::ProcessExit(opt) => {
-            if let Some(e) = opt { remap_local_ids_in_expr(e, map); }
-        }
-        // Buffer / TypedArray operations.
-        Expr::BufferFrom { data, encoding } => {
-            remap_local_ids_in_expr(data, map);
-            if let Some(e) = encoding { remap_local_ids_in_expr(e, map); }
-        }
-        Expr::BufferAlloc { size, fill } => {
-            remap_local_ids_in_expr(size, map);
-            if let Some(f) = fill { remap_local_ids_in_expr(f, map); }
-        }
-        Expr::BufferAllocUnsafe(inner)
-        | Expr::BufferConcat(inner)
-        | Expr::BufferIsBuffer(inner)
-        | Expr::BufferByteLength(inner)
-        | Expr::BufferLength(inner) => remap_local_ids_in_expr(inner, map),
-        Expr::BufferToString { buffer, encoding } => {
-            remap_local_ids_in_expr(buffer, map);
-            if let Some(e) = encoding { remap_local_ids_in_expr(e, map); }
-        }
-        Expr::BufferSlice { buffer, start, end } => {
-            remap_local_ids_in_expr(buffer, map);
-            if let Some(s) = start { remap_local_ids_in_expr(s, map); }
-            if let Some(e) = end { remap_local_ids_in_expr(e, map); }
-        }
-        Expr::BufferFill { buffer, value } => {
-            remap_local_ids_in_expr(buffer, map);
-            remap_local_ids_in_expr(value, map);
-        }
-        Expr::BufferEquals { buffer, other } => {
-            remap_local_ids_in_expr(buffer, map);
-            remap_local_ids_in_expr(other, map);
-        }
-        Expr::BufferIndexGet { buffer, index } => {
-            remap_local_ids_in_expr(buffer, map);
-            remap_local_ids_in_expr(index, map);
-        }
-        Expr::BufferIndexSet { buffer, index, value } => {
-            remap_local_ids_in_expr(buffer, map);
-            remap_local_ids_in_expr(index, map);
-            remap_local_ids_in_expr(value, map);
-        }
-        Expr::BufferCopy { source, target, target_start, source_start, source_end } => {
-            remap_local_ids_in_expr(source, map);
-            remap_local_ids_in_expr(target, map);
-            if let Some(ts) = target_start { remap_local_ids_in_expr(ts, map); }
-            if let Some(ss) = source_start { remap_local_ids_in_expr(ss, map); }
-            if let Some(se) = source_end { remap_local_ids_in_expr(se, map); }
-        }
-        Expr::BufferWrite { buffer, string, offset, encoding } => {
-            remap_local_ids_in_expr(buffer, map);
-            remap_local_ids_in_expr(string, map);
-            if let Some(o) = offset { remap_local_ids_in_expr(o, map); }
-            if let Some(e) = encoding { remap_local_ids_in_expr(e, map); }
-        }
-        Expr::Uint8ArrayGet { array, index } => {
-            remap_local_ids_in_expr(array, map);
-            remap_local_ids_in_expr(index, map);
-        }
-        Expr::Uint8ArraySet { array, index, value } => {
-            remap_local_ids_in_expr(array, map);
-            remap_local_ids_in_expr(index, map);
-            remap_local_ids_in_expr(value, map);
-        }
-        Expr::Uint8ArrayLength(arr) => remap_local_ids_in_expr(arr, map),
-        Expr::Uint8ArrayNew(opt) => {
-            if let Some(arg) = opt { remap_local_ids_in_expr(arg, map); }
-        }
-        // Misc one-off helpers.
-        Expr::StructuredClone(inner) | Expr::QueueMicrotask(inner) => {
-            remap_local_ids_in_expr(inner, map);
-        }
-        // Catch-all: variants that carry no LocalId-bearing sub-exprs
-        // (literals, ClassRef, FuncRef, This, Undefined, Null, etc.)
-        // fall through unchanged. New HIR variants that carry LocalIds
-        // need explicit arms here OR they'll be silently skipped — same
-        // class of bug as the issue this fix covers.
-        _ => {}
-    }
+    // Descend into all immediate sub-expressions for non-special variants.
+    walk_expr_children_mut(expr, &mut |child| remap_local_ids_in_expr(child, map));
 }
 
 fn replace_this_in_stmt(stmt: &mut Stmt, this_id: LocalId) {
