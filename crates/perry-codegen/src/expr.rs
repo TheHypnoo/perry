@@ -1925,11 +1925,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             }
             if is_string_expr(ctx, index) {
                 // Dynamic string key: unbox both pointers and call.
+                // `key_handle` routes through `unbox_str_handle` because the
+                // key may be an SSO value (e.g. from JSON.parse, .slice, or
+                // any short-string-producing op); the runtime fn dereferences
+                // it as `*StringHeader`. Issue #214 SSO bug class.
                 let obj_box = lower_expr(ctx, object)?;
                 let key_box = lower_expr(ctx, index)?;
                 let blk = ctx.block();
                 let obj_handle = unbox_to_i64(blk, &obj_box);
-                let key_handle = unbox_to_i64(blk, &key_box);
+                let key_handle = unbox_str_handle(blk, &key_box);
                 return Ok(blk.call(
                     DOUBLE,
                     "js_object_get_field_by_name_f64",
@@ -2390,7 +2394,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let blk = ctx.block();
                 let obj_bits = blk.bitcast_double_to_i64(&obj_box);
                 let obj_handle = blk.and(I64, &obj_bits, POINTER_MASK_I64);
-                let key_handle = unbox_to_i64(blk, &key_box);
+                // SSO-safe key unbox — see IndexGet branch above for rationale.
+                let key_handle = unbox_str_handle(blk, &key_box);
                 blk.call_void(
                     "js_object_set_field_by_name",
                     &[(I64, &obj_handle), (I64, &key_handle), (DOUBLE, &val_double)],
@@ -3717,7 +3722,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             };
             let blk = ctx.block();
             let arr_handle = unbox_to_i64(blk, &arr_box);
-            let sep_handle = unbox_to_i64(blk, &sep_box);
+            // SSO-safe separator unbox: `js_array_join` reads `byte_len`
+            // from the StringHeader, which segfaults on SSO inline bits.
+            // Same #214 bug class.
+            let sep_handle = unbox_str_handle(blk, &sep_box);
             let result = blk.call(I64, "js_array_join", &[(I64, &arr_handle), (I64, &sep_handle)]);
             Ok(nanbox_string_inline(blk, &result))
         }
@@ -4190,7 +4198,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     let key_box = lower_expr(ctx, index)?;
                     let blk = ctx.block();
                     let obj_handle = unbox_to_i64(blk, &obj_box);
-                    let key_handle = unbox_to_i64(blk, &key_box);
+                    // SSO-safe key unbox — `js_object_delete_field`
+                    // dereferences the key as `*StringHeader`. #214 class.
+                    let key_handle = unbox_str_handle(blk, &key_box);
                     let i32_v = blk.call(
                         I32,
                         "js_object_delete_field",
@@ -4518,7 +4528,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let s_box = lower_expr(ctx, string)?;
             let r_box = lower_expr(ctx, regex)?;
             let blk = ctx.block();
-            let s_handle = unbox_to_i64(blk, &s_box);
+            // SSO-safe string-receiver unbox: `js_string_match` reads
+            // `byte_len` and the UTF-8 bytes from the StringHeader, which
+            // segfaults on SSO inline bits. SIGSEGV repro:
+            // `JSON.parse('"abc"').match(/b/)`. #214 SSO bug class.
+            let s_handle = unbox_str_handle(blk, &s_box);
             let r_handle = unbox_to_i64(blk, &r_box);
             let result =
                 blk.call(I64, "js_string_match", &[(I64, &s_handle), (I64, &r_handle)]);
@@ -6423,7 +6437,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::EnvGetDynamic(name_expr) => {
             let key_box = lower_expr(ctx, name_expr)?;
             let blk = ctx.block();
-            let key_handle = unbox_to_i64(blk, &key_box);
+            // SSO-safe key unbox — name comes from a runtime expr (e.g.
+            // `process.env[shortName]`); `js_getenv` dereferences it as
+            // `*StringHeader`. #214 SSO bug class.
+            let key_handle = unbox_str_handle(blk, &key_box);
             let result = blk.call(I64, "js_getenv", &[(I64, &key_handle)]);
             Ok(nanbox_string_inline(blk, &result))
         }
@@ -7097,7 +7114,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 ("createHash", "sha256") if update_args.len() >= 1 => {
                     let data_box = lower_expr(ctx, &update_args[0])?;
                     let blk = ctx.block();
-                    let data_handle = unbox_to_i64(blk, &data_box);
+                    // SSO-safe data unbox — both `js_crypto_sha256` and the
+                    // `_bytes` variant deref as `*StringHeader`. #214 class.
+                    let data_handle = unbox_str_handle(blk, &data_box);
                     if want_buffer {
                         let result = blk.call(
                             I64,
@@ -7117,7 +7136,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 ("createHash", "md5") if update_args.len() >= 1 => {
                     let data_box = lower_expr(ctx, &update_args[0])?;
                     let blk = ctx.block();
-                    let data_handle = unbox_to_i64(blk, &data_box);
+                    // SSO-safe — see sha256 arm above.
+                    let data_handle = unbox_str_handle(blk, &data_box);
                     let result = blk.call(
                         I64,
                         "js_crypto_md5",
@@ -7129,8 +7149,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     let key_box = lower_expr(ctx, &create_args[1])?;
                     let data_box = lower_expr(ctx, &update_args[0])?;
                     let blk = ctx.block();
-                    let key_handle = unbox_to_i64(blk, &key_box);
-                    let data_handle = unbox_to_i64(blk, &data_box);
+                    // SSO-safe — both runtime fns deref as `*StringHeader`.
+                    let key_handle = unbox_str_handle(blk, &key_box);
+                    let data_handle = unbox_str_handle(blk, &data_box);
                     if want_buffer {
                         let result = blk.call(
                             I64,
@@ -8596,9 +8617,25 @@ pub(crate) fn buffer_alias_metadata_suffix(scope_idx: u32) -> String {
     format!(", !alias.scope !{}, !noalias !{}", scope_list, noalias_list)
 }
 
-/// Helper: unbox a NaN-boxed string/object/array double into a raw i64
-/// pointer via inline `bitcast double → i64; and POINTER_MASK_I64`. Used by
-/// the method dispatch paths and the inline IndexGet/IndexSet/length code.
+/// Unbox a NaN-boxed double into a raw i64 pointer via inline
+/// `bitcast double → i64; and POINTER_MASK_I64`.
+///
+/// **⚠ Use [`unbox_str_handle`] instead when the value may be a JS string.**
+/// The bitcast+mask returns the lower 48 bits, which is the correct
+/// `*ObjectHeader` / `*ArrayHeader` / `*ClosureHeader` for heap pointers
+/// (POINTER_TAG = 0x7FFD, ARRAY_TAG = 0x7FFB, etc.) and the correct
+/// `*StringHeader` for **heap** strings (STRING_TAG = 0x7FFF), but is
+/// **garbage** for short-string-optimization values (SHORT_STRING_TAG =
+/// 0x7FF9), whose lower 48 bits encode the inline length + bytes. Any
+/// runtime function that dereferences the resulting i64 as a
+/// `*StringHeader` (reading `byte_len`, copying the UTF-8 bytes, …) will
+/// segfault or return garbage on SSO inputs.
+///
+/// SSO-vulnerable callsites must route through [`unbox_str_handle`].
+/// Issue #214 lineage: `Array.indexOf`, every `String.prototype.*` method,
+/// `arr.join(sep)`, `obj[dynamicKey]`, `string.match(re)`, crypto digest
+/// inputs, `process.env[name]` — all previously segfaulted on SSO operands
+/// before being routed through the safe helper.
 pub(crate) fn unbox_to_i64(blk: &mut LlBlock, boxed: &str) -> String {
     let bits = blk.bitcast_double_to_i64(boxed);
     blk.and(I64, &bits, POINTER_MASK_I64)

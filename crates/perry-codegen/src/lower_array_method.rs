@@ -9,7 +9,7 @@
 use anyhow::{bail, Result};
 use perry_hir::Expr;
 
-use crate::expr::{lower_expr, nanbox_pointer_inline, nanbox_string_inline, unbox_to_i64, FnCtx};
+use crate::expr::{lower_expr, nanbox_pointer_inline, nanbox_string_inline, unbox_str_handle, unbox_to_i64, FnCtx};
 use crate::nanbox::double_literal;
 use crate::types::{DOUBLE, I32, I64};
 
@@ -41,7 +41,13 @@ pub(crate) fn lower_array_method(
             let sep_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
             let recv_handle = unbox_to_i64(blk, &recv_box);
-            let sep_handle = unbox_to_i64(blk, &sep_box);
+            // Separator is a JS string. `unbox_str_handle` materializes SSO
+            // values to a real heap StringHeader; plain `unbox_to_i64`
+            // returns the inline-payload bits, which `js_array_join` then
+            // dereferences as a `*StringHeader` and reads `byte_len` from
+            // — producing garbage / silent empty join. Same SSO bug class
+            // as #214.
+            let sep_handle = unbox_str_handle(blk, &sep_box);
             let result_handle = blk.call(
                 I64,
                 "js_array_join",
@@ -67,7 +73,11 @@ pub(crate) fn lower_array_method(
             let blk = ctx.block();
             let sep_box = blk.load(DOUBLE, &handle_global);
             let recv_handle = unbox_to_i64(blk, &recv_box);
-            let sep_handle = unbox_to_i64(blk, &sep_box);
+            // Interned literal "," — heap allocated at module init, so
+            // `unbox_to_i64` would technically work, but routing through
+            // `unbox_str_handle` keeps the path uniform with the `join`
+            // arm and is robust if interning ever changes to SSO-eligible.
+            let sep_handle = unbox_str_handle(blk, &sep_box);
             let result_handle = blk.call(
                 I64,
                 "js_array_join",
