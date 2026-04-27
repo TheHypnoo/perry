@@ -374,6 +374,7 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_date_new_from_timestamp", DOUBLE, &[DOUBLE]);
     module.declare_function("js_date_new_from_value", DOUBLE, &[DOUBLE]);
     module.declare_function("js_array_indexOf_f64", I32, &[I64, DOUBLE]);
+    module.declare_function("js_array_indexOf_jsvalue", I32, &[I64, DOUBLE]);
     module.declare_function("js_array_includes_f64", I32, &[I64, DOUBLE]);
     module.declare_function("js_array_includes_jsvalue", I32, &[I64, DOUBLE]);
     module.declare_function("js_map_size", I32, &[I64]);

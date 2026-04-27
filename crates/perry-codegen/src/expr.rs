@@ -1492,8 +1492,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let l = lower_expr(ctx, left)?;
                 let r = lower_expr(ctx, right)?;
                 let blk = ctx.block();
-                let l_handle = unbox_to_i64(blk, &l);
-                let r_handle = unbox_to_i64(blk, &r);
+                // Issue #214: SSO-safe unbox — the inline mask returns
+                // garbage for SHORT_STRING_TAG values (e.g. SSO results
+                // from `JSON.parse('["hello"]')[0]`), causing
+                // `js_string_equals` to deref the inline payload bytes.
+                let l_handle = unbox_str_handle(blk, &l);
+                let r_handle = unbox_str_handle(blk, &r);
                 let i32_eq = blk.call(I32, "js_string_equals", &[(I64, &l_handle), (I64, &r_handle)]);
                 let bit = blk.icmp_ne(I32, &i32_eq, "0");
                 let bit_final = if matches!(op, CompareOp::Ne | CompareOp::LooseNe) {
@@ -1519,8 +1523,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let l = lower_expr(ctx, left)?;
                 let r = lower_expr(ctx, right)?;
                 let blk = ctx.block();
-                let l_handle = unbox_to_i64(blk, &l);
-                let r_handle = unbox_to_i64(blk, &r);
+                // Issue #214: SSO-safe unbox.
+                let l_handle = unbox_str_handle(blk, &l);
+                let r_handle = unbox_str_handle(blk, &r);
                 let cmp_i32 = blk.call(
                     I32,
                     "js_string_compare",
@@ -5415,6 +5420,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- arr.indexOf(value) -> number --------
+        // Issue #214: route through `_jsvalue` so string elements
+        // match by content (handles SSO + heap-string mixed arrays).
+        // Mirrors the `includes` arm + the `lower_array_method::indexOf`
+        // arm.
         Expr::ArrayIndexOf { array, value } => {
             let arr_box = lower_expr(ctx, array)?;
             let v = lower_expr(ctx, value)?;
@@ -5422,7 +5431,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let arr_handle = unbox_to_i64(blk, &arr_box);
             let i32_v = blk.call(
                 I32,
-                "js_array_indexOf_f64",
+                "js_array_indexOf_jsvalue",
                 &[(I64, &arr_handle), (DOUBLE, &v)],
             );
             Ok(blk.sitofp(I32, &i32_v, DOUBLE))
@@ -8593,6 +8602,28 @@ pub(crate) fn buffer_alias_metadata_suffix(scope_idx: u32) -> String {
 pub(crate) fn unbox_to_i64(blk: &mut LlBlock, boxed: &str) -> String {
     let bits = blk.bitcast_double_to_i64(boxed);
     blk.and(I64, &bits, POINTER_MASK_I64)
+}
+
+/// SSO-safe variant of `unbox_to_i64` for NaN-boxed string operands.
+///
+/// The plain `unbox_to_i64(bitcast double → i64; and POINTER_MASK_I64)`
+/// pattern returns the lower 48 bits, which is the correct
+/// `*StringHeader` for heap strings (STRING_TAG = 0x7FFF) but is
+/// **garbage** for short-string-optimization (SSO) values
+/// (SHORT_STRING_TAG = 0x7FF9), whose lower 48 bits encode the inline
+/// length + bytes. Any consumer that dereferences the result —
+/// `js_string_concat`, `js_string_equals`, `js_string_to_lower_case`,
+/// the on-the-wire StringHeader length field, etc. — segfaults at a
+/// pseudo-random address built from the inline payload bytes.
+///
+/// Issue #214: `string[]` element loads (e.g. `JSON.parse('["hello"]')[0]`)
+/// returned SSO bits, then `arr[0] + "x"` / `arr[0] === "hello"` /
+/// `arr[0].toUpperCase()` segfaulted on the inline mask. This helper
+/// routes through `js_get_string_pointer_unified`, which materializes
+/// SSO values to a real heap StringHeader (one allocation per SSO unbox)
+/// while preserving the heap-string fast path internally.
+pub(crate) fn unbox_str_handle(blk: &mut LlBlock, boxed: &str) -> String {
+    blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, boxed)])
 }
 
 /// Lower one of the scalar URL getters (`url.href`, `url.pathname`, …).
