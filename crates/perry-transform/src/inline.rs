@@ -21,13 +21,28 @@ struct MethodCandidate {
 
 /// Inline small functions and methods in the module
 pub fn inline_functions(module: &mut Module) {
-    // Phase 0: Detect Math.imul polyfill functions and replace their call sites
-    // with Expr::MathImul(a, b). This runs BEFORE inlining so the polyfill body
-    // is never decomposed into 5+ operations — the codegen emits a single `mul i32`.
-    let imul_polyfill_ids: HashSet<FuncId> = module.functions.iter()
-        .filter(|f| detect_math_imul_polyfill(f))
-        .map(|f| f.id)
-        .collect();
+    // Phases 0 + 1 fused (Tier 4.1, v0.5.335): single iteration over
+    // module.functions collects both Math.imul polyfill ids AND
+    // inlinable-function candidates. Pre-Tier-4 these were two separate
+    // `module.functions.iter()` passes back-to-back. Math.imul detection
+    // and `is_inlinable` are independent reads with no ordering
+    // dependency, so fusing is safe and saves one full module scan.
+    let mut imul_polyfill_ids: HashSet<FuncId> = HashSet::new();
+    let mut func_candidates: HashMap<FuncId, Function> = HashMap::new();
+    for f in module.functions.iter() {
+        if detect_math_imul_polyfill(f) {
+            imul_polyfill_ids.insert(f.id);
+        }
+        if is_inlinable(f) {
+            func_candidates.insert(f.id, f.clone());
+        }
+    }
+
+    // Phase 0 mutation pass: rewrite imul call sites in every body.
+    // Must run BEFORE the inliner expands those calls, so the polyfill
+    // body is never decomposed into 5+ operations — the codegen emits a
+    // single `mul i32` instead. Conditional on at least one polyfill
+    // being detected so we don't traverse for nothing.
     if !imul_polyfill_ids.is_empty() {
         rewrite_imul_calls_in_stmts(&mut module.init, &imul_polyfill_ids);
         for func in &mut module.functions {
@@ -45,25 +60,29 @@ pub fn inline_functions(module: &mut Module) {
         }
     }
 
-    // Phase 1: Identify inlinable functions
-    let func_candidates: HashMap<FuncId, Function> = module.functions.iter()
-        .filter(|f| is_inlinable(f))
-        .map(|f| (f.id, f.clone()))
-        .collect();
-
-    // Phase 2: Identify inlinable methods (class_name, method_name) -> MethodCandidate
+    // Phases 2 + 3 fused (Tier 4.1): single iteration over
+    // module.classes builds both the inlinable-method map AND the
+    // class-name lookup. class_names is unconditional (covers every
+    // class regardless of native_extends), so it lives at the top of
+    // the loop body before the native_extends short-circuit for method
+    // collection.
     let mut method_candidates: HashMap<(String, String), MethodCandidate> = HashMap::new();
+    let mut class_names: HashMap<String, String> = HashMap::new();
     for class in &module.classes {
-        // Don't inline methods from classes with native parents (e.g., EventEmitter)
-        // because the `this` reference needs special handling in those contexts
+        class_names.insert(class.name.clone(), class.name.clone());
+
+        // Don't inline methods from classes with native parents (e.g.,
+        // EventEmitter) — the `this` reference needs special handling
+        // in those contexts. The class_name lookup above still records
+        // the type so other passes can reference it.
         if class.native_extends.is_some() {
             continue;
         }
-
         for method in &class.methods {
             if is_inlinable(method) {
-                // Note: Methods don't have 'this' as a parameter in the HIR.
-                // They access 'this' via Expr::This. So this_param_id is None.
+                // Methods don't have 'this' as a parameter in the HIR;
+                // they access it via Expr::This. So this_param_id is
+                // None.
                 method_candidates.insert(
                     (class.name.clone(), method.name.clone()),
                     MethodCandidate {
@@ -74,11 +93,6 @@ pub fn inline_functions(module: &mut Module) {
             }
         }
     }
-
-    // Phase 3: Build class name lookup for types
-    let class_names: HashMap<String, String> = module.classes.iter()
-        .map(|c| (c.name.clone(), c.name.clone()))
-        .collect();
 
     // Compute a MODULE-WIDE max LocalId used as the starting point for all
     // inliner-allocated local IDs. CRITICAL: LocalIds are globally unique across

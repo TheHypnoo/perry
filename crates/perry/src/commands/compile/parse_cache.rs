@@ -9,14 +9,37 @@
 //! one `perry dev` invocation. `perry compile` never sees it.
 
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
-#[derive(Default)]
+/// Default eviction threshold (Tier 4.5, v0.5.335). A typical project
+/// has under 100 active source files; 500 keeps everything resident
+/// while preventing the unbounded growth a long-running `perry dev`
+/// session could otherwise produce (e.g. accidentally walking
+/// `node_modules` and parsing thousands of files once). Override at
+/// construction time via [`ParseCache::with_capacity`] for atypical
+/// projects.
+pub const DEFAULT_PARSE_CACHE_CAPACITY: usize = 500;
+
 pub struct ParseCache {
     pub(super) entries: HashMap<PathBuf, ParseCacheEntry>,
+    /// Insertion-order queue — when `entries.len() >= max_entries`,
+    /// the front (oldest insertion) is evicted before adding a new
+    /// entry. FIFO not LRU strictly, but functionally equivalent for
+    /// the perry-dev access pattern: a file's miss → re-insert puts it
+    /// at the back, while files that haven't been touched stay at the
+    /// front and get evicted first. Picking FIFO over LRU avoids a new
+    /// `lru` crate dep and the per-hit re-ordering it would need.
+    order: VecDeque<PathBuf>,
+    max_entries: usize,
     hits: usize,
     misses: usize,
+}
+
+impl Default for ParseCache {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_PARSE_CACHE_CAPACITY)
+    }
 }
 
 pub(super) struct ParseCacheEntry {
@@ -27,6 +50,19 @@ pub(super) struct ParseCacheEntry {
 impl ParseCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a cache that holds up to `max_entries` parsed modules
+    /// before evicting the oldest insertion. Pass `usize::MAX` to
+    /// disable eviction (matches the pre-Tier-4.5 unbounded behaviour).
+    pub fn with_capacity(max_entries: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            max_entries,
+            hits: 0,
+            misses: 0,
+        }
     }
 
     /// Number of cache hits since creation (or since `reset_counters`).
@@ -65,8 +101,25 @@ pub(super) fn parse_cached<'a>(
     } else {
         let parsed = perry_parser::parse_typescript(source, filename)
             .map_err(|e| anyhow!("Failed to parse {}: {}", path.display(), e))?;
+
+        let path_buf = path.to_path_buf();
+        // If the path already had an older entry with stale source,
+        // don't double-count it in the order queue — replace in-place.
+        let was_present = cache.entries.contains_key(&path_buf);
+
+        // Tier 4.5 eviction: enforce the configured cap before
+        // inserting a brand-new path. Same-path re-inserts (above) bypass
+        // eviction since the entry count is unchanged.
+        if !was_present && cache.entries.len() >= cache.max_entries {
+            if let Some(victim) = cache.order.pop_front() {
+                cache.entries.remove(&victim);
+            }
+        }
+        if !was_present {
+            cache.order.push_back(path_buf.clone());
+        }
         cache.entries.insert(
-            path.to_path_buf(),
+            path_buf,
             ParseCacheEntry {
                 source: source.to_string(),
                 module: parsed,
@@ -177,6 +230,50 @@ mod tests {
         let fresh = perry_parser::parse_typescript(SRC_V1, "greet.ts").unwrap();
         assert_eq!(first.body.len(), fresh.body.len());
         assert_eq!(cached.body.len(), fresh.body.len());
+    }
+
+    #[test]
+    fn eviction_caps_entries_at_max_capacity() {
+        // Tier 4.5 invariant: the cache MUST evict the oldest insertion
+        // when adding a new entry would exceed max_entries. Otherwise a
+        // `perry dev` session that walks node_modules grows unbounded.
+        let mut cache = ParseCache::with_capacity(3);
+        for i in 0..6 {
+            let path = PathBuf::from(format!("/virtual/file{}.ts", i));
+            let _ = parse_cached(
+                &mut cache,
+                &path,
+                &format!("export const x = {};", i),
+                "f.ts",
+            )
+            .unwrap();
+        }
+        assert_eq!(cache.entries.len(), 3, "cap must hold");
+        // Files 0-2 (oldest) should have been evicted; 3-5 should remain.
+        assert!(!cache.entries.contains_key(&PathBuf::from("/virtual/file0.ts")));
+        assert!(!cache.entries.contains_key(&PathBuf::from("/virtual/file2.ts")));
+        assert!(cache.entries.contains_key(&PathBuf::from("/virtual/file3.ts")));
+        assert!(cache.entries.contains_key(&PathBuf::from("/virtual/file5.ts")));
+    }
+
+    #[test]
+    fn re_inserting_same_path_does_not_count_against_cap() {
+        // Path A is touched many times — the cap should still allow B
+        // and C as separate entries because re-inserts at A don't grow
+        // the ordering queue.
+        let mut cache = ParseCache::with_capacity(2);
+        let p_a = PathBuf::from("/virtual/a.ts");
+        let p_b = PathBuf::from("/virtual/b.ts");
+        let p_c = PathBuf::from("/virtual/c.ts");
+        let _ = parse_cached(&mut cache, &p_a, SRC_V1, "a.ts").unwrap();
+        let _ = parse_cached(&mut cache, &p_a, SRC_V2, "a.ts").unwrap(); // re-insert
+        let _ = parse_cached(&mut cache, &p_b, SRC_V1, "b.ts").unwrap();
+        // Cap is 2; inserting C should evict A (oldest unique entry).
+        let _ = parse_cached(&mut cache, &p_c, SRC_V1, "c.ts").unwrap();
+        assert_eq!(cache.entries.len(), 2);
+        assert!(!cache.entries.contains_key(&p_a));
+        assert!(cache.entries.contains_key(&p_b));
+        assert!(cache.entries.contains_key(&p_c));
     }
 
     #[test]

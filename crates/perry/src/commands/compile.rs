@@ -3468,15 +3468,26 @@ pub fn run_with_parse_cache(
         return compile_for_wearos_tile(&ctx, &args, format);
     }
 
-    // Transform JS imports into runtime calls (parallel)
+    // Transform JS imports + fix local native instances (parallel,
+    // fused per-module). Tier 4.2 (v0.5.335): pre-fix this was two
+    // separate `par_iter_mut().for_each(...)` passes back-to-back.
+    // The two operations are independent within a single module, so
+    // running them inside one rayon job per module amortizes the
+    // scheduler cost. The js_imports step is gated on
+    // `needs_js_runtime`; modules that don't need it pay only the
+    // cheap branch.
     use rayon::prelude::*;
-    if ctx.needs_js_runtime {
-        ctx.native_modules.par_iter_mut().for_each(|(_, hir_module)| {
+    let needs_js_runtime = ctx.needs_js_runtime;
+    ctx.native_modules.par_iter_mut().for_each(|(_, hir_module)| {
+        if needs_js_runtime {
             perry_hir::transform_js_imports(hir_module);
-        });
-    }
+        }
+        perry_hir::fix_local_native_instances(hir_module);
+    });
 
-    // Build map of exported native instances from all modules
+    // Build map of exported native instances from all modules. Must
+    // run AFTER fix_local_native_instances above so the exports list
+    // reflects post-rewrite state.
     let mut exported_instances: BTreeMap<(String, String), perry_hir::ExportedNativeInstance> = BTreeMap::new();
     for (path, hir_module) in &ctx.native_modules {
         let path_str = path.to_string_lossy().to_string();
@@ -3491,7 +3502,7 @@ pub fn run_with_parse_cache(
         }
     }
 
-    // Build map of exported functions that return native instances
+    // Build map of exported functions that return native instances.
     let mut exported_func_return_instances: BTreeMap<(String, String), perry_hir::ExportedNativeInstance> = BTreeMap::new();
     for (path, hir_module) in &ctx.native_modules {
         let path_str = path.to_string_lossy().to_string();
@@ -3506,25 +3517,32 @@ pub fn run_with_parse_cache(
         }
     }
 
-    // Fix local native instance method calls within each module (parallel)
+    // Cross-module fix → local-fix re-run → monomorphize (parallel,
+    // fused per-module). Tier 4.2: pre-fix this was three separate
+    // `par_iter_mut().for_each(...)` passes. The local-fix re-run
+    // depends on `fix_cross_module_native_instances` having
+    // populated cross-module type info on this module, and
+    // monomorphize depends on the post-local-fix module shape — but
+    // both dependencies are intra-module, so running all three in
+    // one rayon job per module is safe and saves two scheduler
+    // round-trips. The cross-module step is gated on at least one
+    // export existing (skip the call entirely otherwise).
+    let has_native_exports =
+        !exported_instances.is_empty() || !exported_func_return_instances.is_empty();
     ctx.native_modules.par_iter_mut().for_each(|(_, hir_module)| {
+        if has_native_exports {
+            perry_hir::fix_cross_module_native_instances(
+                hir_module,
+                &exported_instances,
+                &exported_func_return_instances,
+            );
+        }
+        // Always re-run local fix (matches pre-Tier-4.2 behaviour —
+        // the prior code unconditionally ran a second local-fix pass
+        // after the cross-module branch). When `has_native_exports`
+        // is false this is effectively a no-op since nothing changed
+        // since the first local-fix in Pass A above.
         perry_hir::fix_local_native_instances(hir_module);
-    });
-
-    // Fix cross-module native instance method calls (parallel — reads immutable maps)
-    if !exported_instances.is_empty() || !exported_func_return_instances.is_empty() {
-        ctx.native_modules.par_iter_mut().for_each(|(_, hir_module)| {
-            perry_hir::fix_cross_module_native_instances(hir_module, &exported_instances, &exported_func_return_instances);
-        });
-    }
-
-    // Re-run local native instance fix after cross-module fixes (parallel)
-    ctx.native_modules.par_iter_mut().for_each(|(_, hir_module)| {
-        perry_hir::fix_local_native_instances(hir_module);
-    });
-
-    // Run monomorphization pass on all native modules (parallel)
-    ctx.native_modules.par_iter_mut().for_each(|(_, hir_module)| {
         perry_hir::monomorphize_module(hir_module);
     });
 
