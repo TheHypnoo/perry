@@ -169,6 +169,15 @@ brew install perryts/perry/perry
 winget install PerryTS.Perry
 ```
 
+### Windows (Scoop)
+
+```powershell
+scoop bucket add perry-ts https://github.com/PerryTS/perry
+scoop install perry-ts/perry
+```
+
+The Scoop manifest declares `main/llvm` as a dependency, so `scoop install` automatically pulls the official MSVC-default LLVM toolchain Perry needs for Windows-native object emission. Verify with `perry doctor` after install.
+
 ### Debian / Ubuntu (APT)
 
 ```bash

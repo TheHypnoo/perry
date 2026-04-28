@@ -220,17 +220,43 @@ jobs:
           }
           Compress-Archive -Path staging/* -DestinationPath "${{ matrix.artifact }}.zip"
 
+      # SHA256 sidecars uploaded next to each archive so package-manager
+      # manifests (Scoop autoupdate, future winget/chocolatey/Homebrew bumps)
+      # can resolve hashes by URL without re-downloading the archive on the
+      # bumper machine. The sidecar format is `<hash>  <filename>` (two
+      # spaces — same as `sha256sum`'s default), which Scoop's hash.url
+      # mode parses out of the box.
+      - name: Compute SHA256 sidecar (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          sha256sum "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256"
+          cat "${{ matrix.artifact }}.tar.gz.sha256"
+
+      - name: Compute SHA256 sidecar (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 "${{ matrix.artifact }}.zip").Hash.ToLower()
+          # Match `sha256sum` output exactly (two-space separator) for cross-platform
+          # tooling that grep-cuts the first field.
+          "$hash  ${{ matrix.artifact }}.zip" | Out-File -Encoding ascii "${{ matrix.artifact }}.zip.sha256"
+          Get-Content "${{ matrix.artifact }}.zip.sha256"
+
       - name: Upload release asset (Unix)
         if: runner.os != 'Windows' && github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}.tar.gz" --clobber
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}.tar.gz" --clobber
+          gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}.tar.gz.sha256" --clobber
 
       - name: Upload release asset (Windows)
         if: runner.os == 'Windows' && github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}.zip" --clobber
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}.zip" --clobber
+          gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}.zip.sha256" --clobber
 
       - name: Upload build artifact (Unix, for deb + npm-publish jobs)
         if: runner.os != 'Windows'
