@@ -3,6 +3,17 @@
     "description": "Native TypeScript compiler — compiles .ts directly to native executables via LLVM.",
     "homepage": "https://github.com/PerryTS/perry",
     "license": "MIT",
+    "notes": [
+        "Perry shells out to clang for the IR -> object step. The 'main/llvm'",
+        "dependency installs the official MSVC-default LLVM, which Perry needs",
+        "for Windows-native object emission. If you already have clang from a",
+        "different toolchain (MinGW, Anaconda, Rust GNU bundle), set the env",
+        "var PERRY_LLVM_CLANG to the full path of an MSVC-default clang.exe.",
+        "",
+        "Verify the install with: perry doctor",
+        "",
+        "First compile: perry compile hello.ts -o hello.exe"
+    ],
     "depends": "main/llvm",
     "architecture": {
         "64bit": {
@@ -26,16 +37,5 @@
                 }
             }
         }
-    },
-    "notes": [
-        "Perry shells out to clang for the IR -> object step. The 'main/llvm'",
-        "dependency installs the official MSVC-default LLVM, which Perry needs",
-        "for Windows-native object emission. If you already have clang from a",
-        "different toolchain (MinGW, Anaconda, Rust GNU bundle), set the env",
-        "var PERRY_LLVM_CLANG to the full path of an MSVC-default clang.exe.",
-        "",
-        "Verify the install with: perry doctor",
-        "",
-        "First compile: perry compile hello.ts -o hello.exe"
-    ]
+    }
 }
