@@ -125,6 +125,23 @@ pub(super) fn lower_builtin_new(
             let handle = blk.call(I64, "js_pg_pool_new", &[(DOUBLE, &config_val)]);
             return Ok(Some(nanbox_pointer_inline(blk, &handle)));
         }
+        // better-sqlite3 Database — `new Database(filename)` opens a SQLite
+        // connection. Without this, `new Database(...)` falls into lower_new's
+        // empty-object placeholder, so `db` is a generic ObjectHeader pointer
+        // instead of a real Handle from `js_sqlite_open`. `db.prepare(...)`
+        // then unboxes that bogus pointer; `get_handle::<SqliteDbHandle>`
+        // returns None; prepare returns -1; every chained `.run()`/`.get()`/
+        // `.all()` dispatches against junk and silently produces undefined.
+        "Database" => {
+            let path_ptr = if let Some(arg) = args.first() {
+                get_raw_string_ptr(ctx, arg)?
+            } else {
+                "0".to_string()
+            };
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_sqlite_open", &[(I64, &path_ptr)]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
         // mongodb MongoClient — `new MongoClient(uri)` matching npm mongodb's
         // API. URI is a string; runtime stores it and connects later via
         // `await client.connect()`.

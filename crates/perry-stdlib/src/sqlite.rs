@@ -178,6 +178,16 @@ unsafe fn params_from_array(arr_ptr: *const ArrayHeader) -> Vec<Box<dyn rusqlite
     if arr_ptr.is_null() {
         return vec![];
     }
+    // Codegen pads omitted-arg slots with TAG_UNDEFINED bits when a stmt
+    // method is called with no params (e.g. `stmt.run()` / `stmt.all()`).
+    // Those bits look like a non-null pointer but actually carry the
+    // 0x7FFC NaN-box tag in the high 16; dereferencing as ArrayHeader is
+    // UB and reads a garbage `length` that crashes the loop below.
+    // Treat any value with non-zero upper-16 as "no params".
+    let upper16 = (arr_ptr as usize as u64) >> 48;
+    if upper16 != 0 {
+        return vec![];
+    }
     let len = (*arr_ptr).length as usize;
     let elements = (arr_ptr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(len);

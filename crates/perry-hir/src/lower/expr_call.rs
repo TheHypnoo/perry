@@ -793,7 +793,7 @@ pub(super) fn lower_call(ctx: &mut LoweringContext, call: &ast::CallExpr) -> Res
                             // Lower the object expression first
                             let object_expr = lower_expr(ctx, &member.obj)?;
                             // Check if it's a NativeMethodCall for a fluent-API native module
-                            if let Expr::NativeMethodCall { module, class_name, .. } = &object_expr {
+                            if let Expr::NativeMethodCall { module, class_name, method: prior_method, .. } = &object_expr {
                                 // Methods that return the same type (builder pattern)
                                 let is_math_lib = matches!(module.as_str(), "big.js" | "decimal.js" | "bignumber.js");
                                 let is_math_method = matches!(method_name.as_str(),
@@ -829,6 +829,36 @@ pub(super) fn lower_call(ctx: &mut LoweringContext, call: &ast::CallExpr) -> Res
                                     return Ok(Expr::NativeMethodCall {
                                         module: module.clone(),
                                         class_name: class_name.clone(),
+                                        object: Some(Box::new(object_expr)),
+                                        method: method_name,
+                                        args,
+                                    });
+                                }
+                                // Database-driver chaining: methods like
+                                // `db.prepare(sql).run()` / `db.prepare(sql).get()` /
+                                // `db.prepare(sql).all()` where the inner call returns
+                                // a *new* native class (Statement) — not the same
+                                // handle as the receiver. Look up `(module,
+                                // prior_method)` in the chaining table and dispatch
+                                // the outer call against the resulting class. Without
+                                // this, the outer `.run()`/`.get()`/`.all()` fell
+                                // through to the generic js_native_call_method
+                                // dispatcher: SQL never executed, returned objects
+                                // had no keys_array, `Object.keys(row)` was `[]` and
+                                // `row.id` was undefined.
+                                let chained_class: Option<&'static str> = match (module.as_str(), prior_method.as_str()) {
+                                    ("better-sqlite3", "prepare") => Some("Statement"),
+                                    ("mongodb", "db") => Some("Database"),
+                                    ("mongodb", "collection") => Some("Collection"),
+                                    ("mysql2", "getConnection") | ("mysql2/promise", "getConnection") => Some("PoolConnection"),
+                                    ("pg", "connect") => Some("PoolClient"),
+                                    ("ioredis", "duplicate") => Some("Redis"),
+                                    _ => None,
+                                };
+                                if let Some(result_class) = chained_class {
+                                    return Ok(Expr::NativeMethodCall {
+                                        module: module.clone(),
+                                        class_name: Some(result_class.to_string()),
                                         object: Some(Box::new(object_expr)),
                                         method: method_name,
                                         args,
