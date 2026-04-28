@@ -76,6 +76,10 @@
 - [Formatting](i18n/formatting.md)
 - [CLI Tools](i18n/cli.md)
 
+# Auto-Update
+
+- [Overview](updater/overview.md)
+
 # System APIs
 
 - [Overview](system/overview.md)
