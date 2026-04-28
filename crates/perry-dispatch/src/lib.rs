@@ -255,8 +255,13 @@ pub const PERRY_UI_TABLE: &[MethodRow] = &[
             args: &[ArgKind::Widget, ArgKind::Widget], ret: ReturnKind::Void },
 
     // ---- TextField extras ----
+    // perry_ui_textfield_get_string returns *mut StringHeader cast to i64;
+    // the GC alloc is GC_FLAG_PINNED before return so it survives until
+    // we NaN-box it. ReturnKind::F64 here treated the pointer bits as a
+    // raw double — every read produced gibberish (e.g. "27017",
+    // "65933097631650390000000000000000") that string ops then operated on.
     MethodRow { method: "textfieldGetString", runtime: "perry_ui_textfield_get_string",
-            args: &[ArgKind::Widget], ret: ReturnKind::F64 },
+            args: &[ArgKind::Widget], ret: ReturnKind::Str },
     MethodRow { method: "textfieldFocus", runtime: "perry_ui_textfield_focus",
             args: &[ArgKind::Widget], ret: ReturnKind::Void },
     MethodRow { method: "textfieldBlurAll", runtime: "perry_ui_textfield_blur_all",
@@ -277,8 +282,9 @@ pub const PERRY_UI_TABLE: &[MethodRow] = &[
     MethodRow { method: "textfieldSetTextColor", runtime: "perry_ui_textfield_set_text_color",
             args: &[ArgKind::Widget, ArgKind::F64, ArgKind::F64, ArgKind::F64, ArgKind::F64],
             ret: ReturnKind::Void },
+    // Same fix as textfieldGetString — runtime returns a string pointer.
     MethodRow { method: "textareaGetString", runtime: "perry_ui_textarea_get_string",
-            args: &[ArgKind::Widget], ret: ReturnKind::F64 },
+            args: &[ArgKind::Widget], ret: ReturnKind::Str },
 
     // ---- Text extras ----
     MethodRow { method: "textSetSelectable", runtime: "perry_ui_text_set_selectable",
