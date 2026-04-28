@@ -151,10 +151,9 @@ pub extern "C" fn perry_ui_picker_create(label_ptr: i64, on_change: f64, _style:
 }
 
 #[no_mangle]
-pub extern "C" fn perry_ui_navstack_create(title_ptr: i64, body_handle: i64) -> i64 {
-    let mut node = NodeData::new(NodeKind::NavigationStack);
-    node.text = cstring_from_header(title_ptr as *const u8);
-    node.children.push(body_handle);
+pub extern "C" fn perry_ui_navstack_create() -> i64 {
+    // Matches the 0-arg dispatch in perry-dispatch::PERRY_UI_TABLE.
+    let node = NodeData::new(NodeKind::NavigationStack);
     tree::register_node(node)
 }
 
@@ -607,7 +606,7 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 #[no_mangle] pub extern "C" fn perry_ui_menu_create() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn perry_ui_menu_add_item(_menu: i64, _title: i64, _cb: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_widget_set_context_menu(_widget: i64, _menu: i64) {}
-#[no_mangle] pub extern "C" fn perry_ui_menu_add_item_with_shortcut(_m: i64, _t: i64, _cb: f64, _s: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_menu_add_item_with_shortcut(_m: i64, _t: i64, _s: i64, _cb: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_menu_add_separator(_menu: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_menu_add_submenu(_menu: i64, _title: i64, _sub: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_menubar_create() -> i64 { 0 }
@@ -618,7 +617,7 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 #[no_mangle] pub extern "C" fn perry_ui_open_file_dialog(_cb: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_app_set_min_size(_app: i64, _w: f64, _h: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_app_set_max_size(_app: i64, _w: f64, _h: f64) {}
-#[no_mangle] pub extern "C" fn perry_ui_app_set_timer(_interval_ms: f64, _cb: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_app_set_timer(_app_handle: i64, _interval_ms: f64, _cb: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_canvas_create(_w: f64, _h: f64) -> i64 { 0 }
 #[no_mangle] pub extern "C" fn perry_ui_canvas_clear(_h: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_canvas_begin_path(_h: i64) {}

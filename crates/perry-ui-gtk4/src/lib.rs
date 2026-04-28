@@ -101,7 +101,7 @@ pub extern "C" fn perry_ui_app_on_terminate(callback: f64) {
 
 /// Set a repeating timer.
 #[no_mangle]
-pub extern "C" fn perry_ui_app_set_timer(interval_ms: f64, callback: f64) {
+pub extern "C" fn perry_ui_app_set_timer(_app_handle: i64, interval_ms: f64, callback: f64) {
     app::set_timer(interval_ms, callback);
 }
 
@@ -752,7 +752,8 @@ pub extern "C" fn perry_ui_menu_add_item(menu_handle: i64, title_ptr: i64, callb
 
 /// Add a menu item with a keyboard shortcut.
 #[no_mangle]
-pub extern "C" fn perry_ui_menu_add_item_with_shortcut(menu_handle: i64, title_ptr: i64, callback: f64, shortcut_ptr: i64) {
+pub extern "C" fn perry_ui_menu_add_item_with_shortcut(menu_handle: i64, title_ptr: i64, shortcut_ptr: i64, callback: f64) {
+    // Arg order matches the TS-side API: `menuAddItemWithShortcut(menu, title, shortcut, callback)`.
     menu::add_item_with_shortcut(menu_handle, title_ptr as *const u8, callback, shortcut_ptr as *const u8);
 }
 
@@ -1062,8 +1063,9 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 
 /// Create a NavigationStack with initial page.
 #[no_mangle]
-pub extern "C" fn perry_ui_navstack_create(title_ptr: i64, body_handle: i64) -> i64 {
-    widgets::navstack::create(title_ptr as *const u8, body_handle)
+pub extern "C" fn perry_ui_navstack_create() -> i64 {
+    // Matches the 0-arg dispatch in perry-dispatch::PERRY_UI_TABLE.
+    widgets::navstack::create(std::ptr::null(), 0)
 }
 
 /// Push a page onto the navigation stack.

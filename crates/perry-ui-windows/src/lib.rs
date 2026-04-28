@@ -134,7 +134,10 @@ pub extern "C" fn perry_ui_app_on_terminate(callback: f64) {
 
 /// Set a repeating timer.
 #[no_mangle]
-pub extern "C" fn perry_ui_app_set_timer(interval_ms: f64, callback: f64) {
+pub extern "C" fn perry_ui_app_set_timer(_app_handle: i64, interval_ms: f64, callback: f64) {
+    // Dispatch passes the App handle as the first arg (matching TS surface
+    // `appSetTimer(app, intervalMs, callback)`). Without consuming it here
+    // the f64 args land in the wrong XMM slots on Win64 ABI.
     app::set_timer(interval_ms, callback);
 }
 
@@ -703,7 +706,12 @@ pub extern "C" fn perry_ui_menu_add_item(menu_handle: i64, title_ptr: i64, callb
 
 /// Add a menu item with a keyboard shortcut.
 #[no_mangle]
-pub extern "C" fn perry_ui_menu_add_item_with_shortcut(menu_handle: i64, title_ptr: i64, callback: f64, shortcut_ptr: i64) {
+pub extern "C" fn perry_ui_menu_add_item_with_shortcut(menu_handle: i64, title_ptr: i64, shortcut_ptr: i64, callback: f64) {
+    // Arg order matches the TS-side API: `menuAddItemWithShortcut(menu, title, shortcut, callback)`.
+    // Why: on Win64 ABI int and float positional slots share register indices —
+    // `(i64, i64, f64, i64)` vs caller's `(i64, i64, i64, f64)` would put `callback`
+    // in XMM2 (uninitialized) and `shortcut_ptr` in R9 (also uninitialized), causing
+    // a deref-garbage ACCESS_VIOLATION inside `str_from_header(shortcut_ptr)`.
     menu::add_item_with_shortcut(menu_handle, title_ptr as *const u8, callback, shortcut_ptr as *const u8);
 }
 
@@ -881,8 +889,13 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 
 /// Create a NavigationStack with initial page.
 #[no_mangle]
-pub extern "C" fn perry_ui_navstack_create(title_ptr: i64, body_handle: i64) -> i64 {
-    widgets::navstack::create(title_ptr as *const u8, body_handle)
+pub extern "C" fn perry_ui_navstack_create() -> i64 {
+    // Dispatch (perry-dispatch::PERRY_UI_TABLE) emits this call with 0 args
+    // because the TS-side API is `NavStack(): Widget`. The previous 2-arg
+    // signature read uninitialized RCX/RDX on Win64 — `str_from_header(garbage)`
+    // dereffed wild memory and crashed with ACCESS_VIOLATION. SysV (macOS/Linux)
+    // happened to land 0 in those registers most of the time, masking the bug.
+    widgets::navstack::create(std::ptr::null(), 0)
 }
 
 /// Push a page onto the navigation stack.
@@ -1237,8 +1250,12 @@ pub extern "C" fn perry_ui_scrollview_end_refreshing(_handle: i64) {}
 pub extern "C" fn perry_ui_scrollview_set_refresh_control(_handle: i64, _callback: f64) {}
 
 #[no_mangle]
-pub extern "C" fn perry_ui_stack_set_distribution(handle: i64, distribution: i64) {
-    widgets::set_distribution(handle, distribution);
+pub extern "C" fn perry_ui_stack_set_distribution(handle: i64, distribution: f64) {
+    // Dispatch declares this as `[Widget, F64]` (matches every other platform).
+    // The Windows runtime previously took `i64` — on Win64 ABI the f64 arg lands
+    // in XMM1 while `i64` is read from RDX (uninitialized garbage), so the
+    // distribution enum tag was random.
+    widgets::set_distribution(handle, distribution as i64);
 }
 
 #[no_mangle]

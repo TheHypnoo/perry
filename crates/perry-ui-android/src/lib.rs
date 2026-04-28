@@ -492,7 +492,7 @@ pub extern "C" fn perry_ui_widget_set_context_menu(widget_handle: i64, menu_hand
 }
 
 #[no_mangle]
-pub extern "C" fn perry_ui_menu_add_item_with_shortcut(_menu_handle: i64, _title_ptr: i64, _callback: f64, _shortcut_ptr: i64) {
+pub extern "C" fn perry_ui_menu_add_item_with_shortcut(_menu_handle: i64, _title_ptr: i64, _shortcut_ptr: i64, _callback: f64) {
     // No-op on Android — no menu bar on mobile
 }
 
@@ -573,7 +573,7 @@ pub extern "C" fn perry_ui_app_on_terminate(callback: f64) {
 }
 
 #[no_mangle]
-pub extern "C" fn perry_ui_app_set_timer(interval_ms: f64, callback: f64) {
+pub extern "C" fn perry_ui_app_set_timer(_app_handle: i64, interval_ms: f64, callback: f64) {
     app::set_timer(interval_ms, callback);
 }
 
@@ -763,8 +763,9 @@ pub extern "C" fn perry_ui_image_set_tint(handle: i64, r: f64, g: f64, b: f64, a
 // =============================================================================
 
 #[no_mangle]
-pub extern "C" fn perry_ui_navstack_create(title_ptr: i64, body_handle: i64) -> i64 {
-    widgets::navstack::create(title_ptr as *const u8, body_handle)
+pub extern "C" fn perry_ui_navstack_create() -> i64 {
+    // Matches the 0-arg dispatch in perry-dispatch::PERRY_UI_TABLE.
+    widgets::navstack::create(std::ptr::null(), 0)
 }
 
 #[no_mangle]

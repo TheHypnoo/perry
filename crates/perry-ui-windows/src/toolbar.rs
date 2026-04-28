@@ -78,13 +78,18 @@ pub fn create() -> i64 {
             };
             RegisterClassExW(&wc);
 
+            // WS_CHILD windows always need a parent — Windows refuses with
+            // HRESULT 0x8007057E "Cannot create a top-level child window."
+            // Park under the hidden message-only parking HWND like every
+            // other widget; `attach()` reparents to the real app window.
+            let parking = crate::widgets::get_parking_hwnd();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 PCWSTR(class_name.as_ptr()),
                 PCWSTR::null(),
                 WS_CHILD | WS_VISIBLE,
                 0, 0, 800, 32,
-                None, None,
+                parking, None,
                 HINSTANCE::from(hinstance),
                 None,
             ).unwrap();
