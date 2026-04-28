@@ -11,8 +11,13 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
+
+/// Cached result of the pre-flight clang probe — evaluated once per process.
+/// `Some(default_triple)` if the probe succeeded, `None` if it failed.
+static CLANG_PROBE: OnceLock<Option<String>> = OnceLock::new();
 
 /// Compile LLVM IR text to an object file using the system `clang`, returning
 /// the object file bytes.
@@ -58,6 +63,15 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
          PERRY_LLVM_CLANG to the path of clang. Run `perry doctor` to verify the install."
     })?;
 
+    // Pre-flight probe: capture clang's default Target: line once per process,
+    // so we can warn early if it disagrees with the IR's triple in a way that
+    // historically broke Windows builds. The actual build still succeeds via
+    // the explicit -target pin below — the probe is purely informational.
+    let effective_triple_for_probe = target_triple
+        .map(|s| s.to_string())
+        .unwrap_or_else(crate::codegen::default_target_triple);
+    probe_clang_default_triple(&clang, &effective_triple_for_probe);
+
     let mut cmd = Command::new(&clang);
     cmd.arg("-c")
         // -O3 unlocks LLVM's auto-vectorizer, aggressive inlining, and
@@ -95,9 +109,25 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
     cmd.arg(&ll_path)
         .arg("-o")
         .arg(&obj_path);
-    if let Some(triple) = target_triple {
-        cmd.arg("-target").arg(triple);
-    }
+    // Always pass -target. Clang's behavior on a `.ll` file is "use my own
+    // default target, override the module's stated triple if it differs"
+    // (you can see the `warning: overriding the module target triple` log
+    // when this happens). On a host where the discovered clang's default
+    // is non-msvc — typically MinGW-flavored clang from MSYS2, Strawberry
+    // Perl, an Anaconda env, or a Rust GNU toolchain LLVM bundle — that
+    // override silently turns Perry's stated `x86_64-pc-windows-msvc`
+    // module into a windows-gnu/mingw32 object. LLVM's mingw32 COFF
+    // emitter then injects a `__main` reference (a libgcc/MinGW C++
+    // static-init stub) into our generated `main()`. lld-link / link.exe
+    // are MSVC-flavored — they don't have `__main`, so the link bombs
+    // with `LNK2019: unresolved external symbol __main referenced in
+    // function main`. Pinning -target to the IR's actual triple (or the
+    // host default when target is None) makes clang trust the IR and
+    // skips the override path.
+    let effective_triple = target_triple
+        .map(|s| s.to_string())
+        .unwrap_or_else(crate::codegen::default_target_triple);
+    cmd.arg("-target").arg(&effective_triple);
 
     log::debug!("perry-codegen: {:?}", cmd);
     let output = cmd
@@ -106,11 +136,34 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // Surface the clang environment alongside the failure so the user
+        // doesn't have to chase a cryptic LNK2019 / "unresolved external
+        // symbol" up the toolchain. We probe `clang --version` once on
+        // failure so the working path stays single-shellout.
+        let clang_version = Command::new(&clang)
+            .arg("--version")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "(unable to query --version)".to_string());
+        let hint = build_clang_failure_hint(&stderr, &clang_version, &effective_triple);
         return Err(anyhow!(
-            "clang -c failed (status={}):\n{}\n(LLVM IR left at {})",
+            "clang -c failed (status={}).\n\
+             clang:           {}\n\
+             clang --version: {}\n\
+             requested -target: {}\n\
+             LLVM IR left at: {}\n\
+             \n\
+             stderr:\n{}\n\
+             {}",
             output.status,
+            clang.display(),
+            clang_version.lines().next().unwrap_or("?"),
+            effective_triple,
+            ll_path.display(),
             stderr,
-            ll_path.display()
+            hint
         ));
     }
 
@@ -129,6 +182,105 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
     }
 
     Ok(bytes)
+}
+
+/// Once-per-process probe of clang's default `Target:` line. When the
+/// default disagrees with the triple Perry is about to pass via `-target`
+/// in a way that historically broke builds (specifically: a non-msvc
+/// clang default on a Windows host targeting msvc), print a one-line
+/// informational note pointing the user at `PERRY_LLVM_CLANG` /
+/// `LLVM.LLVM`. The build itself proceeds normally — this is just a
+/// heads-up so a "tricky" failure surfaces as a clear note up front
+/// instead of a downstream link error.
+///
+/// Suppress with `PERRY_NO_CLANG_PROBE=1` (CI / scripted builds).
+fn probe_clang_default_triple(clang: &Path, requested_triple: &str) {
+    if env::var_os("PERRY_NO_CLANG_PROBE").is_some() {
+        return;
+    }
+    let default_triple = CLANG_PROBE
+        .get_or_init(|| {
+            let out = Command::new(clang).arg("--version").output().ok()?;
+            let text = String::from_utf8(out.stdout).ok()?;
+            text.lines()
+                .find(|l| l.trim_start().starts_with("Target:"))
+                .map(|l| l.trim_start().trim_start_matches("Target:").trim().to_string())
+        })
+        .as_deref();
+
+    let Some(default) = default_triple else { return; };
+
+    // Only warn when the host is Windows and clang's default is GNU/MinGW
+    // but we're targeting msvc. Any other mismatch (e.g. cross-compile)
+    // is intentional and not a sign of a broken install.
+    let host_is_windows = cfg!(target_os = "windows");
+    let want_msvc = requested_triple.contains("windows-msvc");
+    let have_gnu = default.contains("windows-gnu")
+        || default.contains("mingw")
+        || default.contains("w64-mingw");
+    if host_is_windows && want_msvc && have_gnu {
+        eprintln!(
+            "  note: clang default is `{}` (MinGW/GNU); Perry is forcing -target {} \
+             so the link stays MSVC-flavored.\n        \
+             If anything below fails, install msvc-default LLVM (winget install LLVM.LLVM) \
+             or set PERRY_LLVM_CLANG.",
+            default, requested_triple
+        );
+    }
+}
+
+/// Build a human-readable hint paragraph appended to a `clang -c` failure.
+/// Pattern-matches the stderr against the failure shapes we know about and
+/// produces an actionable next step, so a user reading the error doesn't
+/// have to interpret raw lld-link / clang messages.
+fn build_clang_failure_hint(stderr: &str, clang_version: &str, requested_triple: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let lower = stderr.to_lowercase();
+    let version_line = clang_version.lines().next().unwrap_or("");
+    let clang_default_triple = clang_version
+        .lines()
+        .find(|l| l.trim_start().starts_with("Target:"))
+        .map(|l| l.trim_start().trim_start_matches("Target:").trim().to_string());
+
+    let mingw_clang = clang_default_triple
+        .as_deref()
+        .map(|t| t.contains("windows-gnu") || t.contains("mingw") || t.contains("w64-mingw"))
+        .unwrap_or(false);
+
+    if cfg!(target_os = "windows") && mingw_clang {
+        lines.push(format!(
+            "Hint: the clang on PATH defaults to {} (a MinGW/GNU toolchain). \
+             Perry now pins -target to {} so the .o is msvc-flavored, but if your \
+             clang install lacks the msvc backend support, pick a clang built for msvc:",
+            clang_default_triple.as_deref().unwrap_or("a non-msvc target"),
+            requested_triple
+        ));
+        lines.push("  - winget install LLVM.LLVM        (Windows Package Manager)".to_string());
+        lines.push("  - choco install llvm              (Chocolatey)".to_string());
+        lines.push("  - https://github.com/llvm/llvm-project/releases (LLVM-<ver>-win64.exe)".to_string());
+        lines.push("Then either put it first on PATH, or set PERRY_LLVM_CLANG to its full path.".to_string());
+    } else if lower.contains("overriding the module target triple") {
+        lines.push(format!(
+            "Hint: clang ({}) is overriding the module target triple. \
+             Perry passes -target {} explicitly; if you see this message after the fix, \
+             your clang may not support that target — install LLVM.LLVM or set PERRY_LLVM_CLANG.",
+            version_line, requested_triple
+        ));
+    } else if lower.contains("unable to find library") || lower.contains("library not found") {
+        lines.push(format!(
+            "Hint: clang couldn't find a system library. Check that the platform SDK is installed \
+             (Visual Studio Build Tools on Windows, Xcode CLT on macOS, libc6-dev/build-essential \
+             on Linux). Requested target: {}.",
+            requested_triple
+        ));
+    } else {
+        lines.push(format!(
+            "If the failure is a triple/ABI mismatch, set PERRY_LLVM_CLANG to a clang whose \
+             default Target: matches {} (run `perry doctor` to verify).",
+            requested_triple
+        ));
+    }
+    lines.join("\n")
 }
 
 pub fn find_clang() -> Option<PathBuf> {
@@ -409,4 +561,74 @@ pub fn bitcode_link_pipeline(
     }
 
     Ok(linked_obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn version_block(target_line: &str) -> String {
+        format!("clang version 18.0.0\n{}\nThread model: posix", target_line)
+    }
+
+    #[test]
+    fn hint_for_mingw_clang_on_windows_targets_msvc() {
+        // Only the host-is-windows arm fires this hint. The build matrix runs
+        // these tests on every host, so we gate the assertion on cfg(windows).
+        // On non-Windows hosts the function falls through to the generic
+        // PERRY_LLVM_CLANG suggestion — also asserted below.
+        let v = version_block("Target: x86_64-w64-windows-gnu");
+        let hint = build_clang_failure_hint(
+            "lld-link: error: undefined symbol: __main",
+            &v,
+            "x86_64-pc-windows-msvc",
+        );
+        if cfg!(target_os = "windows") {
+            assert!(hint.contains("MinGW/GNU"), "expected MinGW hint, got: {}", hint);
+            assert!(hint.contains("winget install LLVM.LLVM"));
+            assert!(hint.contains("PERRY_LLVM_CLANG"));
+        } else {
+            assert!(hint.contains("PERRY_LLVM_CLANG"));
+        }
+    }
+
+    #[test]
+    fn hint_for_override_module_target_triple_warning() {
+        let v = version_block("Target: x86_64-pc-linux-gnu");
+        let hint = build_clang_failure_hint(
+            "warning: overriding the module target triple with x86_64-pc-linux-gnu",
+            &v,
+            "x86_64-unknown-linux-gnu",
+        );
+        // On non-Windows hosts the override-warning branch should win.
+        if !cfg!(target_os = "windows") {
+            assert!(hint.contains("overriding the module target triple"),
+                "expected override hint, got: {}", hint);
+        }
+    }
+
+    #[test]
+    fn hint_for_missing_library_message() {
+        let v = version_block("Target: aarch64-apple-darwin23.0.0");
+        let hint = build_clang_failure_hint(
+            "ld: library not found for -lSystem",
+            &v,
+            "arm64-apple-macosx15.0.0",
+        );
+        assert!(hint.contains("library") || hint.contains("PERRY_LLVM_CLANG"),
+            "got: {}", hint);
+    }
+
+    #[test]
+    fn hint_falls_back_when_no_pattern_matches() {
+        let v = version_block("Target: aarch64-apple-darwin23.0.0");
+        let hint = build_clang_failure_hint(
+            "(some unrelated clang stderr)",
+            &v,
+            "arm64-apple-macosx15.0.0",
+        );
+        assert!(hint.contains("PERRY_LLVM_CLANG"),
+            "fallback hint should mention PERRY_LLVM_CLANG; got: {}", hint);
+        assert!(hint.contains("arm64-apple-macosx15.0.0"));
+    }
 }

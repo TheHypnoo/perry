@@ -3411,8 +3411,15 @@ fn sanitize(name: &str) -> String {
 
 /// Host default triple.
 /// Host-default LLVM target triple. Used when `CompileOptions.target`
-/// is `None`.
-fn default_target_triple() -> String {
+/// is `None`. Also re-exposed via `pub(crate)` so `linker.rs` can pin
+/// clang's `-target` even on host builds — without that pin a clang
+/// whose own default triple is GNU/MinGW silently overrides the IR's
+/// stated msvc triple and emits a `__main` libgcc reference that
+/// lld-link/link.exe can't resolve. (The bug used to surface as
+/// `LNK2019: unresolved external symbol __main referenced in
+/// function main` even though the .ll says `target triple =
+/// "x86_64-pc-windows-msvc"`.)
+pub(crate) fn default_target_triple() -> String {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         "arm64-apple-macosx15.0.0".to_string()
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {

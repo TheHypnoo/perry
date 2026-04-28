@@ -102,14 +102,23 @@ pub(super) fn build_optimized_libs(
         && !ctx.needs_geisterhand;
 
     // Locate the workspace. Without source we can't rebuild — fall back
-    // to whatever's prebuilt next to perry on disk.
+    // to whatever's prebuilt next to perry on disk. The fallback names are
+    // platform-specific so the log doesn't claim Perry is searching for a
+    // `.a` on Windows (it isn't — `find_runtime_library` / `find_stdlib_library`
+    // route to `perry_runtime.lib` + `perry_stdlib.lib` on Windows hosts).
     let workspace_root = match find_perry_workspace_root() {
         Some(p) => p,
         None => {
             if matches!(format, OutputFormat::Text) && verbose > 0 {
+                let (rt_name, std_name) = match target {
+                    Some("windows") => ("perry_runtime.lib", "perry_stdlib.lib"),
+                    None if cfg!(target_os = "windows") => ("perry_runtime.lib", "perry_stdlib.lib"),
+                    _ => ("libperry_runtime.a", "libperry_stdlib.a"),
+                };
                 eprintln!(
                     "  auto-optimize: Perry workspace source not found, \
-                     using prebuilt libperry_runtime.a + libperry_stdlib.a"
+                     using prebuilt {} + {}",
+                    rt_name, std_name
                 );
             }
             return OptimizedLibs::empty();
