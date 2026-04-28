@@ -845,21 +845,17 @@ pub fn get_shadow(handle: i64) -> Option<(f64, f64, f64, f64, f64, f64, f64)> {
 /// independent paint paths.
 static OPACITY_VALUES: std::sync::Mutex<Vec<(i64, f64)>> = std::sync::Mutex::new(Vec::new());
 
-/// Set static opacity on a widget (issue #185 Phase B closure).
+/// Set static opacity on a widget (issue #185 Phase B / #210 closure).
 ///
-/// **Currently a stub-with-state**: opacity is stored, but no paint path
-/// applies it yet. Real per-widget opacity on Win32 child HWNDs requires
-/// `WS_EX_LAYERED` + `SetLayeredWindowAttributes`, which is supported on
-/// Windows 8+ for child windows but needs careful per-widget-class
-/// integration with the existing WM_PAINT pipeline. The same shape as
-/// `set_shadow`'s deferred rendering — when the paint pass lands, this
-/// store gets read by `apply_opacity` (analogous to `apply_corner_radius`).
-/// Until then, cross-platform code calling `widgetSetOpacity` compiles +
-/// links cleanly across all platforms; the matrix marks Windows
-/// `Status::Stub` for opacity so users know.
+/// Adds `WS_EX_LAYERED` to the child HWND's extended style if not yet
+/// set, then applies the alpha via `SetLayeredWindowAttributes` with
+/// `LWA_ALPHA`. Per-child `WS_EX_LAYERED` works on Windows 8+ (which is
+/// Perry's minimum Windows target). The store still keeps the last
+/// value so a later layout pass / `animate_opacity` can re-apply it
+/// without losing state.
 ///
-/// `animate_opacity` (already in this file) is also a no-op for the same
-/// reason; once the paint pass lands, animations can read both stores.
+/// `animate_opacity` (already in this file) wires through the same
+/// `apply_opacity` helper, so animations now also work.
 pub fn set_opacity(handle: i64, opacity: f64) {
     if let Ok(mut opacities) = OPACITY_VALUES.lock() {
         if let Some(slot) = opacities.iter_mut().find(|e| e.0 == handle) {
@@ -867,6 +863,35 @@ pub fn set_opacity(handle: i64, opacity: f64) {
         } else {
             opacities.push((handle, opacity));
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        apply_opacity(handle, opacity);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = opacity;
+    }
+}
+
+/// Apply the stored opacity to a widget's HWND. Idempotent — safe to
+/// call multiple times. Clamps the input to `[0, 1]`.
+#[cfg(target_os = "windows")]
+fn apply_opacity(handle: i64, opacity: f64) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, SetWindowLongW, SetLayeredWindowAttributes,
+        GWL_EXSTYLE, WS_EX_LAYERED, LWA_ALPHA,
+    };
+    let Some(hwnd) = get_hwnd_safe(handle) else { return; };
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0) as u8;
+    unsafe {
+        let cur_ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if cur_ex & WS_EX_LAYERED.0 == 0 {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, (cur_ex | WS_EX_LAYERED.0) as i32);
+        }
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
+        let _ = InvalidateRect(hwnd, None, true);
     }
 }
 
@@ -884,14 +909,15 @@ pub fn get_opacity(handle: i64) -> Option<f64> {
 static BORDER_STATE: std::sync::Mutex<Vec<(i64, (Option<(f64, f64, f64, f64)>, Option<f64>))>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Set border color (issue #185 Phase B closure).
+/// Set border color (issue #185 Phase B / #210 closure).
 ///
-/// **Stub-with-state**: stores the color in `BORDER_STATE` next to any
-/// previously-set width. Real Win32 borders on child HWNDs need either
-/// a custom `WM_PAINT` `Rectangle()` pass or a wrapping owner-drawn
-/// parent — neither is wired yet. Same shape as `set_shadow` /
-/// `set_opacity` deferred-application pattern. Matrix marks Windows
-/// `Status::Stub` for both border setters.
+/// Stores the color in `BORDER_STATE` next to any previously-set width
+/// and (re-)installs the per-handle WM_PAINT subclass that draws the
+/// border. Both setters share the joint state because CSS-style borders
+/// require all of (color, width, style=solid) to land in the same paint
+/// — calling either setter alone produces a sensible default (black 1px
+/// for missing color, 1px for missing width) so the border is visible
+/// after a single setter call.
 pub fn set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     if let Ok(mut state) = BORDER_STATE.lock() {
         let color = (r, g, b, a);
@@ -901,9 +927,14 @@ pub fn set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
             state.push((handle, (Some(color), None)));
         }
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        ensure_border_subclass(handle);
+    }
 }
 
-/// Set border width (issue #185 Phase B closure). Stub-with-state — see
+/// Set border width (issue #185 Phase B / #210 closure). See
 /// `set_border_color`.
 pub fn set_border_width(handle: i64, width: f64) {
     if let Ok(mut state) = BORDER_STATE.lock() {
@@ -912,6 +943,11 @@ pub fn set_border_width(handle: i64, width: f64) {
         } else {
             state.push((handle, (None, Some(width))));
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        ensure_border_subclass(handle);
     }
 }
 
@@ -950,6 +986,109 @@ pub fn apply_corner_radius(handle: i64) {
             }
         }
     }
+}
+
+/// Track which handles already have the border-paint subclass installed
+/// so `ensure_border_subclass` is idempotent. Subclass id is fixed
+/// (`BORDER_SUBCLASS_ID`) — uniqueness within a single HWND is what
+/// matters, not across HWNDs.
+#[cfg(target_os = "windows")]
+thread_local! {
+    static BORDER_SUBCLASSED: RefCell<std::collections::HashSet<i64>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+#[cfg(target_os = "windows")]
+const BORDER_SUBCLASS_ID: usize = 0x70_72_72_79; // 'p','r','r','y'
+
+/// Install the border-drawing WM_PAINT subclass on `handle`'s HWND if
+/// not already installed, and force a repaint so a freshly-set border
+/// shows up immediately.
+#[cfg(target_os = "windows")]
+fn ensure_border_subclass(handle: i64) {
+    use windows::Win32::UI::Controls::SetWindowSubclass;
+    let installed = BORDER_SUBCLASSED.with(|s| s.borrow().contains(&handle));
+    if !installed {
+        if let Some(hwnd) = get_hwnd_safe(handle) {
+            unsafe {
+                let _ = SetWindowSubclass(
+                    hwnd,
+                    Some(border_subclass_proc),
+                    BORDER_SUBCLASS_ID,
+                    handle as usize,
+                );
+            }
+            BORDER_SUBCLASSED.with(|s| {
+                s.borrow_mut().insert(handle);
+            });
+        }
+    }
+    if let Some(hwnd) = get_hwnd_safe(handle) {
+        unsafe {
+            let _ = InvalidateRect(hwnd, None, true);
+        }
+    }
+}
+
+/// Subclass proc that draws the configured border on top of whatever
+/// the wrapped control painted. WM_PAINT lands here AFTER the original
+/// control has rendered (we call `DefSubclassProc` first so the BeginPaint
+/// / EndPaint pair runs as the control expects); we then `GetDC` and
+/// stamp a `Rectangle` outline.
+///
+/// Defaults match CSS: missing color → black 1.0 alpha; missing width
+/// → 1px. Either setter alone produces a visible 1px black border, the
+/// pair gives full control. Width is clamped to 1 minimum (a 0px
+/// border is no border, but if the user explicitly sets 0 they want
+/// no border — we still draw with the stored color but at 0 width
+/// which is a no-op pen).
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn border_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    refdata: usize,
+) -> LRESULT {
+    use windows::Win32::UI::Controls::DefSubclassProc;
+    use windows::Win32::Graphics::Gdi::{
+        CreatePen, GetDC, ReleaseDC, SelectObject, DeleteObject,
+        Rectangle, GetStockObject, NULL_BRUSH, PS_SOLID,
+    };
+
+    let result = DefSubclassProc(hwnd, msg, wparam, lparam);
+
+    if msg == WM_PAINT {
+        let handle = refdata as i64;
+        if let Some((color, width)) = get_border(handle) {
+            let (r, g, b, _a) = color.unwrap_or((0.0, 0.0, 0.0, 1.0));
+            let w = width.unwrap_or(1.0).round().max(0.0) as i32;
+            if w > 0 {
+                let cr = ((r * 255.0) as u32)
+                    | (((g * 255.0) as u32) << 8)
+                    | (((b * 255.0) as u32) << 16);
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                if rect.right > 0 && rect.bottom > 0 {
+                    let hdc = GetDC(hwnd);
+                    if !hdc.is_invalid() {
+                        let pen = CreatePen(PS_SOLID, w, COLORREF(cr));
+                        let null_brush = HBRUSH(GetStockObject(NULL_BRUSH).0);
+                        let old_pen = SelectObject(hdc, pen);
+                        let old_brush = SelectObject(hdc, null_brush);
+                        let _ = Rectangle(hdc, 0, 0, rect.right, rect.bottom);
+                        SelectObject(hdc, old_pen);
+                        SelectObject(hdc, old_brush);
+                        let _ = DeleteObject(pen);
+                        ReleaseDC(hwnd, hdc);
+                    }
+                }
+            }
+        }
+    }
+
+    result
 }
 
 /// Set the fixed width of a widget (in pixels).

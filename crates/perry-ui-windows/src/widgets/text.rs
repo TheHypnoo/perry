@@ -362,16 +362,16 @@ fn apply_font(handle: i64, font: HFONT) {
 static DECORATION_VALUES: std::sync::Mutex<Vec<(i64, i64)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Set text decoration on a Text widget (issue #185 Phase B closure).
+/// Set text decoration on a Text widget (issue #185 Phase B / #210
+/// closure). Values: 0=none, 1=underline, 2=strikethrough.
 ///
-/// **Stub-with-state**: stores `decoration` in `DECORATION_VALUES` but
-/// doesn't currently rebuild the HFONT with `lfUnderline` /
-/// `lfStrikeOut` set. Real rendering requires reading the current
-/// LOGFONT (via `GetObjectW`), modifying the underline/strike flags,
-/// recreating via `CreateFontIndirectW`, and re-emitting via
-/// `WM_SETFONT` — same shape as `apply_font`. Deferred to a follow-up
-/// alongside the Windows shadow / opacity / borders paint paths.
-/// Matrix marks Windows `Status::Stub` for this row.
+/// Reads the widget's current HFONT via `GetObjectW`, mutates the
+/// `lfUnderline` / `lfStrikeOut` LOGFONT flags, recreates via
+/// `CreateFontIndirectW`, and re-emits via `WM_SETFONT` — same shape as
+/// `apply_font`'s lifecycle (DeleteObject on the old HFONT before
+/// assigning the new one is handled by `apply_font` itself). The
+/// `DECORATION_VALUES` store still tracks last-set values so resize +
+/// font-change cascades can re-apply the decoration without losing it.
 pub fn set_decoration(handle: i64, decoration: i64) {
     if let Ok(mut decorations) = DECORATION_VALUES.lock() {
         if let Some(slot) = decorations.iter_mut().find(|e| e.0 == handle) {
@@ -379,6 +379,54 @@ pub fn set_decoration(handle: i64, decoration: i64) {
         } else {
             decorations.push((handle, decoration));
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        apply_decoration(handle, decoration);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = decoration;
+    }
+}
+
+/// Read the current LOGFONT, set underline/strikeout per `decoration`,
+/// recreate the HFONT, and re-emit via `apply_font`. Falls back to a
+/// fresh "Segoe UI" 14/400 font if no HFONT exists yet (so calling
+/// `set_decoration` before any other font setter still works).
+#[cfg(target_os = "windows")]
+fn apply_decoration(handle: i64, decoration: i64) {
+    let existing = TEXT_STYLES.with(|styles| {
+        let styles = styles.borrow();
+        styles.get(&handle).map(|s| s.font).filter(|f| !f.is_invalid())
+    });
+
+    let mut lf = LOGFONTW::default();
+    if let Some(font) = existing {
+        unsafe {
+            GetObjectW(
+                font,
+                std::mem::size_of::<LOGFONTW>() as i32,
+                Some(&mut lf as *mut _ as *mut _),
+            );
+        }
+    } else {
+        // No font set yet — start from a Segoe UI 14/400 baseline.
+        let scaled = (14.0 * crate::app::get_dpi_scale()) as i32;
+        lf.lfHeight = -scaled;
+        lf.lfWeight = 400;
+        let family = to_wide("Segoe UI");
+        let n = family.len().min(lf.lfFaceName.len());
+        lf.lfFaceName[..n].copy_from_slice(&family[..n]);
+    }
+
+    lf.lfUnderline = if decoration == 1 { 1 } else { 0 };
+    lf.lfStrikeOut = if decoration == 2 { 1 } else { 0 };
+
+    let new_font = unsafe { CreateFontIndirectW(&lf) };
+    if !new_font.is_invalid() {
+        apply_font(handle, new_font);
     }
 }
 

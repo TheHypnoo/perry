@@ -180,10 +180,11 @@ pub const MATRIX: &[MatrixRow] = &[
         // Apple + Android wired since baseline. GTK4 wired via per-handle
         // CSS class with joint (color, width) state (v0.5.298). Web wired
         // via new `perry_ui_widget_set_border_color` JS function with
-        // module-level Map cache (v0.5.298). Windows is stub-with-state —
-        // params stored in `BORDER_STATE`, paint pass deferred (same shape
-        // as v0.5.297 shadow + v0.5.298 opacity stubs).
-        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Stub, Wired],
+        // module-level Map cache (v0.5.298). Windows wired (#210) via
+        // a one-time `SetWindowSubclass` per HWND that draws a `Rectangle`
+        // outline in the WM_PAINT subclass proc using the joint
+        // `BORDER_STATE` color + width.
+        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired],
     },
     MatrixRow {
         widget: "*", prop: "border_width",
@@ -191,7 +192,7 @@ pub const MATRIX: &[MatrixRow] = &[
         // Symmetric with `border_color` — both setters share the joint
         // state on each backend so calling either one alone produces a
         // visible border with sensible defaults (black / 1px).
-        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Stub, Wired],
+        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired],
     },
     MatrixRow {
         widget: "*", prop: "corner_radius",
@@ -207,12 +208,12 @@ pub const MATRIX: &[MatrixRow] = &[
         widget: "*", prop: "opacity",
         ffi: "perry_ui_widget_set_opacity",
         // Apple platforms + Android wired since the audit baseline.
-        // GTK4 wired via `Widget::set_opacity` (v0.5.298). Windows is
-        // stub-with-state — parameters stored in `OPACITY_VALUES`, paint
-        // pass deferred (same shape as the v0.5.297 shadow closure).
-        // Web aliased to the existing `perry_ui_set_opacity` JS function
-        // via the WASM emitter dispatch table — no new JS code needed.
-        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Stub, Wired],
+        // GTK4 wired via `Widget::set_opacity` (v0.5.298). Windows wired
+        // (#210) via `WS_EX_LAYERED` extended style + per-child
+        // `SetLayeredWindowAttributes(LWA_ALPHA)`. Web aliased to the
+        // existing `perry_ui_set_opacity` JS function via the WASM
+        // emitter dispatch table — no new JS code needed.
+        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired],
     },
     MatrixRow {
         widget: "*", prop: "tooltip",
@@ -436,9 +437,11 @@ pub const MATRIX: &[MatrixRow] = &[
         // Android via `View.getPaint().setFlags(UNDERLINE_TEXT_FLAG |
         // STRIKE_THRU_TEXT_FLAG)`; GTK4 via Pango `AttrInt::new_underline`
         // and `new_strikethrough`; Web via CSS `text-decoration`.
-        // Windows is `Stub` — params stored, HFONT recreate deferred
-        // (would need GetObjectW + LOGFONT mod + CreateFontIndirectW).
-        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Stub, Wired],
+        // Windows wired (#210) via GetObjectW reading the current LOGFONT,
+        // mutating `lfUnderline` / `lfStrikeOut`, recreating via
+        // CreateFontIndirectW, and re-emitting through the existing
+        // `apply_font` lifecycle (handles old-HFONT DeleteObject).
+        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired],
     },
 ];
 

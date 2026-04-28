@@ -10,11 +10,11 @@ Legend: `✓` Wired (real native impl), `~` Stub (symbol exists, no-op), `✗` M
 |---|---|---|---|---|---|---|---|---|---|---|
 | `background_color` | `perry_ui_widget_set_background_color` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `background_gradient` | `perry_ui_widget_set_background_gradient` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `border_color` | `perry_ui_widget_set_border_color` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ~ | ✓ |
-| `border_width` | `perry_ui_widget_set_border_width` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ~ | ✓ |
+| `border_color` | `perry_ui_widget_set_border_color` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `border_width` | `perry_ui_widget_set_border_width` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `corner_radius` | `perry_ui_widget_set_corner_radius` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `edge_insets` | `perry_ui_widget_set_edge_insets` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `opacity` | `perry_ui_widget_set_opacity` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ~ | ✓ |
+| `opacity` | `perry_ui_widget_set_opacity` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `tooltip` | `perry_ui_widget_set_tooltip` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hidden` | `perry_ui_set_widget_hidden` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `enabled` | `perry_ui_widget_set_enabled` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -66,7 +66,7 @@ Legend: `✓` Wired (real native impl), `~` Stub (symbol exists, no-op), `✗` M
 | `font_family` | `perry_ui_text_set_font_family` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `selectable` | `perry_ui_text_set_selectable` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `wraps` | `perry_ui_text_set_wraps` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `decoration` | `perry_ui_text_set_decoration` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ~ | ✓ |
+| `decoration` | `perry_ui_text_set_decoration` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ## `textfield` widget
 
@@ -88,6 +88,6 @@ Legend: `✓` Wired (real native impl), `~` Stub (symbol exists, no-op), `✗` M
 | watchOS | 43 | 0 | 0 | 0 |
 | Android | 43 | 0 | 0 | 0 |
 | GTK4 | 43 | 0 | 0 | 0 |
-| Windows | 38 | 5 | 0 | 0 |
+| Windows | 42 | 1 | 0 | 0 |
 | Web | 43 | 0 | 0 | 0 |
 
