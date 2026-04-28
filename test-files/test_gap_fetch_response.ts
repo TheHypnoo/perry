@@ -90,6 +90,12 @@ async function main(): Promise<void> {
   console.log("clone text: " + await r5clone.text());
 
   // --- Response.arrayBuffer() ---
+  // Byte-level assertions covering issue #227's actual repro shape live in
+  // `test_issue_227_array_buffer_bytes.ts` (Uint8Array / Buffer.from access)
+  // — that test is `ci-env`-gated because the macOS-14 CI runner SDK gap
+  // compile-fails any test exercising the Buffer codepath. This case here
+  // stays scoped to `byteLength` so the fetch-response gap test stays green
+  // on every platform.
   const r6 = new Response("hello");
   const ab = await r6.arrayBuffer();
   console.log("arrayBuffer byteLength: " + ab.byteLength);
