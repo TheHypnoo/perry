@@ -52,19 +52,35 @@ pub fn set_string(handle: i64, text_ptr: *const u8) {
     set_text_str(handle, text);
 }
 
-/// Set the text color of a UILabel (RGBA 0.0-1.0).
+/// Set the text color (RGBA 0.0-1.0). Routes by widget kind:
+/// - UIButton    → `super::button::set_text_color`
+/// - UILabel     → `setTextColor:`
+/// - other       → silent no-op (matches the codegen's documented intent)
 pub fn set_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
-    if let Some(view) = super::get_widget(handle) {
-        unsafe {
-            let color: Retained<objc2::runtime::AnyObject> = msg_send![
-                objc2::runtime::AnyClass::get(c"UIColor").unwrap(),
-                colorWithRed: r as objc2_core_foundation::CGFloat,
-                green: g as objc2_core_foundation::CGFloat,
-                blue: b as objc2_core_foundation::CGFloat,
-                alpha: a as objc2_core_foundation::CGFloat
-            ];
-            let _: () = msg_send![&*view, setTextColor: &*color];
+    let Some(view) = super::get_widget(handle) else { return; };
+    unsafe {
+        if let Some(btn_cls) = AnyClass::get(c"UIButton") {
+            let is_btn: bool = msg_send![&*view, isKindOfClass: btn_cls];
+            if is_btn {
+                drop(view);
+                super::button::set_text_color(handle, r, g, b, a);
+                return;
+            }
         }
+        if let Some(lbl_cls) = AnyClass::get(c"UILabel") {
+            let is_lbl: bool = msg_send![&*view, isKindOfClass: lbl_cls];
+            if !is_lbl {
+                return;
+            }
+        }
+        let color: Retained<objc2::runtime::AnyObject> = msg_send![
+            AnyClass::get(c"UIColor").unwrap(),
+            colorWithRed: r as objc2_core_foundation::CGFloat,
+            green: g as objc2_core_foundation::CGFloat,
+            blue: b as objc2_core_foundation::CGFloat,
+            alpha: a as objc2_core_foundation::CGFloat
+        ];
+        let _: () = msg_send![&*view, setTextColor: &*color];
     }
 }
 
